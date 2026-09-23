@@ -34,7 +34,9 @@ export const ENTIDADE_ESPERADA_POR_GATILHO = {
   "lead.stage_changed": "crm_lead",
   "message.received": "message",
   "lead.tag_added": "crm_lead",
+  "lead.tag_removed": "crm_lead",
   "contact.tag_added": "contact",
+  "contact.tag_removed": "contact",
   // O aniversário nasce do cron `contact-birthdays`, e não de uma ação de
   // alguém: a entidade que ele traz é o próprio contato que faz aniversário.
   "contact.birthday": "contact",

@@ -48,6 +48,7 @@ import {
   type AvisoRecuperacaoEsgotada,
 } from "./no-show-recuperacao-esgotada";
 import { interpolarDestino, persistirRespostaFollowupSupabase, aplicarTagsFollowupSupabase, moverEtapaFollowupSupabase } from "./persistir-resposta";
+import { sinalizarPresenca } from "@/lib/messaging/presenca";
 
 const MAX_STEPS = 80;
 const CLAIM_LEASE_SECONDS = 120;
@@ -96,6 +97,7 @@ export interface FollowupJobRequest {
     waits?: EsperaAdaptativa[];
     /** Mídia anexada para nós de mensagem (message_image, message_video, message_audio) */
     media_url?: string;
+    media_storage_path?: string;
     media_type?: "image" | "video" | "audio";
   };
 }
@@ -157,6 +159,12 @@ export interface AdminClient {
     organization_id: string;
     contact_id: string;
     stage_id: string;
+  }): Promise<void>;
+  signalPresence?(input: {
+    organization_id: string;
+    contact_id: string;
+    conversation_id?: string | null;
+    presence: "typing" | "paused";
   }): Promise<void>;
 }
 
@@ -275,6 +283,7 @@ function turnPayloadExtras(
   if (node.type === "message_image") {
     return {
       ...(node.config.caption ? { fixed_body: interpolarVolta(node.config.caption, events) } : {}),
+      media_storage_path: node.config.media_storage_path,
       media_url: node.config.media_url,
       media_type: "image",
     };
@@ -282,12 +291,14 @@ function turnPayloadExtras(
   if (node.type === "message_video") {
     return {
       ...(node.config.caption ? { fixed_body: interpolarVolta(node.config.caption, events) } : {}),
+      media_storage_path: node.config.media_storage_path,
       media_url: node.config.media_url,
       media_type: "video",
     };
   }
   if (node.type === "message_audio") {
     return {
+      media_storage_path: node.config.media_storage_path,
       media_url: node.config.media_url,
       media_type: "audio",
     };
@@ -326,6 +337,17 @@ async function markDead(
     body: `O fluxo "${flowName}" (enrollment ${enrollment.id}) foi marcado como "dead": ${sanitized}`,
     ref_id: enrollment.id,
   });
+
+  if (db.signalPresence) {
+    try {
+      await db.signalPresence({
+        organization_id: enrollment.organization_id,
+        contact_id: enrollment.contact_id,
+        conversation_id: enrollment.conversation_id,
+        presence: "paused",
+      });
+    } catch {}
+  }
 
   await db.updateEnrollment(enrollment.id, enrollment.organization_id, {
     ...(attempts !== undefined ? { attempts } : {}),
@@ -387,17 +409,121 @@ async function applyResult(
   await db.assertServiceBoundary?.(enrollment);
 
   if (result.kind === "fail") {
+    if (node.type === "typing" && db.signalPresence) {
+      try {
+        await db.signalPresence({
+          organization_id: enrollment.organization_id,
+          contact_id: enrollment.contact_id,
+          conversation_id: enrollment.conversation_id,
+          presence: "paused",
+        });
+      } catch {}
+    }
     await applyHandlerFailure(deps, enrollment, result.error, summary);
     return;
   }
 
   if (result.kind === "dead") {
+    if (node.type === "typing" && db.signalPresence) {
+      try {
+        await db.signalPresence({
+          organization_id: enrollment.organization_id,
+          contact_id: enrollment.contact_id,
+          conversation_id: enrollment.conversation_id,
+          presence: "paused",
+        });
+      } catch {}
+    }
     // Action dead-man: turn never completed after MAX_ACTION_RECHECKS. Reuse the shared
     // markDead path (status='dead' + agent_inbox_items kind 'followup_dead') — same as
     // max_steps/exhausted-backoff — so the operator sees exactly one dead-letter notice.
     await markDead(db, clock, enrollment, result.reason);
     summary.dead++;
     return;
+  }
+
+  if (result.kind === "advance") {
+    if (node.type === "tag" && db.updateLeadTags) {
+      try {
+        await db.assertServiceBoundary?.(enrollment);
+        await db.updateLeadTags({
+          organization_id: enrollment.organization_id,
+          contact_id: enrollment.contact_id,
+          action: node.config.action,
+          tags: node.config.tags,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        await applyHandlerFailure(deps, enrollment, `tag: ${msg}`, summary);
+        return;
+      }
+    }
+    if (node.type === "stage_move" && db.updateLeadStage) {
+      try {
+        await db.assertServiceBoundary?.(enrollment);
+        await db.updateLeadStage({
+          organization_id: enrollment.organization_id,
+          contact_id: enrollment.contact_id,
+          stage_id: node.config.stage_id,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        await applyHandlerFailure(deps, enrollment, `stage_move: ${msg}`, summary);
+        return;
+      }
+    }
+  }
+
+  if (node.type === "typing" && result.kind === "wait" && db.signalPresence) {
+    const typingKey = `${node.id}:${enrollment.steps_taken}:typing_started`;
+    const { inserted } = await db.insertEnrollmentEvent({
+      organization_id: enrollment.organization_id,
+      enrollment_id: enrollment.id,
+      node_id: node.id,
+      event_type: "typing_started",
+      payload: { duration_seconds: node.config.duration_seconds },
+      idempotency_key: typingKey,
+    });
+    if (inserted) {
+      try {
+        await db.signalPresence({
+          organization_id: enrollment.organization_id,
+          contact_id: enrollment.contact_id,
+          conversation_id: enrollment.conversation_id,
+          presence: "typing",
+        });
+      } catch (err) {
+        logger.warn("followup: signalPresence typing failed", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+
+  if (node.type === "typing" && result.kind === "advance" && db.signalPresence) {
+    const stoppedKey = `${node.id}:${enrollment.steps_taken}:typing_stopped`;
+    const { inserted } = await db.insertEnrollmentEvent({
+      organization_id: enrollment.organization_id,
+      enrollment_id: enrollment.id,
+      node_id: node.id,
+      event_type: "typing_stopped",
+      payload: {},
+      idempotency_key: stoppedKey,
+    });
+    if (inserted) {
+      try {
+        await db.signalPresence({
+          organization_id: enrollment.organization_id,
+          contact_id: enrollment.contact_id,
+          conversation_id: enrollment.conversation_id,
+          presence: "paused",
+        });
+      } catch (err) {
+        logger.warn("followup: signalPresence paused failed", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
   }
 
   const idemKey = `${node.id}:${enrollment.steps_taken}`;
@@ -532,38 +658,6 @@ async function applyResult(
       logger.warn("followup: gravar resposta falhou; o fluxo já avançou", {
         error: err instanceof Error ? err.message : String(err),
       });
-    }
-  }
-
-  if (result.kind === "advance" && !isReplay) {
-    if (node.type === "tag" && db.updateLeadTags) {
-      try {
-        await db.assertServiceBoundary?.(enrollment);
-        await db.updateLeadTags({
-          organization_id: enrollment.organization_id,
-          contact_id: enrollment.contact_id,
-          action: node.config.action,
-          tags: node.config.tags,
-        });
-      } catch (err) {
-        logger.warn("followup: aplicar tags falhou; o fluxo já avançou", {
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-    if (node.type === "stage_move" && db.updateLeadStage) {
-      try {
-        await db.assertServiceBoundary?.(enrollment);
-        await db.updateLeadStage({
-          organization_id: enrollment.organization_id,
-          contact_id: enrollment.contact_id,
-          stage_id: node.config.stage_id,
-        });
-      } catch (err) {
-        logger.warn("followup: mover etapa falhou; o fluxo já avançou", {
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
     }
   }
 
@@ -1071,6 +1165,26 @@ export function createSupabaseAdminClient(admin: SupabaseClient): AdminClient {
     },
     async updateLeadStage(input) {
       await moverEtapaFollowupSupabase(admin, input);
+    },
+    async signalPresence(input) {
+      let conversationId = input.conversation_id;
+      if (!conversationId) {
+        const { data: conv } = await admin
+          .from("conversations")
+          .select("id")
+          .eq("organization_id", input.organization_id)
+          .eq("contact_id", input.contact_id)
+          .order("updated_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        conversationId = conv?.id ?? null;
+      }
+      if (!conversationId) return;
+      await sinalizarPresenca(admin, {
+        organizationId: input.organization_id,
+        conversationId,
+        presence: input.presence,
+      });
     },
   };
 }

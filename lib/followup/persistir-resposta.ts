@@ -1,4 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { mutateEntityTags } from "@/lib/tags/mutate-tags";
+import { moveLeadHandler } from "@/app/api/v1/leads/_handler";
+import type { HandlerCtx } from "@/lib/api/handlers/types";
 
 import type { ReplySaveTo } from "./graph-schema";
 import { latestRepeatIndex, type EnrollmentEventRef } from "./node-handlers";
@@ -107,37 +110,26 @@ export async function aplicarTagsFollowupSupabase(
     contact_id: string;
     action: "add" | "remove";
     tags: string[];
+    enrollment_id?: string;
+    node_id?: string;
   },
 ): Promise<void> {
-  const { data: lead, error: selErr } = await admin
-    .from("crm_leads")
-    .select("id, tags")
-    .eq("organization_id", input.organization_id)
-    .eq("contact_id", input.contact_id)
-    .order("updated_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  if (selErr) throw new Error(selErr.message);
-  if (!lead) return;
+  const requestId = input.enrollment_id
+    ? `flow:${input.enrollment_id}:${input.node_id ?? "tag"}`
+    : `flow:${input.contact_id}:tag`;
 
-  const currentTags: string[] = Array.isArray(lead.tags) ? (lead.tags as string[]) : [];
-  let newTags: string[];
-  if (input.action === "add") {
-    newTags = Array.from(new Set([...currentTags, ...input.tags]));
-  } else {
-    const toRemove = new Set(input.tags);
-    newTags = currentTags.filter((t) => !toRemove.has(t));
+  const res = await mutateEntityTags(admin, {
+    organizationId: input.organization_id,
+    contactId: input.contact_id,
+    action: input.action,
+    tags: input.tags,
+    causedByEnrollment: input.enrollment_id,
+    requestId,
+  });
+
+  if (!res) {
+    throw new Error(`tag_target_not_found: contato ${input.contact_id} não encontrado para aplicar tags`);
   }
-
-  const { error } = await admin
-    .from("crm_leads")
-    .update({
-      tags: newTags,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("organization_id", input.organization_id)
-    .eq("id", lead.id);
-  if (error) throw new Error(error.message);
 }
 
 export async function moverEtapaFollowupSupabase(
@@ -146,28 +138,47 @@ export async function moverEtapaFollowupSupabase(
     organization_id: string;
     contact_id: string;
     stage_id: string;
+    enrollment_id?: string;
+    node_id?: string;
   },
 ): Promise<void> {
   const { data: lead, error: selErr } = await admin
     .from("crm_leads")
-    .select("id")
+    .select("id, pipeline_id, stage_id")
     .eq("organization_id", input.organization_id)
     .eq("contact_id", input.contact_id)
     .order("updated_at", { ascending: false })
     .limit(1)
     .maybeSingle();
-  if (selErr) throw new Error(selErr.message);
-  if (!lead) return;
 
-  const { error } = await admin
-    .from("crm_leads")
-    .update({
-      stage_id: input.stage_id,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("organization_id", input.organization_id)
-    .eq("id", lead.id);
-  if (error) throw new Error(error.message);
+  if (selErr) throw new Error(`moverEtapaFollowupSupabase select lead failed: ${selErr.message}`);
+  if (!lead) {
+    throw new Error(`lead_not_found_for_contact: contato ${input.contact_id} não possui lead ativo para mover etapa`);
+  }
+
+  const requestId = input.enrollment_id
+    ? `flow:${input.enrollment_id}:${input.node_id ?? input.stage_id}`
+    : `flow:${input.contact_id}:${input.stage_id}`;
+
+  const handlerCtx: HandlerCtx = {
+    organization_id: input.organization_id,
+    actor: {
+      type: "webhook_source",
+      id: input.enrollment_id ? `flow:${input.enrollment_id}` : "flow-engine",
+    },
+    requestId,
+    serviceOrigin: {
+      kind: "event",
+      event_id: requestId,
+      organization_id: input.organization_id,
+      contact_id: input.contact_id,
+    },
+  };
+
+  await moveLeadHandler(admin, handlerCtx, lead.id, {
+    to_stage_id: input.stage_id,
+    reason: "Movido automaticamente pelo fluxo de acompanhamento",
+  });
 }
 
 export async function aplicarTagsFollowupPg(

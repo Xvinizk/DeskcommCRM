@@ -26,6 +26,9 @@ export interface ChannelSendInput {
   /** referência da conversa no canal (conversation_id do CRM na v1) */
   conversationId: string;
   body: string;
+  type?: string;
+  media_url?: string;
+  media_storage_path?: string;
   /**
    * Presente = este envio é um TEMPLATE aprovado, não texto livre.
    *

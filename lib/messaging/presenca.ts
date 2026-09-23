@@ -61,9 +61,17 @@ export interface SinalizarDigitandoInput {
    */
   organizationId: string;
   conversationId: string;
+  presence?: "typing" | "paused";
 }
 
 export async function sinalizarDigitando(
+  supabase: SupabaseClient,
+  input: SinalizarDigitandoInput,
+): Promise<void> {
+  await sinalizarPresenca(supabase, input);
+}
+
+export async function sinalizarPresenca(
   supabase: SupabaseClient,
   input: SinalizarDigitandoInput,
 ): Promise<void> {
@@ -103,5 +111,6 @@ export async function sinalizarDigitando(
     organizationId: input.organizationId,
     sessionRef: resolveSessionRef(sessao),
     recipient,
+    presence: input.presence ?? "typing",
   });
 }

@@ -48,6 +48,20 @@ import { sendTemplateForSession } from "@/lib/channels/meta/send-template-for-se
 import { nomeDoContato } from "@/lib/contacts/rotulo-do-contato";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Message } from "@/lib/types/messaging";
+import { assertSafeOutboundUrl } from "@/lib/automation/outbound-url";
+
+export function defaultMimeForType(type?: string): string {
+  switch (type) {
+    case "image":
+      return "image/jpeg";
+    case "video":
+      return "video/mp4";
+    case "audio":
+      return "audio/ogg; codecs=opus";
+    default:
+      return "application/octet-stream";
+  }
+}
 
 type SB = SupabaseClient;
 
@@ -614,7 +628,9 @@ export async function sendMessageHandler(
     status: "queued",
     body: input.body ?? null,
     media_url: input.media_url ?? null,
-    media_mime: input.media_mime ?? null,
+    media_mime:
+      input.media_mime ??
+      (input.media_storage_path || input.media_url ? defaultMimeForType(input.type) : null),
     media_storage_path: input.media_storage_path ?? null,
     media_size_bytes: input.media_size_bytes ?? null,
     sent_via: origemDaMensagem(ctx.actor),
@@ -844,12 +860,32 @@ export async function sendMessageHandler(
           kind: input.type,
           media: {
             url: signed.signedUrl,
-            mime: input.media_mime ?? "application/octet-stream",
+            mime: input.media_mime ?? defaultMimeForType(input.type),
             filename,
             caption: input.body ?? null,
           },
           // O id que a PLATAFORMA conhece, lido da linha citada agora — não uma
           // cópia guardada no envio, que poderia divergir da linha.
+          replyToExternalId: citada?.external_id ?? null,
+        }));
+      } else if (input.media_url) {
+        // Fallback: media_url externa com validação de segurança anti-SSRF existente.
+        assertSafeOutboundUrl(input.media_url);
+        const filename = input.media_url.split("/").pop()?.split("?")[0] ?? undefined;
+        await checkBoundary();
+        ({ externalId } = await adapter.send({
+          beforeSend: checkBoundary,
+          organizationId: ctx.organization_id,
+          sessionRef: resolveSessionRef(c.channel_sessions),
+          to: chatId,
+          providerConversationId: c.provider_conversation_id,
+          kind: input.type,
+          media: {
+            url: input.media_url,
+            mime: input.media_mime ?? defaultMimeForType(input.type),
+            filename,
+            caption: input.body ?? null,
+          },
           replyToExternalId: citada?.external_id ?? null,
         }));
       } else if (input.type === "contact") {

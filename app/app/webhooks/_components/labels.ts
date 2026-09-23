@@ -19,7 +19,9 @@ export const TRIGGER_LABELS: Record<TriggerEvent, string> = {
   "lead.stage_changed": "Quando um lead mudar de etapa",
   "message.received": "Quando chegar mensagem no WhatsApp",
   "lead.tag_added": "Quando um lead ganhar uma tag",
+  "lead.tag_removed": "Quando um lead perder uma tag",
   "contact.tag_added": "Quando um contato ganhar uma tag",
+  "contact.tag_removed": "Quando um contato perder uma tag",
   // A frase evita "agendamento criado", que não diz ao operador o que ele vê na
   // agenda: um horário marcado pode nascer pendente (o tipo pede confirmação) ou
   // já confirmado, e os dois caem aqui.

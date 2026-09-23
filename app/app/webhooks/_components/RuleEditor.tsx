@@ -104,6 +104,12 @@ const TAG_ADDED_FIELD: CuratedField = {
   op: "contains",
   lista: true,
 };
+const TAG_REMOVED_FIELD: CuratedField = {
+  value: "event.removed_tags",
+  label: "Tag removida",
+  op: "contains",
+  lista: true,
+};
 
 /**
  * O tipo vem do PAYLOAD, não da linha do compromisso, e é de propósito: a linha
@@ -124,7 +130,9 @@ const CURATED_FIELDS: Record<TriggerEvent, CuratedField[]> = {
   "lead.stage_changed": [...LEAD_FIELDS, STAGE_FIELD],
   "message.received": MESSAGE_FIELDS,
   "lead.tag_added": [...LEAD_FIELDS, TAG_ADDED_FIELD],
+  "lead.tag_removed": [...LEAD_FIELDS, TAG_REMOVED_FIELD],
   "contact.tag_added": [TAG_ADDED_FIELD],
+  "contact.tag_removed": [TAG_REMOVED_FIELD],
   "appointment.created": AGENDAMENTO_FIELDS,
   "appointment.confirmed": AGENDAMENTO_FIELDS,
   "appointment.rescheduled": AGENDAMENTO_FIELDS,

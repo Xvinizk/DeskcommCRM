@@ -316,19 +316,34 @@ export const messageTextConfigSchema = z.strictObject({
   body: z.string().min(1).max(4000),
 });
 
-export const messageImageConfigSchema = z.strictObject({
-  media_url: z.string().url().max(2000),
-  caption: z.string().max(1000).optional(),
-});
+export const messageImageConfigSchema = z
+  .strictObject({
+    media_url: z.string().url().max(2000).optional(),
+    media_storage_path: z.string().min(1).max(500).optional(),
+    caption: z.string().max(1000).optional(),
+  })
+  .refine((d) => Boolean(d.media_storage_path || d.media_url), {
+    message: "media_storage_path or media_url is required",
+  });
 
-export const messageVideoConfigSchema = z.strictObject({
-  media_url: z.string().url().max(2000),
-  caption: z.string().max(1000).optional(),
-});
+export const messageVideoConfigSchema = z
+  .strictObject({
+    media_url: z.string().url().max(2000).optional(),
+    media_storage_path: z.string().min(1).max(500).optional(),
+    caption: z.string().max(1000).optional(),
+  })
+  .refine((d) => Boolean(d.media_storage_path || d.media_url), {
+    message: "media_storage_path or media_url is required",
+  });
 
-export const messageAudioConfigSchema = z.strictObject({
-  media_url: z.string().url().max(2000),
-});
+export const messageAudioConfigSchema = z
+  .strictObject({
+    media_url: z.string().url().max(2000).optional(),
+    media_storage_path: z.string().min(1).max(500).optional(),
+  })
+  .refine((d) => Boolean(d.media_storage_path || d.media_url), {
+    message: "media_storage_path or media_url is required",
+  });
 
 export const typingConfigSchema = z.strictObject({
   duration_seconds: z.number().int().min(1).max(60).default(3),

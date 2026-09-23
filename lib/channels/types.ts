@@ -285,6 +285,7 @@ export interface ChannelAdapter {
   signalTyping?(input: ChannelTenantScope & {
     sessionRef: string;
     recipient: string;
+    presence?: "typing" | "paused";
   }): Promise<void>;
 
   /**

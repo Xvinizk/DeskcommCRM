@@ -88,6 +88,9 @@ export const followupTurnPayloadSchema = z
     volta_total: z.number().int().optional(),
     classes: z.array(z.string()).optional(),
     hint: z.string().optional(),
+    media_url: z.string().optional(),
+    media_storage_path: z.string().optional(),
+    media_type: z.enum(['image', 'video', 'audio']).optional(),
     // purpose 'plan_timing': as esperas adaptativas do fluxo inteiro, na ordem.
     waits: z
       .array(
@@ -342,6 +345,9 @@ export function createFollowupTurnHandler(deps: FollowupTurnDeps) {
         classes: payload.classes,
         hint: payload.hint,
         waits: payload.waits,
+        mediaUrl: payload.media_url,
+        mediaStoragePath: payload.media_storage_path,
+        mediaType: payload.media_type,
       });
       return;
     }
@@ -419,6 +425,9 @@ async function runFlowDrivenTurn(
     classes: string[] | undefined;
     hint: string | undefined;
     waits: EsperaParaPlanejar[] | undefined;
+    mediaUrl?: string | undefined;
+    mediaStoragePath?: string | undefined;
+    mediaType?: 'image' | 'video' | 'audio' | undefined;
   },
 ): Promise<void> {
   if (input.nodeId === undefined || input.purpose === undefined) {
@@ -437,7 +446,11 @@ async function runFlowDrivenTurn(
     const body = await resolveFlowSendBody(pool, target.tenantId, input);
     if (body !== null) {
       // Texto do operador: sem camada semântica (ver o cabeçalho de sendFixedOutbound).
-      const desfecho = await sendFixedOutbound(deps, job, pool, ctx, clock, target, body, false);
+      const desfecho = await sendFixedOutbound(deps, job, pool, ctx, clock, target, body, false, {
+        mediaUrl: input.mediaUrl,
+        mediaStoragePath: input.mediaStoragePath,
+        mediaType: input.mediaType,
+      });
       // TODO OS TRÊS DESFECHOS VOLTAM PARA O ENROLLMENT. O adiado era o que não
       // voltava, e o silêncio dele custava o enrollment inteiro: o motor ficava
       // rechecando um turno que ninguém ia fechar e, esgotado o orçamento do
@@ -576,10 +589,15 @@ async function resolveFlowSendBody(
     templateId: string | undefined;
     voltaIndex: number | undefined;
     voltaTotal: number | undefined;
+    mediaUrl?: string | undefined;
+    mediaStoragePath?: string | undefined;
   },
 ): Promise<string | null> {
   if (input.fixedBody !== undefined) {
     return interpolarVoltaDoPayload(input.fixedBody, input.voltaIndex, input.voltaTotal);
+  }
+  if (input.mediaUrl !== undefined || input.mediaStoragePath !== undefined) {
+    return '';
   }
   if (input.templateId === undefined) return null;
   const { rows } = await pool.query<{ body: string }>(
@@ -630,6 +648,11 @@ async function sendFixedOutbound(
   body: string,
   /** `true` só na re-entrada por template — ver o cabeçalho. */
   comCamadaSemantica: boolean,
+  mediaOptions?: {
+    mediaUrl?: string;
+    mediaStoragePath?: string;
+    mediaType?: 'image' | 'video' | 'audio';
+  },
 ): Promise<EnvioFixoDesfecho> {
   const { tenantId, leadId, channelSessionId, conversationId } = target;
   const runLog = withFields(deps.log, { job_id: job.id, tenant_id: tenantId, lead_id: leadId });
@@ -687,7 +710,19 @@ async function sendFixedOutbound(
             ),
         }
       : {}),
-    send: (finalBody) => channel.send({ tenantId, leadId, jobId: job.id, jobClaim:claimOfJob(job), seq: 1, conversationId, body: finalBody }),
+    send: (finalBody) =>
+      channel.send({
+        tenantId,
+        leadId,
+        jobId: job.id,
+        jobClaim: claimOfJob(job),
+        seq: 1,
+        conversationId,
+        body: finalBody,
+        ...(mediaOptions?.mediaType ? { type: mediaOptions.mediaType } : {}),
+        ...(mediaOptions?.mediaUrl ? { media_url: mediaOptions.mediaUrl } : {}),
+        ...(mediaOptions?.mediaStoragePath ? { media_storage_path: mediaOptions.mediaStoragePath } : {}),
+      }),
   });
 
   if (chain.status === 'vetoed') {
