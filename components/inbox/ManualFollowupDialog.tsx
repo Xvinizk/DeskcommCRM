@@ -84,8 +84,7 @@ export function ManualFollowupDialog({
       await apiClient.post("/api/v1/ai/followups/enrollments", {
         pointer_id: selectedFlowId,
         contact_id: contactId,
-        conversationId,
-        conversation_id: conversationId,
+        conversation_id: conversationId || undefined,
         replace_active: replaceActive,
       });
 
