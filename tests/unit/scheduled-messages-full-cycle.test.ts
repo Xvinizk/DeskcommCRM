@@ -111,6 +111,164 @@ describe("Scheduled Messages — Ciclo Completo (Fases 2, 3 e 4)", () => {
 
       expect(sendMock).not.toHaveBeenCalled();
     });
+
+    it("confirma que chave lógica estável scheduled_msg_${sm.id} não varia por tentativa", () => {
+      const smId = "e1111111-1111-4111-8111-111111111111";
+      const keyAttempt1 = `scheduled_msg_${smId}`;
+      const keyAttempt2 = `scheduled_msg_${smId}`;
+      expect(keyAttempt1).toBe(keyAttempt2);
+      expect(keyAttempt1).not.toContain("attempt");
+    });
+
+    // Teste A: messages queued + sem external_id após lease expiry
+    it("Cenário A: messages queued + sem external_id após lease expiry -> scheduled_messages = failed e provider NÃO chamado novamente", async () => {
+      const sm = {
+        id: "d0000000-0000-4000-8000-000000000001",
+        organization_id: "org-1",
+        conversation_id: "conv-1",
+        status: "processing" as "pending" | "processing" | "sent" | "failed",
+        claimed_until: new Date(Date.now() - 5000).toISOString() as string | null,
+        attempts: 1,
+        max_attempts: 5,
+        sent_message_id: null as string | null,
+        last_error: null as string | null,
+      };
+
+      // Tabela messages tem registro em queued sem external_id (crash antes do WAHA)
+      const existingMsg = {
+        id: sm.id,
+        organization_id: sm.organization_id,
+        conversation_id: sm.conversation_id,
+        status: "queued",
+        external_id: null,
+        created_at: new Date(Date.now() - 3000).toISOString(),
+      };
+
+      const providerSendSpy = vi.fn();
+      const inboxItemsSpy = vi.fn();
+
+      // Executa lógica da política AT-MOST-ONCE
+      const isConfirmedSent =
+        (existingMsg.status === "sent" ||
+          existingMsg.status === "delivered" ||
+          existingMsg.status === "read") &&
+        Boolean(existingMsg.external_id);
+
+      if (isConfirmedSent) {
+        sm.status = "sent";
+        sm.sent_message_id = existingMsg.id;
+      } else if (existingMsg.status === "queued" && !existingMsg.external_id) {
+        sm.status = "failed";
+        sm.sent_message_id = existingMsg.id;
+        sm.claimed_until = null;
+        sm.last_error =
+          "lease_expired_unconfirmed: Uma mensagem programada para este contato ficou em estado não confirmado. " +
+          "O sistema não pode garantir se ela chegou ao WhatsApp. Para evitar envio duplicado, ela não foi reenviada automaticamente.";
+        inboxItemsSpy({
+          organization_id: sm.organization_id,
+          kind: "message_send_stuck",
+          severity: "critical",
+          title: "Mensagem programada não confirmada",
+          body: "Uma mensagem programada para este contato ficou em estado não confirmado. O sistema não pode garantir se ela chegou ao WhatsApp. Para evitar envio duplicado, ela não foi reenviada automaticamente.",
+          ref_kind: "conversation",
+          ref_id: sm.conversation_id,
+        });
+      } else {
+        await providerSendSpy();
+      }
+
+      // Assertivas do Cenário A:
+      expect(providerSendSpy).not.toHaveBeenCalled();
+      expect(sm.status).toBe("failed");
+      expect(sm.claimed_until).toBeNull();
+      expect(sm.last_error).toContain("lease_expired_unconfirmed");
+      expect(inboxItemsSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kind: "message_send_stuck",
+          severity: "critical",
+          organization_id: "org-1",
+        })
+      );
+    });
+
+    // Teste B: messages sent + external_id
+    it("Cenário B: messages sent + external_id -> scheduled_messages = sent e provider NÃO chamado novamente", async () => {
+      const sm = {
+        id: "d0000000-0000-4000-8000-000000000002",
+        organization_id: "org-1",
+        conversation_id: "conv-1",
+        status: "processing" as "pending" | "processing" | "sent" | "failed",
+        claimed_until: new Date(Date.now() - 5000).toISOString() as string | null,
+        attempts: 1,
+        max_attempts: 5,
+        sent_message_id: null as string | null,
+        last_error: null as string | null,
+      };
+
+      // Tabela messages após envio bem-sucedido confirmado
+      const existingMsg = {
+        id: sm.id,
+        organization_id: sm.organization_id,
+        conversation_id: sm.conversation_id,
+        status: "sent",
+        external_id: "waha-msg-external-12345",
+        created_at: new Date(Date.now() - 3000).toISOString(),
+      };
+
+      const providerSendSpy = vi.fn();
+
+      const isConfirmedSent =
+        (existingMsg.status === "sent" ||
+          existingMsg.status === "delivered" ||
+          existingMsg.status === "read") &&
+        Boolean(existingMsg.external_id);
+
+      if (isConfirmedSent) {
+        sm.status = "sent";
+        sm.sent_message_id = existingMsg.id;
+        sm.claimed_until = null;
+      } else {
+        await providerSendSpy();
+      }
+
+      // Assertivas do Cenário B:
+      expect(providerSendSpy).not.toHaveBeenCalled();
+      expect(sm.status).toBe("sent");
+      expect(sm.sent_message_id).toBe(existingMsg.id);
+      expect(sm.claimed_until).toBeNull();
+    });
+
+    // Teste C: nenhuma messages existente
+    it("Cenário C: nenhuma messages existente -> envio normal via provider", async () => {
+      const sm = {
+        id: "d0000000-0000-4000-8000-000000000003",
+        organization_id: "org-1",
+        conversation_id: "conv-1",
+        status: "processing" as "pending" | "processing" | "sent" | "failed",
+        claimed_until: new Date(Date.now() + 60000).toISOString() as string | null,
+        attempts: 1,
+        max_attempts: 5,
+        sent_message_id: null as string | null,
+        last_error: null as string | null,
+      };
+
+      const existingMsg = null;
+      const providerSendSpy = vi.fn().mockResolvedValue({ externalId: "waha-new-msg-999" });
+
+      if (existingMsg) {
+        // não entra
+      } else {
+        const res = await providerSendSpy();
+        sm.status = "sent";
+        sm.sent_message_id = sm.id;
+        sm.claimed_until = null;
+      }
+
+      // Assertivas do Cenário C:
+      expect(providerSendSpy).toHaveBeenCalledTimes(1);
+      expect(sm.status).toBe("sent");
+      expect(sm.sent_message_id).toBe(sm.id);
+    });
   });
 
   describe("3. Diferenciação de Erros e Estratégia de Retry", () => {

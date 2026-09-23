@@ -103,27 +103,77 @@ async function handle(req: NextRequest): Promise<Response> {
         continue;
       }
 
-      // Se o worker anterior caiu logo após persistir a mensagem em `messages`:
+      const idempotencyKey = `scheduled_msg_${sm.id}`;
+
+      // Se o worker anterior caiu logo após o provedor enviar ou persistir a mensagem em `messages`:
       const { data: existingMsg } = await admin
         .from("messages")
-        .select("id, created_at")
+        .select("id, status, external_id, created_at")
         .eq("organization_id", sm.organization_id)
         .eq("conversation_id", sm.conversation_id)
-        .contains("metadata", { scheduled_message_id: sm.id })
+        .or(`id.eq.${sm.id},metadata->>scheduled_message_id.eq.${sm.id},metadata->>idempotency_key.eq.${idempotencyKey}`)
         .maybeSingle();
 
       if (existingMsg) {
+        const isConfirmedSent =
+          (existingMsg.status === "sent" ||
+            existingMsg.status === "delivered" ||
+            existingMsg.status === "read") &&
+          Boolean(existingMsg.external_id);
+
+        if (isConfirmedSent) {
+          // Regra 2: Se existe registro com status = 'sent' e external_id preenchido -> confirmado
+          await admin
+            .from("scheduled_messages")
+            .update({
+              status: "sent",
+              sent_message_id: existingMsg.id,
+              sent_at: existingMsg.created_at,
+              claimed_until: null,
+              last_error: null,
+            })
+            .eq("id", sm.id);
+          recoveredCount++;
+          continue;
+        }
+
+        // Regra 3: Se existe registro em messages com status = 'queued' e external_id ausente
+        // Política AT-MOST-ONCE: NÃO reenviar automaticamente para evitar double-send
+        const ambiguityReason =
+          "lease_expired_unconfirmed: Uma mensagem programada para este contato ficou em estado não confirmado. " +
+          "O sistema não pode garantir se ela chegou ao WhatsApp. Para evitar envio duplicado, ela não foi reenviada automaticamente.";
+
         await admin
           .from("scheduled_messages")
           .update({
-            status: "sent",
+            status: "failed",
             sent_message_id: existingMsg.id,
-            sent_at: existingMsg.created_at,
             claimed_until: null,
-            last_error: null,
+            last_error: ambiguityReason,
           })
           .eq("id", sm.id);
-        recoveredCount++;
+
+        // Regra 4: Criar aviso na Central de Avisos existente
+        try {
+          await admin.from("agent_inbox_items").insert({
+            organization_id: sm.organization_id,
+            kind: "message_send_stuck",
+            severity: "critical",
+            title: "Mensagem programada não confirmada",
+            body:
+              "Uma mensagem programada para este contato ficou em estado não confirmado. " +
+              "O sistema não pode garantir se ela chegou ao WhatsApp. Para evitar envio duplicado, ela não foi reenviada automaticamente.",
+            ref_kind: "conversation",
+            ref_id: sm.conversation_id,
+          });
+        } catch (inboxErr) {
+          logger.warn("[scheduled-messages.cron] falha ao registrar aviso na Central", {
+            error: inboxErr instanceof Error ? inboxErr.message : String(inboxErr),
+            scheduledMessageId: sm.id,
+          });
+        }
+
+        failedCount++;
         continue;
       }
 
@@ -149,12 +199,14 @@ async function handle(req: NextRequest): Promise<Response> {
             }
           : {}),
         metadata: {
+          idempotency_key: idempotencyKey,
           scheduled_message_id: sm.id,
           attempt: sm.attempts,
         },
       };
 
-      // 4. Executa pipeline canônico: pacing, anti-ban, Storage sign, WAHA e persistência em messages
+      // 4. Executa pipeline canônico: pacing, anti-ban, Storage sign, WAHA e persistência em messages.
+      // O `internalMessageId: sm.id` ancora a identidade atômica na tabela `messages`.
       const sentMessage = await sendMessageHandler(
         admin,
         {
@@ -162,6 +214,7 @@ async function handle(req: NextRequest): Promise<Response> {
           actor,
           requestId,
           idioma: "pt-BR",
+          internalMessageId: sm.id,
         },
         sendInput
       );
