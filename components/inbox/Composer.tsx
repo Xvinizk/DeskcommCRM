@@ -9,7 +9,7 @@ import {
   type ClipboardEvent,
   type KeyboardEvent,
 } from "react";
-import { PaperPlaneTilt } from "@/lib/ui/icons";
+import { Clock, PaperPlaneTilt } from "@/lib/ui/icons";
 import { Button } from "@/components/ui/button";
 import { AttachMenu } from "@/components/inbox/composer/AttachMenu";
 import { AttachmentPreviewDialog } from "@/components/inbox/composer/AttachmentPreviewDialog";
@@ -17,6 +17,7 @@ import { ContactPickerDialog } from "@/components/inbox/composer/ContactPickerDi
 import { AudioRecorder } from "@/components/inbox/composer/AudioRecorder";
 import { ReplyReviewPanel } from "@/components/inbox/composer/ReplyReviewPanel";
 import { EmojiButton } from "@/components/inbox/composer/EmojiButton";
+import { ScheduleMessageDialog } from "@/components/inbox/composer/ScheduleMessageDialog";
 import { resolveSlash, TemplateMenu } from "@/components/inbox/composer/TemplateMenu";
 import { useCreateNote } from "@/hooks/inbox/useCreateNote";
 import { useMessageTemplates, type MessageTemplate } from "@/hooks/inbox/useMessageTemplates";
@@ -86,6 +87,7 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
   const [text, setText] = useState(initialDraft);
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [contactPickerOpen, setContactPickerOpen] = useState(false);
+  const [scheduleDialogOpen, setScheduleDialogOpen] = useState(false);
   const [menuDismissed, setMenuDismissed] = useState(false);
   const [mode, setMode] = useState<"reply" | "note">(initialMode);
   useEffect(() => {
@@ -290,6 +292,20 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
               onPickContact={() => setContactPickerOpen(true)}
             />
           )}
+          {mode === "reply" && (
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              className="h-9 w-9 shrink-0 text-muted-foreground hover:text-foreground"
+              aria-label={t("Programar mensagem")}
+              title={t("Programar mensagem")}
+              disabled={respostaBarrada}
+              onClick={() => setScheduleDialogOpen(true)}
+            >
+              <Clock size={18} weight="regular" aria-hidden />
+            </Button>
+          )}
           <EmojiButton
             disabled={isDisabled}
             onPick={(emoji) => {
@@ -409,6 +425,16 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
             },
             { onSuccess: () => setContactPickerOpen(false) },
           );
+        }}
+      />
+      <ScheduleMessageDialog
+        open={scheduleDialogOpen}
+        onOpenChange={setScheduleDialogOpen}
+        conversationId={conversationId}
+        initialDraft={text}
+        onSuccess={() => {
+          setText("");
+          requestAnimationFrame(() => autoresize());
         }}
       />
     </>

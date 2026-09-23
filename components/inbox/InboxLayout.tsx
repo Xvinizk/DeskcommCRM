@@ -21,6 +21,7 @@ import { ChatThread } from "./ChatThread";
 import { Composer, type ComposerHandle } from "./Composer";
 import { ConversationHeader } from "./ConversationHeader";
 import { RetentionNotice } from "./RetentionNotice";
+import { ScheduledMessagesBanner } from "./ScheduledMessagesBanner";
 import { CRMSidePanel } from "./CRMSidePanel";
 import type { Message as ConversationMensagem } from "@/lib/types/messaging";
 import { InboxKeyboardShortcuts } from "./InboxKeyboardShortcuts";
@@ -511,6 +512,7 @@ export function InboxLayout({ initialSelectedId = null }: InboxLayoutProps = {})
                 motivo={motivoDaJanela}
               />
             )}
+            <ScheduledMessagesBanner conversationId={selectedConversation.id} />
             <Composer
               ref={composerRef}
               conversationId={selectedConversation.id}
