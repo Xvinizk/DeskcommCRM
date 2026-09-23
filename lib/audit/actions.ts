@@ -783,6 +783,11 @@ export const AUDIT_ACTIONS = [
   "external_db_connection.deleted",
   "external_db_connection.tested",
   "external_db_connection.read",
+
+  // Mensagens programadas na Inbox (migration 0381)
+  "scheduled_message.created",
+  "scheduled_message.updated",
+  "scheduled_message.cancelled",
 ] as const;
 
 /** Um código de auditoria. Derivado de `AUDIT_ACTIONS` — não redigite a lista. */
