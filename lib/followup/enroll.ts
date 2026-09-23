@@ -15,6 +15,7 @@ import {
   resolveAgentForAutomaticTrigger,
 } from "@/lib/followup/agent-followup-gate";
 import { flowGraphSchema } from "@/lib/followup/graph-schema";
+import { cancelEnrollment, LIVE_STATUSES } from "@/lib/followup/cancel";
 
 export const ENROLLMENT_LIST_COLUMNS =
   "id, pointer_id, version_id, contact_id, status, current_node_id, next_eval_at, outcome, started_at, completed_at, updated_at";
@@ -25,6 +26,10 @@ export type EnrollFollowupInput = {
   pointerId: string;
   contactId: string;
   agentId?: string;
+  conversationId?: string;
+  replaceActive?: boolean;
+  origin?: "keyword_trigger" | "manual_trigger" | "stage_change" | "silence" | "webhook" | string;
+  triggerMetadata?: Record<string, unknown>;
   actorUserId: string | null;
   requestId: string;
 };
@@ -35,6 +40,11 @@ export type EnrollFollowupErr = {
   code: string;
   message: string;
   status: number;
+  activeEnrollment?: {
+    id: string;
+    pointerId: string;
+    flowName: string;
+  };
 };
 export type EnrollFollowupResult = EnrollFollowupOk | EnrollFollowupErr;
 
@@ -46,7 +56,7 @@ export async function enrollFollowupFlow(
 
   const { data: pointer, error: pointerErr } = await supabase
     .from("followup_flow_pointers")
-    .select("id, status, active_version_id")
+    .select("id, name, status, active_version_id")
     .eq("organization_id", organizationId)
     .eq("id", pointerId)
     .maybeSingle();
@@ -70,6 +80,57 @@ export async function enrollFollowupFlow(
     .maybeSingle();
   if (contactErr) return { ok: false, code: "internal_error", message: contactErr.message, status: 500 };
   if (!contact) return { ok: false, code: "not_found", message: "Contato não encontrado.", status: 404 };
+
+  // Checar se já existe enrollment ativo na organização para este contato (1 por lead)
+  const { data: activeRows, error: activeErr } = await supabase
+    .from("followup_enrollments")
+    .select("id, pointer_id, status, followup_flow_pointers(id, name)")
+    .eq("organization_id", organizationId)
+    .eq("contact_id", contactId)
+    .in("status", [...LIVE_STATUSES])
+    .order("started_at", { ascending: false })
+    .limit(1);
+
+  if (activeErr) {
+    return { ok: false, code: "internal_error", message: activeErr.message, status: 500 };
+  }
+
+  const existingActive = activeRows?.[0];
+  if (existingActive) {
+    if (input.replaceActive) {
+      // Cancelar o anterior canonicamente com motivo manual_replacement
+      const cancelRes = await cancelEnrollment(supabase, {
+        enrollmentId: existingActive.id,
+        organizationId,
+        reason: "manual_replacement",
+        actorUserId: input.actorUserId,
+        requestId,
+      });
+      if (!cancelRes.ok) {
+        return {
+          ok: false,
+          code: "replacement_failed",
+          message: `Falha ao encerrar fluxo ativo anterior: ${cancelRes.message}`,
+          status: cancelRes.status,
+        };
+      }
+    } else {
+      const activeFlowName =
+        (existingActive as unknown as { followup_flow_pointers?: { name?: string } | null })
+          ?.followup_flow_pointers?.name ?? "Fluxo atual";
+      return {
+        ok: false,
+        code: "conflict",
+        message: `Este contato já está no fluxo: ${activeFlowName}`,
+        status: 409,
+        activeEnrollment: {
+          id: existingActive.id,
+          pointerId: existingActive.pointer_id,
+          flowName: activeFlowName,
+        },
+      };
+    }
+  }
 
   const { data: version, error: versionErr } = await supabase
     .from("followup_flow_versions")
@@ -111,8 +172,12 @@ export async function enrollFollowupFlow(
     );
   }
 
-  const boundary = input.resolveServiceBoundary ? await input.resolveServiceBoundary() : await beginServiceAtOrigin(supabase, organizationId, contactId);
+  const boundary = input.resolveServiceBoundary
+    ? await input.resolveServiceBoundary()
+    : await beginServiceAtOrigin(supabase, organizationId, contactId, input.conversationId);
   if (input.resolveServiceBoundary) await assertServiceBoundarySupabase(supabase, boundary);
+  const conversationId = input.conversationId ?? boundary.conversation_id;
+
   const { data: created, error: insErr } = await supabase
     .from("followup_enrollments")
     .insert({
@@ -122,11 +187,9 @@ export async function enrollFollowupFlow(
       contact_id: contactId,
       current_node_id: triggerNode.id,
       status: "active",
-      // next_eval_at omite: default now() do banco (migration 0147). new Date()
-      // do processo fica 17–34 ms à frente e o claim `<= now()` pula o tick.
       agent_id: agentId,
       service_boundary: boundary,
-      conversation_id: boundary.conversation_id,
+      conversation_id: conversationId,
     })
     .select(ENROLLMENT_LIST_COLUMNS)
     .single();
@@ -148,22 +211,50 @@ export async function enrollFollowupFlow(
     };
   }
 
-  if (input.actorUserId) {
-    void audit({
-      action: "followup_enrollment.created",
-      actorUserId: input.actorUserId,
-      organizationId,
-      resourceType: "followup_enrollment",
-      resourceId: created.id,
-      requestId,
-      metadata: {
-        pointer_id: pointerId,
-        contact_id: contactId,
-        version_id: pointer.active_version_id,
-        agent_id: agentId,
+  const origin = input.origin ?? (input.actorUserId ? "manual_trigger" : "system_trigger");
+  if (origin === "keyword_trigger") {
+    await supabase.from("followup_enrollment_events").insert({
+      organization_id: organizationId,
+      enrollment_id: created.id,
+      node_id: triggerNode.id,
+      event_type: "enrolled_by_keyword",
+      payload: {
+        keyword: input.triggerMetadata?.keyword ?? null,
+        message_id: input.triggerMetadata?.message_id ?? null,
+      },
+    });
+  } else if (origin === "manual_trigger") {
+    await supabase.from("followup_enrollment_events").insert({
+      organization_id: organizationId,
+      enrollment_id: created.id,
+      node_id: triggerNode.id,
+      event_type: "enrolled_manual",
+      payload: {
+        actor_user_id: input.actorUserId,
+        replaced_enrollment_id: existingActive?.id ?? null,
+        conversation_id: conversationId,
       },
     });
   }
+
+  void audit({
+    action: "followup_enrollment.created",
+    actorUserId: input.actorUserId,
+    organizationId,
+    resourceType: "followup_enrollment",
+    resourceId: created.id,
+    requestId,
+    metadata: {
+      pointer_id: pointerId,
+      contact_id: contactId,
+      conversation_id: conversationId,
+      version_id: pointer.active_version_id,
+      agent_id: agentId,
+      origin,
+      replaced_enrollment_id: existingActive?.id ?? null,
+      ...(input.triggerMetadata ?? {}),
+    },
+  });
 
   return { ok: true, enrollment: created as Record<string, unknown> };
 }

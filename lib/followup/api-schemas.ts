@@ -55,6 +55,20 @@ export const triggerConfigSchema = z.discriminatedUnion("kind", [
     params: z.strictObject({}),
     ...CANCEL_ON_REPLY,
   }),
+  z.strictObject({
+    kind: z.literal("keyword"),
+    keywords: z.array(z.string().trim().min(1)).min(1).optional(),
+    match_mode: z.enum(["exact", "contains", "starts_with"]).default("exact").optional(),
+    case_sensitive: z.boolean().default(false).optional(),
+    params: z
+      .strictObject({
+        keywords: z.array(z.string().trim().min(1)).min(1).optional(),
+        match_mode: z.enum(["exact", "contains", "starts_with"]).default("exact").optional(),
+        case_sensitive: z.boolean().default(false).optional(),
+      })
+      .optional(),
+    ...CANCEL_ON_REPLY,
+  }),
 ]);
 export type TriggerConfig = z.infer<typeof triggerConfigSchema>;
 
@@ -93,4 +107,6 @@ export const createFollowupEnrollmentSchema = z.strictObject({
   // ausente, resolve-se do próprio pointer (agentes que o armam). Validado
   // contra a org antes de gravar.
   agent_id: z.string().uuid().optional(),
+  conversation_id: z.string().uuid().optional(),
+  replace_active: z.boolean().optional(),
 });

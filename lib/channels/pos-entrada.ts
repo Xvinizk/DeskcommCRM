@@ -52,6 +52,7 @@ import { ehContatoDoNumeroInterno } from "@/lib/escalacao/numero-interno-de-avis
 import { acelerarPipelineDeEventos } from "@/lib/dev/kick-local-pipeline";
 import { autorizarContatoParaIA } from "@/lib/ai/elegibilidade/autorizacao";
 import { casarCampanha, lerCampanhas } from "@/lib/ai/elegibilidade/campanha";
+import { avaliarGatilhoPalavraChave } from "@/lib/followup/gatilho-palavra-chave";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -144,6 +145,15 @@ export async function aplicarEfeitosPosEntrada(
   await guardarOrigemDaPagina(admin, entrada);
   await abrirDemanda(admin, entrada);
   await avaliarCampanha(admin, entrada);
+  // Avaliar gatilho de palavra-chave do follow-up antes de acelerar pipeline
+  const gatilhoExecutado = await avaliarGatilhoPalavraChave(admin, {
+    organizationId: entrada.organizationId,
+    contactId: entrada.contactId,
+    conversationId: entrada.conversationId,
+    messageId: entrada.messageId,
+    texto: entrada.texto,
+    requestId: entrada.requestId,
+  });
   // A resposta do lead avança o follow-up AQUI. O despacho do agente (LLM)
   // vem depois: no Hobby ele estoura o tempo da request e o próximo texto
   // do fluxo ficava esperando o relógio.
@@ -153,7 +163,9 @@ export async function aplicarEfeitosPosEntrada(
     messageId: entrada.messageId,
     texto: entrada.texto,
   });
-  await pedirDespachoDoAgente(admin, entrada);
+  if (!gatilhoExecutado.disparou) {
+    await pedirDespachoDoAgente(admin, entrada);
+  }
 }
 
 /**

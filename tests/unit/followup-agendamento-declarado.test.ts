@@ -70,6 +70,12 @@ const ESCRITORES: Record<string, { agenda: "agora" | "futuro" | "nenhum"; nota: 
     agenda: "agora",
     nota: "mesmo caso do gatilho de etapa: nasce vencido, insert omite a coluna.",
   },
+  "cancel.ts": {
+    agenda: "nenhum",
+    nota:
+      "Cancelamento canônico: grava `next_eval_at: null` para desagendar a fila — " +
+      "desagendar não é agendar, e `null` não tem relógio para escolher errado.",
+  },
   "gatilho-caso.ts": {
     agenda: "nenhum",
     nota:

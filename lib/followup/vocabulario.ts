@@ -527,6 +527,13 @@ export const ACOES_DE_TAG: Record<AcaoDeTag, string> = {
   remove: "Remover etiqueta",
 };
 
+export type ModoDeComparacao = "exact" | "contains" | "starts_with";
+export const MODOS_DE_COMPARACAO: Record<ModoDeComparacao, string> = {
+  exact: "Exatamente igual",
+  contains: "Contém a palavra",
+  starts_with: "Começa com a palavra",
+};
+
 // ─── nó final ────────────────────────────────────────────────────────────
 
 /**
@@ -576,7 +583,7 @@ export const DESFECHOS: Record<EnrollmentOutcome, string> = {
  * que `followup-builder.spec.ts` seleciona pelo nome — mantidos ao pé da letra.
  */
 export const GATILHOS: Record<TipoDeGatilho, string> = {
-  appointment_no_show:"Falta confirmada pela equipe",
+  appointment_no_show: "Falta confirmada pela equipe",
   manual: "Manual",
   webhook: "Disparado por uma automação em Webhooks",
   silence: "Silêncio",
@@ -586,4 +593,5 @@ export const GATILHOS: Record<TipoDeGatilho, string> = {
   // clínica, não quem escreveu o schema.
   case_opened: "Quando o agente pede ajuda de um humano",
   conversation_end: "Fim da conversa",
+  keyword: "Palavra-chave em mensagem recebida",
 };

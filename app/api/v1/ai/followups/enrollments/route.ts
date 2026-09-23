@@ -83,12 +83,18 @@ export async function POST(req: NextRequest): Promise<Response> {
     pointerId: parsed.data.pointer_id,
     contactId: parsed.data.contact_id,
     agentId: parsed.data.agent_id,
+    conversationId: parsed.data.conversation_id,
+    replaceActive: parsed.data.replace_active,
+    origin: "manual_trigger",
     actorUserId: user.id,
     requestId,
   });
 
   if (!result.ok) {
-    return fail(result.code, result.message, result.status, { requestId });
+    return fail(result.code, result.message, result.status, {
+      requestId,
+      ...(result.activeEnrollment ? { details: { active_enrollment: result.activeEnrollment } } : {}),
+    });
   }
   return ok(result.enrollment, { requestId, status: 201 });
 }

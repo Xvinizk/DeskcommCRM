@@ -61,31 +61,48 @@ function makeDb(
     followup_flow_versions: versions,
     contacts,
     followup_enrollments: enrollments,
+    followup_enrollment_events: [],
     ai_agents: agents,
     ai_agent_versions: agentVersions,
   };
 
   function builder(table: string) {
     const filters: Array<[string, unknown]> = [];
+    const inFilters: Array<[string, unknown[]]> = [];
     let orderCol: string | null = null;
     let orderAsc = true;
+    let limitCount: number | null = null;
     let mode: "select" | "insert" = "select";
     let payload: Row | undefined;
 
     function matches(row: Row): boolean {
-      return filters.every(([k, v]) => {
+      const matchEq = filters.every(([k, v]) => {
         if (k === "followup_flow_pointers.surface") {
           const pointer = tables.followup_flow_pointers?.find((p) => p.id === row.pointer_id);
           return (pointer?.surface ?? "followup") === v;
         }
+        if (k === "organization_id" && row.organization_id === undefined) {
+          return v === ORG_ID;
+        }
         return row[k] === v;
       });
+      const matchIn = inFilters.every(([k, vals]) => {
+        const val = row[k];
+        return vals.includes(val);
+      });
+      return matchEq && matchIn;
     }
 
     function execute(): { data: Row[] | null; error: { code?: string; message: string } | null } {
       const tableRows = tables[table]!;
       if (mode === "select") {
-        let list = tableRows.filter(matches);
+        let list = tableRows.filter(matches).map((r) => {
+          if (table === "followup_enrollments") {
+            const ptr = tables.followup_flow_pointers?.find((p) => p.id === r.pointer_id);
+            return { ...r, followup_flow_pointers: ptr ? { name: ptr.name } : null };
+          }
+          return r;
+        });
         if (orderCol) {
           const col = orderCol;
           list = [...list].sort((a, b) => {
@@ -95,6 +112,9 @@ function makeDb(
             const cmp = av > bv ? 1 : -1;
             return orderAsc ? cmp : -cmp;
           });
+        }
+        if (typeof limitCount === "number") {
+          list = list.slice(0, limitCount);
         }
         return { data: list, error: null };
       }
@@ -134,6 +154,14 @@ function makeDb(
       },
       eq(col: string, val: unknown) {
         filters.push([col, val]);
+        return b;
+      },
+      in(col: string, vals: unknown[]) {
+        inFilters.push([col, vals]);
+        return b;
+      },
+      limit(n: number) {
+        limitCount = n;
         return b;
       },
       order(col: string, opts?: { ascending?: boolean }) {

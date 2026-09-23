@@ -68,8 +68,67 @@ export async function POST(_req: NextRequest, ctx: RouteCtx): Promise<Response> 
   // `manual`/`webhook` (POST enroll + ação de regra), `silence` (silence-sweep),
   // `stage_change` (gatilho-etapa), `case_opened` (gatilho-caso) e
   // `appointment_no_show` (followup-gatilho-presenca.v1, confirmação humana).
-  const KINDS_COM_MOTOR = new Set(["manual", "webhook", "silence", "stage_change", "case_opened", "appointment_no_show"]);
-  const trigger = (pointer.trigger_config ?? { kind: "manual" }) as {
+  const KINDS_COM_MOTOR = new Set([
+    "manual",
+    "webhook",
+    "silence",
+    "stage_change",
+    "case_opened",
+    "appointment_no_show",
+    "keyword",
+  ]);
+
+  if (!pointer.draft_graph) {
+    return fail("validation_failed", t("Fluxo não tem rascunho pronto para publicar."), 422, {
+      requestId,
+      details: {
+        errors: [
+          {
+            node_id: null,
+            code: "no_trigger",
+            message: t("draft_graph ausente — monte o fluxo antes de publicar."),
+          },
+        ],
+      },
+    });
+  }
+
+  const graph = pointer.draft_graph as unknown as FlowGraph;
+
+  // Extrair configuração do nó trigger, se presente no rascunho
+  let activeTriggerConfig = pointer.trigger_config as Record<string, unknown> | null;
+  const triggerNode = graph.nodes?.find((n) => n.type === "trigger");
+  if (triggerNode?.config && typeof triggerNode.config === "object" && "type" in triggerNode.config) {
+    const tc = triggerNode.config as {
+      type?: string;
+      keywords?: string[];
+      match_mode?: "exact" | "contains" | "starts_with";
+      case_sensitive?: boolean;
+    };
+    if (tc.type === "keyword") {
+      const kwList = Array.isArray(tc.keywords)
+        ? tc.keywords.map((k) => (typeof k === "string" ? k.trim() : "")).filter(Boolean)
+        : [];
+      if (kwList.length === 0) {
+        return fail(
+          "trigger_keywords_missing",
+          t("Informe pelo menos uma palavra-chave para o gatilho antes de publicar."),
+          422,
+          { requestId },
+        );
+      }
+      activeTriggerConfig = {
+        kind: "keyword",
+        keywords: kwList,
+        match_mode: tc.match_mode ?? "exact",
+        case_sensitive: Boolean(tc.case_sensitive),
+      };
+    } else if (tc.type === "manual") {
+      activeTriggerConfig = { kind: "manual" };
+    }
+  }
+
+  const trigger = (activeTriggerConfig ?? { kind: "manual" }) as {
     kind?: string;
     params?: { stage_id?: string };
   };
@@ -77,7 +136,7 @@ export async function POST(_req: NextRequest, ctx: RouteCtx): Promise<Response> 
   if (!KINDS_COM_MOTOR.has(triggerKind)) {
     return fail(
       "trigger_kind_not_implemented",
-      `O gatilho «${triggerKind}» não está disponível — use Etapa do funil, Silêncio ou Manual.`,
+      `O gatilho «${triggerKind}» não está disponível — use Etapa do funil, Silêncio, Palavra-chave ou Manual.`,
       422,
       { requestId },
     );
@@ -123,22 +182,6 @@ export async function POST(_req: NextRequest, ctx: RouteCtx): Promise<Response> 
     }
   }
 
-  if (!pointer.draft_graph) {
-    return fail("validation_failed", t("Fluxo não tem rascunho pronto para publicar."), 422, {
-      requestId,
-      details: {
-        errors: [
-          {
-            node_id: null,
-            code: "no_trigger",
-            message: t("draft_graph ausente — monte o fluxo antes de publicar."),
-          },
-        ],
-      },
-    });
-  }
-
-  const graph = pointer.draft_graph as unknown as FlowGraph;
   // A regra de etapa guarda o `stage_id`, e só o banco diz se a etapa existe e
   // está ativa — sem esta leitura, uma regra que nunca decide publicaria calada.
   const citadas = await carregaEtapasCitadas(admin, activeOrg.orgId, graph.nodes);
@@ -164,9 +207,17 @@ export async function POST(_req: NextRequest, ctx: RouteCtx): Promise<Response> 
     return fail("internal_error", result.message, 500, { requestId });
   }
 
+  if (activeTriggerConfig) {
+    await admin
+      .from("followup_flow_pointers")
+      .update({ trigger_config: activeTriggerConfig })
+      .eq("id", id)
+      .eq("organization_id", activeOrg.orgId);
+  }
+
   const { data: updatedPointer, error: reloadErr } = await admin
     .from("followup_flow_pointers")
-    .select("id, status, active_version_id, updated_at")
+    .select("id, status, active_version_id, trigger_config, updated_at")
     .eq("id", id)
     .eq("organization_id", activeOrg.orgId)
     .single();

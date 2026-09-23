@@ -21,6 +21,7 @@ import { useAutomaticoAtivo } from "@/hooks/ai/useAutomaticoAtivo";
 import { OwnerBadge } from "@/components/kanban/OwnerBadge";
 import { comandoDaConversa, ROTULO_DO_MOTIVO } from "@/lib/inbox/comando-da-conversa";
 import { ReassignDialog } from "@/components/inbox/ReassignDialog";
+import { ManualFollowupDialog } from "@/components/inbox/ManualFollowupDialog";
 import { SnoozeButton } from "@/components/inbox/SnoozeButton";
 import type { ConversationWithContact } from "@/hooks/inbox/useConversationsRealtime";
 import { rotuloDoContato } from "@/lib/contacts/rotulo-do-contato";
@@ -70,6 +71,7 @@ export function ConversationHeader({ conversation }: Props) {
   // atendendo em instalação que nunca configurou agente nenhum.
   const automaticoDaOrg = useAutomaticoAtivo();
   const [reassignOpen, setReassignOpen] = useState(false);
+  const [followupOpen, setFollowupOpen] = useState(false);
 
   const c = conversation.contacts ?? null;
   const displayName = rotuloDoContato(c, t);
@@ -291,6 +293,17 @@ export function ConversationHeader({ conversation }: Props) {
             {t("Transferir")}
           </Button>
         )}
+        {!encerrada && c?.id && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setFollowupOpen(true)}
+            data-testid="disparar-followup"
+            title={t("Disparar um fluxo de automação ou follow-up para este contato")}
+          >
+            {t("Disparar Follow-up")}
+          </Button>
+        )}
         {!encerrada && (
           <SnoozeButton
             conversationId={conversation.id}
@@ -376,6 +389,12 @@ export function ConversationHeader({ conversation }: Props) {
         conversationId={conversation.id}
         open={reassignOpen}
         onOpenChange={setReassignOpen}
+      />
+      <ManualFollowupDialog
+        conversationId={conversation.id}
+        contactId={c?.id ?? ""}
+        open={followupOpen}
+        onOpenChange={setFollowupOpen}
       />
     </div>
   );

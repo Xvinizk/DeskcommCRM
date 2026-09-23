@@ -54,7 +54,7 @@ import { etapasPorFunil, nomeDaEtapa, useEtapasDeGatilho } from "@/hooks/followu
  * «poucos minutos», não «na hora» — prometer instantâneo seria o controle
  * mentindo sobre a própria função.
  */
-type TriggerKind = "appointment_no_show" | "manual" | "silence" | "stage_change" | "case_opened" | "webhook";
+type TriggerKind = "appointment_no_show" | "manual" | "silence" | "stage_change" | "case_opened" | "webhook" | "keyword";
 
 interface TriggerFormState {
   kind: TriggerKind;
@@ -69,27 +69,16 @@ const DEFAULT_THRESHOLD_MINUTES = 60;
 const MIN_THRESHOLD_MINUTES = 5;
 
 const KIND_LABEL: Record<TriggerKind, string> = {
-  appointment_no_show:"Falta confirmada pela equipe",
+  appointment_no_show: "Falta confirmada pela equipe",
   manual: "Manual",
   silence: "Silêncio",
   stage_change: "Etapa do funil",
-  // "Agente pediu ajuda", e não "Pedido de ajuda": numa lista ao lado de
-  // "Manual", "Silêncio" e "Etapa do funil", o rótulo sem sujeito não diz
-  // QUEM pediu. O resumo do botão (`resumoDoGatilho`) e o vocabulário
-  // (`lib/followup/vocabulario.ts`) já falam de "o agente pede ajuda" —
-  // esta era a única das três grafias sem sujeito, e as duas specs que
-  // cercam o gatilho procuram por ela com `exact: true`.
   case_opened: "Agente pediu ajuda",
   webhook: "Automação (Webhooks)",
+  keyword: "Palavra-chave no WhatsApp",
 };
 
 function parseTriggerConfig(raw: Record<string, unknown>): TriggerFormState {
-  // ⚠️ RECONHECER É DIFERENTE DE ACEITAR. Esta função degradava QUALQUER kind
-  // desconhecido para "manual" — e o formulário então salvava `{kind:"manual"}`,
-  // destruindo a configuração com um toast de sucesso. Bastava o operador abrir
-  // o painel de um fluxo `case_opened` numa versão antiga do app e mexer no
-  // botão de cancelar-na-resposta. Agora só os kinds que este painel sabe EDITAR
-  // caem no formulário; o resto é preservado (ver `open` no componente).
   const kind: TriggerKind =
     raw.kind === "appointment_no_show" ? "appointment_no_show" : raw.kind === "silence"
       ? "silence"
@@ -99,7 +88,9 @@ function parseTriggerConfig(raw: Record<string, unknown>): TriggerFormState {
           ? "case_opened"
           : raw.kind === "webhook"
             ? "webhook"
-            : "manual";
+            : raw.kind === "keyword"
+              ? "keyword"
+              : "manual";
   const params =
     (raw.params as { threshold_minutes?: number; segments?: string[]; stage_id?: string; event_type_ids?: string[] } | undefined) ?? {};
   return {
@@ -119,6 +110,7 @@ function toTriggerConfig(form: TriggerFormState): Record<string, unknown> {
   const cancelOnReply = form.cancelOnReply ? { cancel_on_reply: true } : {};
   if (form.kind === "appointment_no_show") return {kind:"appointment_no_show",params:{event_type_ids:form.eventTypeIds}};
   if (form.kind === "manual") return { kind: "manual", ...cancelOnReply };
+  if (form.kind === "keyword") return { kind: "keyword", ...cancelOnReply };
 
   if (form.kind === "stage_change") {
     return { kind: "stage_change", params: { stage_id: form.stageId }, ...cancelOnReply };
@@ -145,23 +137,22 @@ function summaryLabel(
   etapa: { stageName: string; pipelineName: string } | null,
   t: (texto: string) => string = (texto) => texto,
 ): string {
-  if(cfg.kind === "appointment_no_show") return t("Gatilho: falta confirmada pela equipe");
+  if (cfg.kind === "appointment_no_show") return t("Gatilho: falta confirmada pela equipe");
+  if (cfg.kind === "keyword") {
+    const kws = (cfg.keywords ?? (cfg.params as { keywords?: string[] } | undefined)?.keywords) as string[] | undefined;
+    const kwText = Array.isArray(kws) && kws.length > 0 ? ` («${kws[0]}»${kws.length > 1 ? ` +${kws.length - 1}` : ""})` : "";
+    return `Gatilho: Palavra-chave${kwText}`;
+  }
   if (cfg.kind === "silence") {
     const minutes = (cfg.params as { threshold_minutes?: number } | undefined)?.threshold_minutes;
     return `Gatilho: Silêncio${typeof minutes === "number" ? ` (${minutes} min)` : ""}`;
   }
   if (cfg.kind === "stage_change") {
-    // Enquanto os nomes não chegaram (ou a etapa sumiu do funil) o rótulo diz o
-    // TIPO em vez de vazar o uuid — que é justamente o que esta tela não faz.
-    // Com o funil junto, este rótulo passa a distinguir as homônimas: é a única
-    // superfície que o dono lê uma semana depois, sem abrir nada.
     return etapa ? `Gatilho: entrou em «${etapa.stageName}» em ${etapa.pipelineName}` : "Gatilho: Etapa do funil";
   }
   if (cfg.kind === "case_opened") return `${t("Gatilho")}: ${t("quando o agente pede ajuda")}`;
   if (cfg.kind === "webhook") return t("Disparado por uma automação em Webhooks");
   if (cfg.kind === "manual" || cfg.kind === undefined) return `${t("Gatilho")}: ${t("Manual")}`;
-  // conversation_end de dados antigos (API crua) — sem UI própria, mas mostrado
-  // com transparência em vez de mentir "Manual".
   return `Gatilho: ${String(cfg.kind)} (indisponível)`;
 }
 

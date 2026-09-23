@@ -23,6 +23,7 @@ import { TypingForm } from "./forms/TypingForm";
 import { DelayForm } from "./forms/DelayForm";
 import { TagForm } from "./forms/TagForm";
 import { StageMoveForm } from "./forms/StageMoveForm";
+import { TriggerForm } from "./forms/TriggerForm";
 import type { ConfigOf } from "./forms/shared";
 import { NODE_VISUALS } from "./nodes/nodeVisuals";
 
@@ -88,11 +89,10 @@ export function NodeConfigPanel({ node, onChange, onDelete, ramosLigados }: Prop
 
       <div className="space-y-4 border-t border-border pt-4">
         {type === "trigger" && (
-          <p className="text-sm text-text-muted">
-            {t(
-              "Início do fluxo — sem configuração adicional. O disparo (manual, mudança de etapa, silêncio ou fim de conversa) é definido nas configurações do fluxo.",
-            )}
-          </p>
+          <TriggerForm
+            config={node.data.config as ConfigOf<"trigger">}
+            onChange={(config) => onChange({ config })}
+          />
         )}
         {type === "wait" && (
           <WaitForm config={node.data.config as ConfigOf<"wait">} onChange={(config) => onChange({ config })} />

@@ -365,12 +365,22 @@ export const stageMoveConfigSchema = z.strictObject({
   stage_id: z.string().uuid(),
 });
 
+export const triggerNodeConfigSchema = z.union([
+  z.strictObject({}),
+  z.strictObject({
+    type: z.enum(['manual', 'keyword']).default('manual'),
+    keywords: z.array(z.string().trim().min(1)).optional(),
+    match_mode: z.enum(['exact', 'contains', 'starts_with']).default('exact').optional(),
+    case_sensitive: z.boolean().default(false).optional(),
+  }),
+]);
+
 /**
  * Flow node schema — discriminated union based on node type.
  * Each node type has its specific config schema.
  */
 export const flowNodeSchema = z.discriminatedUnion('type', [
-  // Trigger node: entry point, no config
+  // Trigger node: entry point (manual ou palavra-chave)
   z.strictObject({
     id: z.string().min(1),
     type: z.literal('trigger'),
@@ -379,7 +389,7 @@ export const flowNodeSchema = z.discriminatedUnion('type', [
       x: z.number(),
       y: z.number(),
     }),
-    config: z.strictObject({}),
+    config: triggerNodeConfigSchema,
   }),
   // Wait node: pauses flow for a duration
   z.strictObject({
