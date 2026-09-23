@@ -52,10 +52,15 @@ import {
   type actionConfigSchema,
   type aiClassifyConfigSchema,
   type conditionConfigSchema,
+  type delayConfigSchema,
   type endConfigSchema,
+  type tagConfigSchema,
   type waitConfigSchema,
 } from "./graph-schema";
 import type { EnrollmentOutcome, EnrollmentStatus } from "./node-handlers";
+
+export type UnidadeDeDelay = z.infer<typeof delayConfigSchema>["unit"];
+export type AcaoDeTag = z.infer<typeof tagConfigSchema>["action"];
 
 type ConditionConfig = z.infer<typeof conditionConfigSchema>;
 type Check = ConditionConfig["checks"][number];
@@ -509,6 +514,17 @@ export const MODOS_DA_ACAO: Record<ModoDaAcao, string> = {
   text: "Texto fixo",
   ai_message: "Mensagem escrita pela IA",
   template: "Modelo de mensagem pronto",
+};
+
+export const UNIDADES_DE_DELAY: Record<UnidadeDeDelay, string> = {
+  minutes: "Minutos",
+  hours: "Horas",
+  days: "Dias",
+};
+
+export const ACOES_DE_TAG: Record<AcaoDeTag, string> = {
+  add: "Adicionar etiqueta",
+  remove: "Remover etiqueta",
 };
 
 // ─── nó final ────────────────────────────────────────────────────────────

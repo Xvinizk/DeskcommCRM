@@ -17,6 +17,12 @@ import { EndForm } from "./forms/EndForm";
 import { MatchReplyForm } from "./forms/MatchReplyForm";
 import { RepeatForm } from "./forms/RepeatForm";
 import { WaitForm } from "./forms/WaitForm";
+import { MessageTextForm } from "./forms/MessageTextForm";
+import { MessageMediaForm } from "./forms/MessageMediaForm";
+import { TypingForm } from "./forms/TypingForm";
+import { DelayForm } from "./forms/DelayForm";
+import { TagForm } from "./forms/TagForm";
+import { StageMoveForm } from "./forms/StageMoveForm";
 import type { ConfigOf } from "./forms/shared";
 import { NODE_VISUALS } from "./nodes/nodeVisuals";
 
@@ -121,6 +127,33 @@ export function NodeConfigPanel({ node, onChange, onDelete, ramosLigados }: Prop
         )}
         {type === "end" && (
           <EndForm config={node.data.config as ConfigOf<"end">} onChange={(config) => onChange({ config })} />
+        )}
+        {type === "message_text" && (
+          <MessageTextForm config={node.data.config as ConfigOf<"message_text">} onChange={(config) => onChange({ config })} />
+        )}
+        {(type === "message_image" || type === "message_video" || type === "message_audio") && (
+          <MessageMediaForm
+            type={type}
+            config={
+              node.data.config as
+                | ConfigOf<"message_image">
+                | ConfigOf<"message_video">
+                | ConfigOf<"message_audio">
+            }
+            onChange={(config) => onChange({ config })}
+          />
+        )}
+        {type === "typing" && (
+          <TypingForm config={node.data.config as ConfigOf<"typing">} onChange={(config) => onChange({ config })} />
+        )}
+        {type === "delay" && (
+          <DelayForm config={node.data.config as ConfigOf<"delay">} onChange={(config) => onChange({ config })} />
+        )}
+        {type === "tag" && (
+          <TagForm config={node.data.config as ConfigOf<"tag">} onChange={(config) => onChange({ config })} />
+        )}
+        {type === "stage_move" && (
+          <StageMoveForm config={node.data.config as ConfigOf<"stage_move">} onChange={(config) => onChange({ config })} />
         )}
       </div>
 

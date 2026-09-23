@@ -35,6 +35,14 @@ describe('graph-schema', () => {
         'repeat',
         'action',
         'end',
+        'message_text',
+        'message_image',
+        'message_video',
+        'message_audio',
+        'typing',
+        'delay',
+        'tag',
+        'stage_move',
       ]);
     });
 

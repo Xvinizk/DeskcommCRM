@@ -113,6 +113,9 @@ export {
   GitBranch,
   Flag,
   TreeStructure,
+  ChatText,
+  VideoCamera,
+  Hourglass,
   // misc
   DotsThree,
   CaretDown,

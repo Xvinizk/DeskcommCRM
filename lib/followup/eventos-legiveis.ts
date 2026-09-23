@@ -130,6 +130,14 @@ const TIPO_DO_NO: Record<FlowNode["type"], string> = {
   repeat: "Repetição",
   action: "Mensagem",
   end: "Fim",
+  message_text: "Mensagem de texto",
+  message_image: "Envio de imagem",
+  message_video: "Envio de vídeo",
+  message_audio: "Envio de áudio",
+  typing: "Simulação de digitação",
+  delay: "Atraso",
+  tag: "Etiquetas",
+  stage_move: "Mudança de etapa",
 };
 
 const DESFECHO: Record<string, string> = {
@@ -188,6 +196,22 @@ export function resumoDoNo(node: FlowNode): NoDoDossie {
       };
     case "end":
       return { ...base, resumo: `encerra — ${DESFECHO[node.config.outcome] ?? node.config.outcome}` };
+    case "message_text":
+      return { ...base, resumo: "envia mensagem de texto no WhatsApp" };
+    case "message_image":
+      return { ...base, resumo: "envia uma imagem no WhatsApp" };
+    case "message_video":
+      return { ...base, resumo: "envia um vídeo no WhatsApp" };
+    case "message_audio":
+      return { ...base, resumo: "envia um áudio no WhatsApp" };
+    case "typing":
+      return { ...base, resumo: `simula digitação por ${node.config.duration_seconds} segundos` };
+    case "delay":
+      return { ...base, resumo: `aguarda ${node.config.duration_value} ${node.config.unit}` };
+    case "tag":
+      return { ...base, resumo: `${node.config.action === "add" ? "adiciona" : "remove"} tags: ${node.config.tags.join(", ")}` };
+    case "stage_move":
+      return { ...base, resumo: "move o lead para outra etapa do funil" };
   }
 }
 

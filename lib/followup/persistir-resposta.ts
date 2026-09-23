@@ -99,3 +99,141 @@ export async function persistirRespostaFollowupPg(
     [input.organization_id, input.contact_id, input.save_to.key, value],
   );
 }
+
+export async function aplicarTagsFollowupSupabase(
+  admin: SupabaseClient,
+  input: {
+    organization_id: string;
+    contact_id: string;
+    action: "add" | "remove";
+    tags: string[];
+  },
+): Promise<void> {
+  const { data: lead, error: selErr } = await admin
+    .from("crm_leads")
+    .select("id, tags")
+    .eq("organization_id", input.organization_id)
+    .eq("contact_id", input.contact_id)
+    .order("updated_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (selErr) throw new Error(selErr.message);
+  if (!lead) return;
+
+  const currentTags: string[] = Array.isArray(lead.tags) ? (lead.tags as string[]) : [];
+  let newTags: string[];
+  if (input.action === "add") {
+    newTags = Array.from(new Set([...currentTags, ...input.tags]));
+  } else {
+    const toRemove = new Set(input.tags);
+    newTags = currentTags.filter((t) => !toRemove.has(t));
+  }
+
+  const { error } = await admin
+    .from("crm_leads")
+    .update({
+      tags: newTags,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("organization_id", input.organization_id)
+    .eq("id", lead.id);
+  if (error) throw new Error(error.message);
+}
+
+export async function moverEtapaFollowupSupabase(
+  admin: SupabaseClient,
+  input: {
+    organization_id: string;
+    contact_id: string;
+    stage_id: string;
+  },
+): Promise<void> {
+  const { data: lead, error: selErr } = await admin
+    .from("crm_leads")
+    .select("id")
+    .eq("organization_id", input.organization_id)
+    .eq("contact_id", input.contact_id)
+    .order("updated_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (selErr) throw new Error(selErr.message);
+  if (!lead) return;
+
+  const { error } = await admin
+    .from("crm_leads")
+    .update({
+      stage_id: input.stage_id,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("organization_id", input.organization_id)
+    .eq("id", lead.id);
+  if (error) throw new Error(error.message);
+}
+
+export async function aplicarTagsFollowupPg(
+  query: (sql: string, params: unknown[]) => Promise<unknown>,
+  input: {
+    organization_id: string;
+    contact_id: string;
+    action: "add" | "remove";
+    tags: string[];
+  },
+): Promise<void> {
+  if (input.tags.length === 0) return;
+  if (input.action === "add") {
+    await query(
+      `update crm_leads
+          set tags = (
+            select array_agg(distinct t)
+            from unnest(array_cat(coalesce(crm_leads.tags, '{}'::text[]), $3::text[])) as t
+          ),
+          updated_at = now()
+        where id = (
+          select id from crm_leads
+           where organization_id = $1 and contact_id = $2
+           order by updated_at desc
+           limit 1
+        )`,
+      [input.organization_id, input.contact_id, input.tags],
+    );
+  } else {
+    await query(
+      `update crm_leads
+          set tags = (
+            select coalesce(array_agg(t), '{}'::text[])
+            from unnest(coalesce(crm_leads.tags, '{}'::text[])) as t
+            where not (t = any($3::text[]))
+          ),
+          updated_at = now()
+        where id = (
+          select id from crm_leads
+           where organization_id = $1 and contact_id = $2
+           order by updated_at desc
+           limit 1
+        )`,
+      [input.organization_id, input.contact_id, input.tags],
+    );
+  }
+}
+
+export async function moverEtapaFollowupPg(
+  query: (sql: string, params: unknown[]) => Promise<unknown>,
+  input: {
+    organization_id: string;
+    contact_id: string;
+    stage_id: string;
+  },
+): Promise<void> {
+  await query(
+    `update crm_leads
+        set stage_id = $3::uuid,
+            updated_at = now()
+      where id = (
+        select id from crm_leads
+         where organization_id = $1 and contact_id = $2
+         order by updated_at desc
+         limit 1
+      )`,
+    [input.organization_id, input.contact_id, input.stage_id],
+  );
+}

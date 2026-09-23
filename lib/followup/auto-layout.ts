@@ -37,12 +37,20 @@ const EDGE_LABEL_WIDTH_MAX = 160;
 const TYPE_ORDER: Record<NodeType, number> = {
   trigger: 0,
   wait: 1,
-  condition: 2,
-  ai_classify: 3,
-  match_reply: 4,
-  repeat: 5,
-  action: 6,
-  end: 7,
+  delay: 1,
+  typing: 2,
+  condition: 3,
+  ai_classify: 4,
+  match_reply: 5,
+  repeat: 6,
+  action: 7,
+  message_text: 7,
+  message_image: 7,
+  message_video: 7,
+  message_audio: 7,
+  tag: 8,
+  stage_move: 8,
+  end: 9,
 };
 
 export type NodeSize = { width: number; height: number };

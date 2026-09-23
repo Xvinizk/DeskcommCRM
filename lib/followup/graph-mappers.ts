@@ -75,6 +75,22 @@ export function toFlowNode(n: RFNode): FlowNode {
       return { ...shared, type, config: n.data.config as ConfigOf<"action"> };
     case "end":
       return { ...shared, type, config: n.data.config as ConfigOf<"end"> };
+    case "message_text":
+      return { ...shared, type, config: n.data.config as ConfigOf<"message_text"> };
+    case "message_image":
+      return { ...shared, type, config: n.data.config as ConfigOf<"message_image"> };
+    case "message_video":
+      return { ...shared, type, config: n.data.config as ConfigOf<"message_video"> };
+    case "message_audio":
+      return { ...shared, type, config: n.data.config as ConfigOf<"message_audio"> };
+    case "typing":
+      return { ...shared, type, config: n.data.config as ConfigOf<"typing"> };
+    case "delay":
+      return { ...shared, type, config: n.data.config as ConfigOf<"delay"> };
+    case "tag":
+      return { ...shared, type, config: n.data.config as ConfigOf<"tag"> };
+    case "stage_move":
+      return { ...shared, type, config: n.data.config as ConfigOf<"stage_move"> };
     default: {
       const exhaustive: never = type;
       throw new Error(`unknown node type: ${String(exhaustive)}`);

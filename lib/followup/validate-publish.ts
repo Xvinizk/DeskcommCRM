@@ -63,6 +63,15 @@ function waitMs(config: Extract<FlowNode, { type: 'wait' }>['config']): number {
 /** A wait node whose duration meets the 5min floor required to break a cycle. */
 function isSufficientWaitNode(node: FlowNode): boolean {
   if (node.type === 'match_reply') return node.config.grace_timeout_ms >= MIN_CYCLE_WAIT_MS;
+  if (node.type === 'delay') {
+    const ms =
+      node.config.unit === 'days'
+        ? node.config.duration_value * 86_400_000
+        : node.config.unit === 'hours'
+          ? node.config.duration_value * 3_600_000
+          : node.config.duration_value * 60_000;
+    return ms >= MIN_CYCLE_WAIT_MS;
+  }
   if (node.type !== 'wait') return false;
   return node.config.mode === 'fixed'
     ? node.config.duration_ms >= MIN_CYCLE_WAIT_MS

@@ -765,6 +765,151 @@ export function processNode(input: {
       };
     }
 
+    case "message_text": {
+      if (!actionEnqueued && !actionCompleted) {
+        return {
+          kind: "enqueue_turn",
+          purpose: "send_message",
+          wake_status: "active",
+          fixed_body: node.config.body,
+        };
+      }
+      if (actionCompleted) {
+        const edge = selectEdge(edges, node.id, { type: "always" });
+        if (!edge) return { kind: "fail", error: `message_text node "${node.id}" has no outbound edge` };
+        return { kind: "advance", next_node_id: edge.target, next_eval_at: clock() };
+      }
+      if ((actionRecheckCount ?? 0) >= MAX_ACTION_RECHECKS) {
+        return { kind: "dead", reason: "action_turn_never_completed" };
+      }
+      return {
+        kind: "recheck",
+        next_eval_at: new Date(clock().getTime() + atrasoDoRecheck(actionRecheckCount ?? 0)),
+      };
+    }
+
+    case "message_image": {
+      if (!actionEnqueued && !actionCompleted) {
+        return {
+          kind: "enqueue_turn",
+          purpose: "send_message",
+          wake_status: "active",
+          fixed_body: node.config.caption || undefined,
+        };
+      }
+      if (actionCompleted) {
+        const edge = selectEdge(edges, node.id, { type: "always" });
+        if (!edge) return { kind: "fail", error: `message_image node "${node.id}" has no outbound edge` };
+        return { kind: "advance", next_node_id: edge.target, next_eval_at: clock() };
+      }
+      if ((actionRecheckCount ?? 0) >= MAX_ACTION_RECHECKS) {
+        return { kind: "dead", reason: "action_turn_never_completed" };
+      }
+      return {
+        kind: "recheck",
+        next_eval_at: new Date(clock().getTime() + atrasoDoRecheck(actionRecheckCount ?? 0)),
+      };
+    }
+
+    case "message_video": {
+      if (!actionEnqueued && !actionCompleted) {
+        return {
+          kind: "enqueue_turn",
+          purpose: "send_message",
+          wake_status: "active",
+          fixed_body: node.config.caption || undefined,
+        };
+      }
+      if (actionCompleted) {
+        const edge = selectEdge(edges, node.id, { type: "always" });
+        if (!edge) return { kind: "fail", error: `message_video node "${node.id}" has no outbound edge` };
+        return { kind: "advance", next_node_id: edge.target, next_eval_at: clock() };
+      }
+      if ((actionRecheckCount ?? 0) >= MAX_ACTION_RECHECKS) {
+        return { kind: "dead", reason: "action_turn_never_completed" };
+      }
+      return {
+        kind: "recheck",
+        next_eval_at: new Date(clock().getTime() + atrasoDoRecheck(actionRecheckCount ?? 0)),
+      };
+    }
+
+    case "message_audio": {
+      if (!actionEnqueued && !actionCompleted) {
+        return {
+          kind: "enqueue_turn",
+          purpose: "send_message",
+          wake_status: "active",
+        };
+      }
+      if (actionCompleted) {
+        const edge = selectEdge(edges, node.id, { type: "always" });
+        if (!edge) return { kind: "fail", error: `message_audio node "${node.id}" has no outbound edge` };
+        return { kind: "advance", next_node_id: edge.target, next_eval_at: clock() };
+      }
+      if ((actionRecheckCount ?? 0) >= MAX_ACTION_RECHECKS) {
+        return { kind: "dead", reason: "action_turn_never_completed" };
+      }
+      return {
+        kind: "recheck",
+        next_eval_at: new Date(clock().getTime() + atrasoDoRecheck(actionRecheckCount ?? 0)),
+      };
+    }
+
+    case "typing": {
+      if (wokeEarly) {
+        const edge = selectEdge(edges, node.id, { type: "always" });
+        if (!edge) return { kind: "fail", error: `typing node "${node.id}" has no outbound edge after elapsing` };
+        return { kind: "advance", next_node_id: edge.target, next_eval_at: clock() };
+      }
+      if (!waitElapsed) {
+        const durationMs = (node.config.duration_seconds || 3) * 1000;
+        return {
+          kind: "wait",
+          next_eval_at: new Date(clock().getTime() + durationMs),
+        };
+      }
+      const edge = selectEdge(edges, node.id, { type: "always" });
+      if (!edge) return { kind: "fail", error: `typing node "${node.id}" has no outbound edge after elapsing` };
+      return { kind: "advance", next_node_id: edge.target, next_eval_at: clock() };
+    }
+
+    case "delay": {
+      if (wokeEarly && !node.config.immune_to_reply) {
+        const edge = selectEdge(edges, node.id, { type: "always" });
+        if (!edge) return { kind: "fail", error: `delay node "${node.id}" has no outbound edge after elapsing` };
+        return { kind: "advance", next_node_id: edge.target, next_eval_at: clock() };
+      }
+      if (!waitElapsed) {
+        const multipliers: Record<string, number> = {
+          minutes: 60 * 1000,
+          hours: 60 * 60 * 1000,
+          days: 24 * 60 * 60 * 1000,
+        };
+        const durationMs = node.config.duration_value * (multipliers[node.config.unit] ?? 60 * 1000);
+        return {
+          kind: "wait",
+          next_eval_at: new Date(clock().getTime() + durationMs),
+          ...(node.config.immune_to_reply ? { wake_status: "dormente" as const } : {}),
+        };
+      }
+      const edge = selectEdge(edges, node.id, { type: "always" });
+      if (!edge) return { kind: "fail", error: `delay node "${node.id}" has no outbound edge after elapsing` };
+      return { kind: "advance", next_node_id: edge.target, next_eval_at: clock() };
+    }
+
+    case "tag": {
+      const edge = selectEdge(edges, node.id, { type: "always" });
+      if (!edge) return { kind: "fail", error: `tag node "${node.id}" has no outbound edge` };
+      return { kind: "advance", next_node_id: edge.target, next_eval_at: clock() };
+    }
+
+    case "stage_move": {
+      const edge = selectEdge(edges, node.id, { type: "always" });
+      if (!edge) return { kind: "fail", error: `stage_move node "${node.id}" has no outbound edge` };
+      return { kind: "advance", next_node_id: edge.target, next_eval_at: clock() };
+    }
+
     case "end": {
       if (node.config.outcome === "custom") {
         return { kind: "complete", outcome: null, cancel_reason: node.config.note };

@@ -47,7 +47,7 @@ import {
   avisoDeRecuperacaoEsgotada,
   type AvisoRecuperacaoEsgotada,
 } from "./no-show-recuperacao-esgotada";
-import { interpolarDestino, persistirRespostaFollowupSupabase } from "./persistir-resposta";
+import { interpolarDestino, persistirRespostaFollowupSupabase, aplicarTagsFollowupSupabase, moverEtapaFollowupSupabase } from "./persistir-resposta";
 
 const MAX_STEPS = 80;
 const CLAIM_LEASE_SECONDS = 120;
@@ -94,6 +94,9 @@ export interface FollowupJobRequest {
      *  intervalo e a orientação de cada uma. O planejador precisa ver a sequência
      *  inteira — decidir bem a 1ª espera e mal a 3ª não é um plano. */
     waits?: EsperaAdaptativa[];
+    /** Mídia anexada para nós de mensagem (message_image, message_video, message_audio) */
+    media_url?: string;
+    media_type?: "image" | "video" | "audio";
   };
 }
 
@@ -143,6 +146,17 @@ export interface AdminClient {
     contact_id: string;
     save_to: ReplySaveTo;
     value: string;
+  }): Promise<void>;
+  updateLeadTags?(input: {
+    organization_id: string;
+    contact_id: string;
+    action: "add" | "remove";
+    tags: string[];
+  }): Promise<void>;
+  updateLeadStage?(input: {
+    organization_id: string;
+    contact_id: string;
+    stage_id: string;
   }): Promise<void>;
 }
 
@@ -253,6 +267,29 @@ function turnPayloadExtras(
     return {
       template_id: node.config.template_id,
       ...(volta ? { volta_index: volta.index, volta_total: volta.total } : {}),
+    };
+  }
+  if (node.type === "message_text") {
+    return { fixed_body: interpolarVolta(node.config.body, events) };
+  }
+  if (node.type === "message_image") {
+    return {
+      ...(node.config.caption ? { fixed_body: interpolarVolta(node.config.caption, events) } : {}),
+      media_url: node.config.media_url,
+      media_type: "image",
+    };
+  }
+  if (node.type === "message_video") {
+    return {
+      ...(node.config.caption ? { fixed_body: interpolarVolta(node.config.caption, events) } : {}),
+      media_url: node.config.media_url,
+      media_type: "video",
+    };
+  }
+  if (node.type === "message_audio") {
+    return {
+      media_url: node.config.media_url,
+      media_type: "audio",
     };
   }
   if (node.type === "ai_classify") {
@@ -498,6 +535,38 @@ async function applyResult(
     }
   }
 
+  if (result.kind === "advance" && !isReplay) {
+    if (node.type === "tag" && db.updateLeadTags) {
+      try {
+        await db.assertServiceBoundary?.(enrollment);
+        await db.updateLeadTags({
+          organization_id: enrollment.organization_id,
+          contact_id: enrollment.contact_id,
+          action: node.config.action,
+          tags: node.config.tags,
+        });
+      } catch (err) {
+        logger.warn("followup: aplicar tags falhou; o fluxo já avançou", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    if (node.type === "stage_move" && db.updateLeadStage) {
+      try {
+        await db.assertServiceBoundary?.(enrollment);
+        await db.updateLeadStage({
+          organization_id: enrollment.organization_id,
+          contact_id: enrollment.contact_id,
+          stage_id: node.config.stage_id,
+        });
+      } catch (err) {
+        logger.warn("followup: mover etapa falhou; o fluxo já avançou", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+
   if (!isReplay) tallyOutcome(result, summary);
 }
 
@@ -582,7 +651,13 @@ async function processEnrollment(
 
   const node = graph.nodes.find((n) => n.id === enrollment.current_node_id);
   if (!node) throw new Error("node_not_found");
-  if (inboundBodyOverride !== undefined && node.type !== "match_reply" && node.type !== "wait") {
+  if (
+    inboundBodyOverride !== undefined &&
+    node.type !== "match_reply" &&
+    node.type !== "wait" &&
+    node.type !== "delay" &&
+    node.type !== "typing"
+  ) {
     return;
   }
 
@@ -614,9 +689,15 @@ async function processEnrollment(
   const precisaEventos =
     vaiPlanejar ||
     node.type === "wait" ||
+    node.type === "delay" ||
+    node.type === "typing" ||
     node.type === "ai_classify" ||
     node.type === "match_reply" ||
     node.type === "action" ||
+    node.type === "message_text" ||
+    node.type === "message_image" ||
+    node.type === "message_video" ||
+    node.type === "message_audio" ||
     node.type === "repeat" ||
     // O `condition` só entra aqui por causa de `last_outcome`: o desfecho do
     // passo anterior mora nos eventos (evento `ai_classified`), e sem lê-los o
@@ -636,7 +717,18 @@ async function processEnrollment(
     planRecheckCount = events.filter((e) => e.node_id === node.id).length;
   }
 
-  if (node.type === "wait" || node.type === "ai_classify" || node.type === "match_reply" || node.type === "action") {
+  if (
+    node.type === "wait" ||
+    node.type === "delay" ||
+    node.type === "typing" ||
+    node.type === "ai_classify" ||
+    node.type === "match_reply" ||
+    node.type === "action" ||
+    node.type === "message_text" ||
+    node.type === "message_image" ||
+    node.type === "message_video" ||
+    node.type === "message_audio"
+  ) {
     waitElapsed = resolveWaitPhase(events, node.id, enrollment.steps_taken);
     // match_reply de captação: a confirmação já enfileirou um evento neste nó.
     // O claim seguinte às vezes chega com steps_taken desalinhado da chave
@@ -645,11 +737,23 @@ async function processEnrollment(
     if (node.type === "match_reply") {
       waitElapsed = waitElapsed || occupancyEventCount(events, node.id) > 0;
     }
-    if (node.type === "ai_classify" || node.type === "match_reply" || node.type === "wait") {
+    if (
+      node.type === "ai_classify" ||
+      node.type === "match_reply" ||
+      node.type === "wait" ||
+      node.type === "delay" ||
+      node.type === "typing"
+    ) {
       const wakeKey = `${node.id}:${enrollment.steps_taken}:wake`;
       wokeEarly = events.some((e) => e.node_id === node.id && e.idempotency_key === wakeKey);
     }
-    if (node.type === "action") {
+    if (
+      node.type === "action" ||
+      node.type === "message_text" ||
+      node.type === "message_image" ||
+      node.type === "message_video" ||
+      node.type === "message_audio"
+    ) {
       actionEnqueued = waitElapsed;
       // NÃO é `occupancyEventCount`: o dead-man mede ociosidade DESDE A ÚLTIMA
       // prova de vida do turno, e um adiamento de janela é prova de vida. Ver
@@ -659,7 +763,10 @@ async function processEnrollment(
     }
   }
   const textoInbound = inboundBodyOverride?.trim() ?? "";
-  if (textoInbound && (node.type === "match_reply" || node.type === "wait")) {
+  if (
+    textoInbound &&
+    (node.type === "match_reply" || node.type === "wait" || node.type === "delay" || node.type === "typing")
+  ) {
     wokeEarly = true;
   }
 
@@ -958,6 +1065,12 @@ export function createSupabaseAdminClient(admin: SupabaseClient): AdminClient {
     },
     async persistirRespostaFollowup(input) {
       await persistirRespostaFollowupSupabase(admin, input);
+    },
+    async updateLeadTags(input) {
+      await aplicarTagsFollowupSupabase(admin, input);
+    },
+    async updateLeadStage(input) {
+      await moverEtapaFollowupSupabase(admin, input);
     },
   };
 }

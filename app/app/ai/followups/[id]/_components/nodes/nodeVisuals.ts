@@ -1,6 +1,23 @@
 import type { ComponentType } from "react";
 
-import { Play, Clock, GitBranch, Brain, ChatCircle, ArrowsClockwise, PaperPlaneTilt, Flag } from "@/lib/ui/icons";
+import {
+  Play,
+  Clock,
+  GitBranch,
+  Brain,
+  ChatCircle,
+  ArrowsClockwise,
+  PaperPlaneTilt,
+  Flag,
+  ChatText,
+  ImageIcon,
+  VideoCamera,
+  Microphone,
+  DotsThree,
+  Hourglass,
+  Tag,
+  Kanban,
+} from "@/lib/ui/icons";
 import type { FlowNode, NodeType } from "@/lib/followup/graph-schema";
 import { RESULTADOS_DO_FIM } from "@/lib/followup/vocabulario";
 
@@ -129,6 +146,79 @@ export const NODE_VISUALS: Record<NodeType, NodeVisual> = {
     defaultLabel: "Fim do fluxo",
     defaultConfig: () => ({ outcome: "exhausted" }),
   },
+  // Flow Builder v2 Phase 1:
+  message_text: {
+    type: "message_text",
+    paletteLabel: "Texto",
+    icon: ChatText,
+    chipClassName: "bg-success-bg text-success-fg",
+    borderClassName: "border-l-success",
+    defaultLabel: "Mensagem de texto",
+    defaultConfig: () => ({ body: "Olá! Como posso te ajudar hoje?" }),
+  },
+  message_image: {
+    type: "message_image",
+    paletteLabel: "Imagem",
+    icon: ImageIcon,
+    chipClassName: "bg-success-bg text-success-fg",
+    borderClassName: "border-l-success",
+    defaultLabel: "Enviar imagem",
+    defaultConfig: () => ({ media_url: "" }),
+  },
+  message_video: {
+    type: "message_video",
+    paletteLabel: "Vídeo",
+    icon: VideoCamera,
+    chipClassName: "bg-success-bg text-success-fg",
+    borderClassName: "border-l-success",
+    defaultLabel: "Enviar vídeo",
+    defaultConfig: () => ({ media_url: "" }),
+  },
+  message_audio: {
+    type: "message_audio",
+    paletteLabel: "Áudio",
+    icon: Microphone,
+    chipClassName: "bg-success-bg text-success-fg",
+    borderClassName: "border-l-success",
+    defaultLabel: "Enviar áudio",
+    defaultConfig: () => ({ media_url: "" }),
+  },
+  typing: {
+    type: "typing",
+    paletteLabel: "Digitando",
+    icon: DotsThree,
+    chipClassName: "bg-info-bg text-info-fg",
+    borderClassName: "border-l-info",
+    defaultLabel: "Simular digitando",
+    defaultConfig: () => ({ duration_seconds: 3 }),
+  },
+  delay: {
+    type: "delay",
+    paletteLabel: "Delay",
+    icon: Hourglass,
+    chipClassName: "bg-info-bg text-info-fg",
+    borderClassName: "border-l-info",
+    defaultLabel: "Aguardar tempo",
+    defaultConfig: () => ({ duration_value: 5, unit: "minutes" }),
+  },
+  tag: {
+    type: "tag",
+    paletteLabel: "Tag",
+    icon: Tag,
+    chipClassName: "bg-accent-soft text-accent",
+    borderClassName: "border-l-accent-500",
+    defaultLabel: "Adicionar tag",
+    defaultConfig: () => ({ action: "add", tags: ["interessado"] }),
+  },
+  stage_move: {
+    type: "stage_move",
+    paletteLabel: "Mover etapa",
+    icon: Kanban,
+    chipClassName: "bg-warning-bg text-warning-fg",
+    borderClassName: "border-l-warning",
+    defaultLabel: "Mover no funil",
+    defaultConfig: () => ({ pipeline_id: "00000000-0000-0000-0000-000000000000", stage_id: "00000000-0000-0000-0000-000000000000" }),
+  },
 };
 
 export const NODE_VISUAL_LIST = Object.values(NODE_VISUALS);
@@ -200,6 +290,37 @@ export function describeNodeConfig(
     case "end": {
       const c = config as ConfigOf<"end">;
       return t(RESULTADOS_DO_FIM[c.outcome]);
+    }
+    case "message_text": {
+      const c = config as ConfigOf<"message_text">;
+      return c.body || t("Mensagem de texto");
+    }
+    case "message_image": {
+      const c = config as ConfigOf<"message_image">;
+      return c.caption || t("Imagem");
+    }
+    case "message_video": {
+      const c = config as ConfigOf<"message_video">;
+      return c.caption || t("Vídeo");
+    }
+    case "message_audio": {
+      return t("Mensagem de áudio");
+    }
+    case "typing": {
+      const c = config as ConfigOf<"typing">;
+      return `${c.duration_seconds}s ${t("digitando…")}`;
+    }
+    case "delay": {
+      const c = config as ConfigOf<"delay">;
+      const u = c.unit === "days" ? t("dias") : c.unit === "hours" ? t("horas") : t("min");
+      return `${c.duration_value} ${u}${c.immune_to_reply ? ` · ${t("imune a resposta")}` : ""}`;
+    }
+    case "tag": {
+      const c = config as ConfigOf<"tag">;
+      return `${c.action === "add" ? t("Adicionar") : t("Remover")} ${c.tags?.join(", ") || t("nenhuma")}`;
+    }
+    case "stage_move": {
+      return t("Mover etapa do funil");
     }
     default: {
       const exhaustive: never = type;

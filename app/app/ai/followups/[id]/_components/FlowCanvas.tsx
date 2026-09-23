@@ -59,6 +59,16 @@ import { MatchReplyNode } from "./nodes/MatchReplyNode";
 import { RepeatNode } from "./nodes/RepeatNode";
 import { ActionNode } from "./nodes/ActionNode";
 import { EndNode } from "./nodes/EndNode";
+import {
+  MessageTextNode,
+  MessageImageNode,
+  MessageVideoNode,
+  MessageAudioNode,
+  TypingNode,
+  DelayNode,
+  TagNode,
+  StageMoveNode,
+} from "./nodes/NewNodes";
 
 const EMPTY_GRAPH: FlowGraph = { nodes: [], edges: [] };
 const DND_MIME = "application/x-followup-node-type";
@@ -74,6 +84,14 @@ const nodeTypes: NodeTypes = {
   repeat: RepeatNode,
   action: ActionNode,
   end: EndNode,
+  message_text: MessageTextNode,
+  message_image: MessageImageNode,
+  message_video: MessageVideoNode,
+  message_audio: MessageAudioNode,
+  typing: TypingNode,
+  delay: DelayNode,
+  tag: TagNode,
+  stage_move: StageMoveNode,
 };
 
 interface Props {

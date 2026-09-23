@@ -14,6 +14,15 @@ export const NODE_TYPES = [
   'repeat',
   'action',
   'end',
+  // Flow Builder v2 (Phase 1):
+  'message_text',
+  'message_image',
+  'message_video',
+  'message_audio',
+  'typing',
+  'delay',
+  'tag',
+  'stage_move',
 ] as const;
 export type NodeType = (typeof NODE_TYPES)[number];
 
@@ -302,6 +311,45 @@ export const endConfigSchema = z.strictObject({
   note: z.string().max(200).optional(),
 });
 
+/** Configurações dos nós do Flow Builder v2 (Fase 1) */
+export const messageTextConfigSchema = z.strictObject({
+  body: z.string().min(1).max(4000),
+});
+
+export const messageImageConfigSchema = z.strictObject({
+  media_url: z.string().url().max(2000),
+  caption: z.string().max(1000).optional(),
+});
+
+export const messageVideoConfigSchema = z.strictObject({
+  media_url: z.string().url().max(2000),
+  caption: z.string().max(1000).optional(),
+});
+
+export const messageAudioConfigSchema = z.strictObject({
+  media_url: z.string().url().max(2000),
+});
+
+export const typingConfigSchema = z.strictObject({
+  duration_seconds: z.number().int().min(1).max(60).default(3),
+});
+
+export const delayConfigSchema = z.strictObject({
+  duration_value: z.number().int().min(1).max(9999).default(5),
+  unit: z.enum(['minutes', 'hours', 'days']).default('minutes'),
+  immune_to_reply: z.boolean().optional(),
+});
+
+export const tagConfigSchema = z.strictObject({
+  action: z.enum(['add', 'remove']).default('add'),
+  tags: z.array(z.string().min(1).max(60)).min(1).max(20),
+});
+
+export const stageMoveConfigSchema = z.strictObject({
+  pipeline_id: z.string().uuid(),
+  stage_id: z.string().uuid(),
+});
+
 /**
  * Flow node schema — discriminated union based on node type.
  * Each node type has its specific config schema.
@@ -392,6 +440,63 @@ export const flowNodeSchema = z.discriminatedUnion('type', [
       y: z.number(),
     }),
     config: endConfigSchema,
+  }),
+  // Novos nós (Flow Builder v2 Phase 1)
+  z.strictObject({
+    id: z.string().min(1),
+    type: z.literal('message_text'),
+    label: z.string().min(1).max(60),
+    position: z.strictObject({ x: z.number(), y: z.number() }),
+    config: messageTextConfigSchema,
+  }),
+  z.strictObject({
+    id: z.string().min(1),
+    type: z.literal('message_image'),
+    label: z.string().min(1).max(60),
+    position: z.strictObject({ x: z.number(), y: z.number() }),
+    config: messageImageConfigSchema,
+  }),
+  z.strictObject({
+    id: z.string().min(1),
+    type: z.literal('message_video'),
+    label: z.string().min(1).max(60),
+    position: z.strictObject({ x: z.number(), y: z.number() }),
+    config: messageVideoConfigSchema,
+  }),
+  z.strictObject({
+    id: z.string().min(1),
+    type: z.literal('message_audio'),
+    label: z.string().min(1).max(60),
+    position: z.strictObject({ x: z.number(), y: z.number() }),
+    config: messageAudioConfigSchema,
+  }),
+  z.strictObject({
+    id: z.string().min(1),
+    type: z.literal('typing'),
+    label: z.string().min(1).max(60),
+    position: z.strictObject({ x: z.number(), y: z.number() }),
+    config: typingConfigSchema,
+  }),
+  z.strictObject({
+    id: z.string().min(1),
+    type: z.literal('delay'),
+    label: z.string().min(1).max(60),
+    position: z.strictObject({ x: z.number(), y: z.number() }),
+    config: delayConfigSchema,
+  }),
+  z.strictObject({
+    id: z.string().min(1),
+    type: z.literal('tag'),
+    label: z.string().min(1).max(60),
+    position: z.strictObject({ x: z.number(), y: z.number() }),
+    config: tagConfigSchema,
+  }),
+  z.strictObject({
+    id: z.string().min(1),
+    type: z.literal('stage_move'),
+    label: z.string().min(1).max(60),
+    position: z.strictObject({ x: z.number(), y: z.number() }),
+    config: stageMoveConfigSchema,
   }),
 ]);
 
