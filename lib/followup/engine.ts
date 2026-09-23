@@ -20,7 +20,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { idsDoContatoEGemeos } from "@/lib/channels/contato-por-telefone";
 import { logger } from "@/lib/logger";
 
-import { flowGraphSchema, type FlowGraph, type FlowNode, type ReplySaveTo } from "./graph-schema";
+import { flowGraphSchema, isSendMessageNode, type FlowGraph, type FlowNode, type ReplySaveTo } from "./graph-schema";
 import {
   ACTION_RECHECK_MS,
   BACKOFF_MS,
@@ -817,11 +817,7 @@ async function processEnrollment(
     node.type === "typing" ||
     node.type === "ai_classify" ||
     node.type === "match_reply" ||
-    node.type === "action" ||
-    node.type === "message_text" ||
-    node.type === "message_image" ||
-    node.type === "message_video" ||
-    node.type === "message_audio"
+    isSendMessageNode(node)
   ) {
     waitElapsed = resolveWaitPhase(events, node.id, enrollment.steps_taken);
     // match_reply de captação: a confirmação já enfileirou um evento neste nó.
@@ -841,13 +837,7 @@ async function processEnrollment(
       const wakeKey = `${node.id}:${enrollment.steps_taken}:wake`;
       wokeEarly = events.some((e) => e.node_id === node.id && e.idempotency_key === wakeKey);
     }
-    if (
-      node.type === "action" ||
-      node.type === "message_text" ||
-      node.type === "message_image" ||
-      node.type === "message_video" ||
-      node.type === "message_audio"
-    ) {
+    if (isSendMessageNode(node)) {
       actionEnqueued = waitElapsed;
       // NÃO é `occupancyEventCount`: o dead-man mede ociosidade DESDE A ÚLTIMA
       // prova de vida do turno, e um adiamento de janela é prova de vida. Ver

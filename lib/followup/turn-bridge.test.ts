@@ -142,9 +142,97 @@ describe("completeTurnForEnrollment — 'sent' (action)", () => {
     expect(updateEnrollment).not.toHaveBeenCalled();
   });
 
-  it("throws when the node isn't an 'action' node", async () => {
+  it("throws when the node isn't an 'action' node or other message sending node", async () => {
     const { db } = fakeDb({ enrollment: enrollment({ current_node_id: "ac1" }), graph: CLASSIFY_GRAPH });
     await expect(completeTurnForEnrollment(db, "org-1", "enr-1", "ac1", { kind: "sent" }, clock)).rejects.toThrow();
+  });
+
+  it("advances message_text node via 'always' edge upon 'sent' result", async () => {
+    const graph: FlowGraph = {
+      nodes: [
+        { id: "mt1", type: "message_text", label: "Texto", position: { x: 0, y: 0 }, config: { body: "Olá" } },
+        { id: "e1", type: "end", label: "Done", position: { x: 0, y: 0 }, config: { outcome: "converted" } },
+      ],
+      edges: [{ id: "mt1-e1", source: "mt1", target: "e1", priority: 0, condition: { type: "always" } }],
+    };
+    const { db, updateEnrollment, insertEnrollmentEvent } = fakeDb({ enrollment: enrollment({ current_node_id: "mt1" }), graph });
+
+    await completeTurnForEnrollment(db, "org-1", "enr-1", "mt1", { kind: "sent" }, clock);
+
+    expect(insertEnrollmentEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ event_type: "action_sent", idempotency_key: "mt1:4" }),
+    );
+    expect(updateEnrollment).toHaveBeenCalledWith(
+      "enr-1",
+      "org-1",
+      expect.objectContaining({ current_node_id: "e1", status: "active", steps_taken: 5 }),
+    );
+  });
+
+  it("advances message_image node via 'always' edge upon 'sent' result", async () => {
+    const graph: FlowGraph = {
+      nodes: [
+        { id: "mi1", type: "message_image", label: "Imagem", position: { x: 0, y: 0 }, config: { media_url: "https://example.com/img.jpg" } },
+        { id: "e1", type: "end", label: "Done", position: { x: 0, y: 0 }, config: { outcome: "converted" } },
+      ],
+      edges: [{ id: "mi1-e1", source: "mi1", target: "e1", priority: 0, condition: { type: "always" } }],
+    };
+    const { db, updateEnrollment, insertEnrollmentEvent } = fakeDb({ enrollment: enrollment({ current_node_id: "mi1" }), graph });
+
+    await completeTurnForEnrollment(db, "org-1", "enr-1", "mi1", { kind: "sent" }, clock);
+
+    expect(insertEnrollmentEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ event_type: "action_sent", idempotency_key: "mi1:4" }),
+    );
+    expect(updateEnrollment).toHaveBeenCalledWith(
+      "enr-1",
+      "org-1",
+      expect.objectContaining({ current_node_id: "e1", status: "active", steps_taken: 5 }),
+    );
+  });
+
+  it("advances message_video node via 'always' edge upon 'sent' result", async () => {
+    const graph: FlowGraph = {
+      nodes: [
+        { id: "mv1", type: "message_video", label: "Vídeo", position: { x: 0, y: 0 }, config: { media_url: "https://example.com/video.mp4" } },
+        { id: "e1", type: "end", label: "Done", position: { x: 0, y: 0 }, config: { outcome: "converted" } },
+      ],
+      edges: [{ id: "mv1-e1", source: "mv1", target: "e1", priority: 0, condition: { type: "always" } }],
+    };
+    const { db, updateEnrollment, insertEnrollmentEvent } = fakeDb({ enrollment: enrollment({ current_node_id: "mv1" }), graph });
+
+    await completeTurnForEnrollment(db, "org-1", "enr-1", "mv1", { kind: "sent" }, clock);
+
+    expect(insertEnrollmentEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ event_type: "action_sent", idempotency_key: "mv1:4" }),
+    );
+    expect(updateEnrollment).toHaveBeenCalledWith(
+      "enr-1",
+      "org-1",
+      expect.objectContaining({ current_node_id: "e1", status: "active", steps_taken: 5 }),
+    );
+  });
+
+  it("advances message_audio node via 'always' edge upon 'sent' result", async () => {
+    const graph: FlowGraph = {
+      nodes: [
+        { id: "ma1", type: "message_audio", label: "Áudio", position: { x: 0, y: 0 }, config: { media_url: "https://example.com/audio.ogg" } },
+        { id: "e1", type: "end", label: "Done", position: { x: 0, y: 0 }, config: { outcome: "converted" } },
+      ],
+      edges: [{ id: "ma1-e1", source: "ma1", target: "e1", priority: 0, condition: { type: "always" } }],
+    };
+    const { db, updateEnrollment, insertEnrollmentEvent } = fakeDb({ enrollment: enrollment({ current_node_id: "ma1" }), graph });
+
+    await completeTurnForEnrollment(db, "org-1", "enr-1", "ma1", { kind: "sent" }, clock);
+
+    expect(insertEnrollmentEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ event_type: "action_sent", idempotency_key: "ma1:4" }),
+    );
+    expect(updateEnrollment).toHaveBeenCalledWith(
+      "enr-1",
+      "org-1",
+      expect.objectContaining({ current_node_id: "e1", status: "active", steps_taken: 5 }),
+    );
   });
 
   it("match_reply + sent is a no-op — the confirm question already parked waiting_reply", async () => {

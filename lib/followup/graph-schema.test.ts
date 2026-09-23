@@ -19,6 +19,9 @@ import {
   nodeBranches,
   branchIdForCondition,
   conditionForBranch,
+  MESSAGE_SENDING_NODE_TYPES,
+  isMessageSendingNodeType,
+  isSendMessageNode,
 } from './graph-schema';
 import type { NodeType, FlowGraph, FlowNode, FlowEdge } from './graph-schema';
 import { toReactFlow, fromReactFlow } from './graph-mappers';
@@ -49,6 +52,36 @@ describe('graph-schema', () => {
     it('NodeType type matches NODE_TYPES', () => {
       const nt: NodeType = 'trigger';
       expect(nt).toBeTruthy();
+    });
+  });
+
+  describe('MESSAGE_SENDING_NODE_TYPES & isSendMessageNode', () => {
+    it('defines exactly the 5 message sending node types (action, message_text, message_image, message_video, message_audio)', () => {
+      expect(MESSAGE_SENDING_NODE_TYPES).toEqual([
+        'action',
+        'message_text',
+        'message_image',
+        'message_video',
+        'message_audio',
+      ]);
+    });
+
+    it('identifies message sending nodes correctly', () => {
+      for (const type of MESSAGE_SENDING_NODE_TYPES) {
+        expect(isMessageSendingNodeType(type)).toBe(true);
+        expect(isSendMessageNode({ type })).toBe(true);
+      }
+      expect(isMessageSendingNodeType('trigger')).toBe(false);
+      expect(isMessageSendingNodeType('wait')).toBe(false);
+      expect(isMessageSendingNodeType('condition')).toBe(false);
+      expect(isMessageSendingNodeType('ai_classify')).toBe(false);
+      expect(isMessageSendingNodeType('match_reply')).toBe(false);
+      expect(isMessageSendingNodeType('end')).toBe(false);
+      expect(isMessageSendingNodeType('typing')).toBe(false);
+      expect(isMessageSendingNodeType('delay')).toBe(false);
+      expect(isMessageSendingNodeType('tag')).toBe(false);
+      expect(isMessageSendingNodeType('stage_move')).toBe(false);
+      expect(isSendMessageNode({ type: 'trigger' })).toBe(false);
     });
   });
 
@@ -712,6 +745,67 @@ describe('graph-schema', () => {
       expect(result.success).toBe(true);
     });
 
+    it('accepts message_text node', () => {
+      const result = flowNodeSchema.safeParse({
+        id: 'mt-1',
+        type: 'message_text',
+        label: 'Texto',
+        position: { x: 100, y: 100 },
+        config: { body: 'Olá! Tudo bem?' },
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it('accepts message_image node with media_type, media_mime, media_filename', () => {
+      const result = flowNodeSchema.safeParse({
+        id: 'mi-1',
+        type: 'message_image',
+        label: 'Imagem',
+        position: { x: 100, y: 100 },
+        config: {
+          media_url: 'https://example.com/imagem.png',
+          media_type: 'image',
+          media_mime: 'image/png',
+          media_filename: 'imagem.png',
+          caption: 'Veja nossa promoção',
+        },
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it('accepts message_video node with media_type, media_mime, media_filename', () => {
+      const result = flowNodeSchema.safeParse({
+        id: 'mv-1',
+        type: 'message_video',
+        label: 'Vídeo',
+        position: { x: 100, y: 100 },
+        config: {
+          media_url: 'https://example.com/video.mp4',
+          media_type: 'video',
+          media_mime: 'video/mp4',
+          media_filename: 'demo.mp4',
+          caption: 'Apresentação do produto',
+        },
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it('accepts message_audio node with media_type, media_mime, media_filename', () => {
+      const result = flowNodeSchema.safeParse({
+        id: 'ma-1',
+        type: 'message_audio',
+        label: 'Áudio',
+        position: { x: 100, y: 100 },
+        config: {
+          media_url: 'https://example.com/audio.ogg',
+          media_type: 'audio',
+          media_mime: 'audio/ogg',
+          media_filename: 'mensagem.ogg',
+        },
+      });
+      expect(result.success).toBe(true);
+    });
+
     it('rejects node without id', () => {
       const result = flowNodeSchema.safeParse({
         type: 'trigger',
@@ -827,6 +921,61 @@ describe('graph-schema', () => {
             target: 'end-1',
             condition: { type: 'always' },
           },
+        ],
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it('aceita grafo completo com nós de mensagem contendo media_mime, media_type e media_filename', () => {
+      const result = flowGraphSchema.safeParse({
+        nodes: [
+          { id: 't1', type: 'trigger', label: 'Início', position: { x: 0, y: 0 }, config: {} },
+          { id: 'mt1', type: 'message_text', label: 'Texto', position: { x: 0, y: 100 }, config: { body: 'Olá' } },
+          {
+            id: 'mi1',
+            type: 'message_image',
+            label: 'Imagem',
+            position: { x: 0, y: 200 },
+            config: {
+              media_url: 'https://example.com/banner.png',
+              media_type: 'image',
+              media_mime: 'image/png',
+              media_filename: 'banner.png',
+              caption: 'Promoção',
+            },
+          },
+          {
+            id: 'mv1',
+            type: 'message_video',
+            label: 'Vídeo',
+            position: { x: 0, y: 300 },
+            config: {
+              media_url: 'https://example.com/video.mp4',
+              media_type: 'video',
+              media_mime: 'video/mp4',
+              media_filename: 'apresentacao.mp4',
+            },
+          },
+          {
+            id: 'ma1',
+            type: 'message_audio',
+            label: 'Áudio',
+            position: { x: 0, y: 400 },
+            config: {
+              media_url: 'https://example.com/audio.ogg',
+              media_type: 'audio',
+              media_mime: 'audio/ogg',
+              media_filename: 'audio.ogg',
+            },
+          },
+          { id: 'e1', type: 'end', label: 'Fim', position: { x: 0, y: 500 }, config: { outcome: 'converted' } },
+        ],
+        edges: [
+          { id: 'e-1', source: 't1', target: 'mt1', priority: 0, condition: { type: 'always' } },
+          { id: 'e-2', source: 'mt1', target: 'mi1', priority: 0, condition: { type: 'always' } },
+          { id: 'e-3', source: 'mi1', target: 'mv1', priority: 0, condition: { type: 'always' } },
+          { id: 'e-4', source: 'mv1', target: 'ma1', priority: 0, condition: { type: 'always' } },
+          { id: 'e-5', source: 'ma1', target: 'e1', priority: 0, condition: { type: 'always' } },
         ],
       });
       expect(result.success).toBe(true);

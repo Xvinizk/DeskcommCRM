@@ -19,7 +19,7 @@ import { requireCurrentServiceBoundary } from "@/lib/atendimento/fronteira-serve
 import type pg from "pg";
 
 import type { AdminClient, EnrollmentPatch } from "./engine";
-import { flowGraphSchema } from "./graph-schema";
+import { flowGraphSchema, isSendMessageNode } from "./graph-schema";
 import { EVENTO_ACAO_ADIADA, classEdgeMatch, selectEdge, type EnrollmentRow } from "./node-handlers";
 import { coletarEsperasAdaptativas, montarTimingPlan, type PropostaDeEspera } from "./timing-plan";
 import { persistirRespostaFollowupPg } from "./persistir-resposta";
@@ -196,11 +196,11 @@ export async function completeTurnForEnrollment(
     // Completar o envio não avança — a resposta do lead é que avança.
     // Lançar aqui devolvia o job pra pending e o pipeline mandava a pergunta de novo.
     if (node.type === "match_reply") return;
-    if (node.type !== "action") {
-      throw new Error(`completeTurnForEnrollment: resultado 'sent' mas o nó "${node.id}" não é 'action'`);
+    if (!isSendMessageNode(node)) {
+      throw new Error(`completeTurnForEnrollment: resultado 'sent' mas o nó "${node.id}" (${node.type}) não é um nó de envio de mensagem`);
     }
     const edge = selectEdge(graph.edges, node.id, { type: "always" });
-    if (!edge) throw new Error(`action node "${node.id}" sem aresta 'always' de saída`);
+    if (!edge) throw new Error(`node "${node.id}" (${node.type}) sem aresta 'always' de saída`);
     await applyStep(
       "action_sent",
       {},

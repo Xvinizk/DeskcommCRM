@@ -27,6 +27,28 @@ export const NODE_TYPES = [
 export type NodeType = (typeof NODE_TYPES)[number];
 
 /**
+ * Tipos de nós que realizam envio de mensagem no canal.
+ * Usado pelo turn-bridge, engine e handlers para avançar a cadência após 'sent'.
+ */
+export const MESSAGE_SENDING_NODE_TYPES = [
+  'action',
+  'message_text',
+  'message_image',
+  'message_video',
+  'message_audio',
+] as const;
+export type MessageSendingNodeType = (typeof MESSAGE_SENDING_NODE_TYPES)[number];
+
+export function isMessageSendingNodeType(type: string): type is MessageSendingNodeType {
+  return (MESSAGE_SENDING_NODE_TYPES as readonly string[]).includes(type);
+}
+
+export function isSendMessageNode(node: { type: string }): boolean {
+  return isMessageSendingNodeType(node.type);
+}
+
+
+/**
  * ---------------------------------------------------------------------------
  * Named branches (graph v2)
  * ---------------------------------------------------------------------------

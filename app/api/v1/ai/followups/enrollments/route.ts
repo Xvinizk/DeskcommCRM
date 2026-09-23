@@ -78,23 +78,52 @@ export async function POST(req: NextRequest): Promise<Response> {
     });
   }
 
-  const result = await enrollFollowupFlow(createAdminClient(), {
-    organizationId: activeOrg.orgId,
-    pointerId: parsed.data.pointer_id,
-    contactId: parsed.data.contact_id,
-    agentId: parsed.data.agent_id,
-    conversationId: parsed.data.conversation_id,
-    replaceActive: parsed.data.replace_active,
-    origin: "manual_trigger",
-    actorUserId: user.id,
-    requestId,
-  });
-
-  if (!result.ok) {
-    return fail(result.code, result.message, result.status, {
+  try {
+    const result = await enrollFollowupFlow(createAdminClient(), {
+      organizationId: activeOrg.orgId,
+      pointerId: parsed.data.pointer_id,
+      contactId: parsed.data.contact_id,
+      agentId: parsed.data.agent_id,
+      conversationId: parsed.data.conversation_id,
+      replaceActive: parsed.data.replace_active,
+      origin: "manual_trigger",
+      actorUserId: user.id,
       requestId,
-      ...(result.activeEnrollment ? { details: { active_enrollment: result.activeEnrollment } } : {}),
     });
+
+    if (!result.ok) {
+      return fail(result.code, result.message, result.status, {
+        requestId,
+        ...(result.activeEnrollment ? { details: { active_enrollment: result.activeEnrollment } } : {}),
+      });
+    }
+    return ok(result.enrollment, { requestId, status: 201 });
+  } catch (err: unknown) {
+    const errObj = (typeof err === "object" && err !== null ? err : {}) as {
+      message?: string;
+      code?: string;
+      details?: string;
+    };
+    const msg =
+      err instanceof Error
+        ? err.message
+        : typeof errObj.message === "string"
+          ? errObj.message
+          : typeof errObj.details === "string"
+            ? errObj.details
+            : String(err);
+    if (msg.includes("service_channel_not_found")) {
+      return fail(
+        "service_channel_not_found",
+        t("Nenhum canal ativo ou conectado para iniciar o atendimento deste contato."),
+        422,
+        { requestId },
+      );
+    }
+    if (msg.includes("service_contact_not_found")) {
+      return fail("not_found", t("Contato não encontrado."), 404, { requestId });
+    }
+    return fail("internal_error", msg, 500, { requestId });
   }
-  return ok(result.enrollment, { requestId, status: 201 });
 }
+

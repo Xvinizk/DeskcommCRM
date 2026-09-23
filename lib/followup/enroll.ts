@@ -172,11 +172,84 @@ export async function enrollFollowupFlow(
     );
   }
 
-  const boundary = input.resolveServiceBoundary
-    ? await input.resolveServiceBoundary()
-    : await beginServiceAtOrigin(supabase, organizationId, contactId, input.conversationId);
-  if (input.resolveServiceBoundary) await assertServiceBoundarySupabase(supabase, boundary);
-  const conversationId = input.conversationId ?? boundary.conversation_id;
+  let channelSessionId: string | undefined = undefined;
+  if (input.conversationId) {
+    const { data: conv, error: convErr } = await supabase
+      .from("conversations")
+      .select("id, contact_id, channel_session_id")
+      .eq("organization_id", organizationId)
+      .eq("id", input.conversationId)
+      .maybeSingle();
+    if (convErr) {
+      return { ok: false, code: "internal_error", message: convErr.message, status: 500 };
+    }
+    if (conv) {
+      if (conv.contact_id && conv.contact_id !== contactId) {
+        return {
+          ok: false,
+          code: "invalid_request",
+          message: "A conversa informada pertence a outro contato.",
+          status: 400,
+        };
+      }
+      if (conv.channel_session_id) {
+        channelSessionId = conv.channel_session_id;
+      }
+    }
+  }
+
+  let boundary: ServiceBoundary;
+  try {
+    boundary = input.resolveServiceBoundary
+      ? await input.resolveServiceBoundary()
+      : await beginServiceAtOrigin(supabase, organizationId, contactId, channelSessionId);
+    if (input.resolveServiceBoundary) await assertServiceBoundarySupabase(supabase, boundary);
+  } catch (err: unknown) {
+    const errObj = (typeof err === "object" && err !== null ? err : {}) as {
+      message?: string;
+      code?: string;
+      details?: string;
+    };
+    const msg =
+      err instanceof Error
+        ? err.message
+        : typeof errObj.message === "string"
+          ? errObj.message
+          : typeof errObj.details === "string"
+            ? errObj.details
+            : String(err);
+    if (msg.includes("service_channel_not_found")) {
+      return {
+        ok: false,
+        code: "service_channel_not_found",
+        message: "Nenhum canal ativo ou conectado para iniciar o atendimento deste contato.",
+        status: 422,
+      };
+    }
+    if (msg.includes("service_contact_not_found")) {
+      return {
+        ok: false,
+        code: "not_found",
+        message: "Contato não encontrado.",
+        status: 404,
+      };
+    }
+    if (msg.includes("service_scope_mismatch")) {
+      return {
+        ok: false,
+        code: "forbidden",
+        message: "Contato pertence a outra organização.",
+        status: 403,
+      };
+    }
+    return {
+      ok: false,
+      code: "service_boundary_failed",
+      message: msg,
+      status: 500,
+    };
+  }
+  const conversationId = boundary.conversation_id;
 
   const { data: created, error: insErr } = await supabase
     .from("followup_enrollments")

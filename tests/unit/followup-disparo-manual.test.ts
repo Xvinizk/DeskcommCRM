@@ -104,6 +104,20 @@ describe("Disparo Manual e Resolução de Conflito de Follow-up", () => {
             }),
           };
         }
+        if (table === "conversations") {
+          return {
+            select: () => ({
+              eq: () => ({
+                eq: () => ({
+                  maybeSingle: () => Promise.resolve({
+                    data: { id: CONVERSATION_ID, contact_id: CONTACT_ID, channel_session_id: null },
+                    error: null,
+                  }),
+                }),
+              }),
+            }),
+          };
+        }
         return {};
       }),
       rpc: vi.fn(() => Promise.resolve({
@@ -319,6 +333,20 @@ describe("Disparo Manual e Resolução de Conflito de Follow-up", () => {
             select: () => ({
               eq: () => ({
                 eq: () => Promise.resolve({ data: [], error: null }),
+              }),
+            }),
+          };
+        }
+        if (table === "conversations") {
+          return {
+            select: () => ({
+              eq: () => ({
+                eq: () => ({
+                  maybeSingle: () => Promise.resolve({
+                    data: { id: CONVERSATION_ID, contact_id: CONTACT_ID, channel_session_id: null },
+                    error: null,
+                  }),
+                }),
               }),
             }),
           };

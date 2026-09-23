@@ -55,6 +55,8 @@ function makeDb(
   enrollments: Row[] = [],
   agents: Row[] = [],
   agentVersions: Row[] = [],
+  conversations: Row[] = [],
+  rpcOverride?: (fnName: string, args: unknown) => Promise<{ data: unknown; error: unknown }>,
 ) {
   const tables: Record<string, Row[]> = {
     followup_flow_pointers: pointers,
@@ -64,6 +66,7 @@ function makeDb(
     followup_enrollment_events: [],
     ai_agents: agents,
     ai_agent_versions: agentVersions,
+    conversations,
   };
 
   function builder(table: string) {
@@ -189,7 +192,25 @@ function makeDb(
     return b;
   }
 
-  return { from: (table: string) => builder(table), rpc: async () => ({ data: { organization_id: ORG_ID, contact_id: CONTACT_ID, conversation_id: "conv-1", service_revision: 1, demanda_id: null, demanda_revision: null, status: "open", demanda_fechada_em: null }, error: null }) };
+  return {
+    from: (table: string) => builder(table),
+    rpc: async (fn: string, args: unknown) => {
+      if (rpcOverride) return rpcOverride(fn, args);
+      return {
+        data: {
+          organization_id: ORG_ID,
+          contact_id: CONTACT_ID,
+          conversation_id: "conv-1",
+          service_revision: 1,
+          demanda_id: null,
+          demanda_revision: null,
+          status: "open",
+          demanda_fechada_em: null,
+        },
+        error: null,
+      };
+    },
+  };
 }
 
 function session(effectiveRole: Role, db: ReturnType<typeof makeDb>) {
@@ -378,6 +399,100 @@ describe("POST /api/v1/ai/followups/enrollments", () => {
     expect(res.status).toBe(201);
     const body = (await res.json()) as { data: Row };
     expect(body.data.agent_id).toBe(AGENT_ID);
+  });
+
+  it("service_channel_not_found no boundary → 422 controlado (não 500 genérico)", async () => {
+    const db = makeDb(
+      [activePointer()],
+      [version()],
+      [contact()],
+      [],
+      [],
+      [],
+      [],
+      async () => ({ data: null, error: { message: "service_channel_not_found", code: "P0002" } }),
+    );
+    session("manager", db);
+    const { POST } = await import("@/app/api/v1/ai/followups/enrollments/route");
+    const res = await POST(req("POST", { pointer_id: POINTER_ID, contact_id: CONTACT_ID }));
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("service_channel_not_found");
+  });
+
+  it("service_contact_not_found no boundary → 404 controlado (não 500 genérico)", async () => {
+    const db = makeDb(
+      [activePointer()],
+      [version()],
+      [contact()],
+      [],
+      [],
+      [],
+      [],
+      async () => ({ data: null, error: { message: "service_contact_not_found", code: "P0002" } }),
+    );
+    session("manager", db);
+    const { POST } = await import("@/app/api/v1/ai/followups/enrollments/route");
+    const res = await POST(req("POST", { pointer_id: POINTER_ID, contact_id: CONTACT_ID }));
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("not_found");
+  });
+
+  it("conversation_id válido resolve channel_session da conversa e inscreve com 201", async () => {
+    const CONV_ID = "77777777-7777-4777-8777-777777777777";
+    const SESSION_ID = "88888888-8888-4888-8888-888888888888";
+    let passedSession: unknown = null;
+    const db = makeDb(
+      [activePointer()],
+      [version()],
+      [contact()],
+      [],
+      [],
+      [],
+      [{ id: CONV_ID, organization_id: ORG_ID, contact_id: CONTACT_ID, channel_session_id: SESSION_ID }],
+      async (_fn, args) => {
+        passedSession = (args as { p_session?: unknown })?.p_session;
+        return {
+          data: {
+            organization_id: ORG_ID,
+            contact_id: CONTACT_ID,
+            conversation_id: CONV_ID,
+            service_revision: 1,
+            demanda_id: null,
+            demanda_revision: null,
+            status: "open",
+            demanda_fechada_em: null,
+          },
+          error: null,
+        };
+      },
+    );
+    session("manager", db);
+    const { POST } = await import("@/app/api/v1/ai/followups/enrollments/route");
+    const res = await POST(req("POST", { pointer_id: POINTER_ID, contact_id: CONTACT_ID, conversation_id: CONV_ID }));
+    expect(res.status).toBe(201);
+    expect(passedSession).toBe(SESSION_ID);
+  });
+
+  it("conversation_id pertencente a outro contato → 400 invalid_request", async () => {
+    const CONV_ID = "77777777-7777-4777-8777-777777777777";
+    const OTHER_CONTACT = "99999999-9999-4999-8999-999999999999";
+    const db = makeDb(
+      [activePointer()],
+      [version()],
+      [contact()],
+      [],
+      [],
+      [],
+      [{ id: CONV_ID, organization_id: ORG_ID, contact_id: OTHER_CONTACT, channel_session_id: "s-1" }],
+    );
+    session("manager", db);
+    const { POST } = await import("@/app/api/v1/ai/followups/enrollments/route");
+    const res = await POST(req("POST", { pointer_id: POINTER_ID, contact_id: CONTACT_ID, conversation_id: CONV_ID }));
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("invalid_request");
   });
 });
 
