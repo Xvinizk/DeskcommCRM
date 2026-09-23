@@ -788,6 +788,7 @@ export const AUDIT_ACTIONS = [
   "scheduled_message.created",
   "scheduled_message.updated",
   "scheduled_message.cancelled",
+  "scheduled_message.cron_run",
 ] as const;
 
 /** Um código de auditoria. Derivado de `AUDIT_ACTIONS` — não redigite a lista. */
