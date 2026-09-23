@@ -320,6 +320,9 @@ export const messageImageConfigSchema = z
   .strictObject({
     media_url: z.string().url().max(2000).optional(),
     media_storage_path: z.string().min(1).max(500).optional(),
+    media_type: z.literal("image").optional(),
+    media_mime: z.string().max(100).optional(),
+    media_filename: z.string().max(255).optional(),
     caption: z.string().max(1000).optional(),
   })
   .refine((d) => Boolean(d.media_storage_path || d.media_url), {
@@ -330,6 +333,9 @@ export const messageVideoConfigSchema = z
   .strictObject({
     media_url: z.string().url().max(2000).optional(),
     media_storage_path: z.string().min(1).max(500).optional(),
+    media_type: z.literal("video").optional(),
+    media_mime: z.string().max(100).optional(),
+    media_filename: z.string().max(255).optional(),
     caption: z.string().max(1000).optional(),
   })
   .refine((d) => Boolean(d.media_storage_path || d.media_url), {
@@ -340,6 +346,9 @@ export const messageAudioConfigSchema = z
   .strictObject({
     media_url: z.string().url().max(2000).optional(),
     media_storage_path: z.string().min(1).max(500).optional(),
+    media_type: z.literal("audio").optional(),
+    media_mime: z.string().max(100).optional(),
+    media_filename: z.string().max(255).optional(),
   })
   .refine((d) => Boolean(d.media_storage_path || d.media_url), {
     message: "media_storage_path or media_url is required",

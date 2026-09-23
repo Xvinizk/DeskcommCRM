@@ -297,14 +297,15 @@ export function describeNodeConfig(
     }
     case "message_image": {
       const c = config as ConfigOf<"message_image">;
-      return c.caption || t("Imagem");
+      return c.caption || c.media_filename || t("Imagem");
     }
     case "message_video": {
       const c = config as ConfigOf<"message_video">;
-      return c.caption || t("Vídeo");
+      return c.caption || c.media_filename || t("Vídeo");
     }
     case "message_audio": {
-      return t("Mensagem de áudio");
+      const c = config as ConfigOf<"message_audio">;
+      return c.media_filename || t("Mensagem de áudio");
     }
     case "typing": {
       const c = config as ConfigOf<"typing">;
