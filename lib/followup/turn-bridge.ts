@@ -22,7 +22,9 @@ import { avancarEnrollmentAtivo, type AdminClient, type EnrollmentPatch } from "
 import { flowGraphSchema, isSendMessageNode } from "./graph-schema";
 import { EVENTO_ACAO_ADIADA, classEdgeMatch, selectEdge, type EnrollmentRow } from "./node-handlers";
 import { coletarEsperasAdaptativas, montarTimingPlan, type PropostaDeEspera } from "./timing-plan";
-import { aplicarTagsFollowupPg, moverEtapaFollowupPg, persistirRespostaFollowupPg } from "./persistir-resposta";
+import { aplicarTagsFollowupCanonica, moverEtapaFollowupCanonica, persistirRespostaFollowupPg } from "./persistir-resposta";
+import { createAdminClient } from "@/lib/supabase/admin";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 /** Superset de AdminClient: a ponte precisa do snapshot COMPLETO do enrollment
  *  (current_node_id/version_id/steps_taken) pra montar o passo de conclusão —
@@ -341,8 +343,13 @@ function mapEnrollmentRow(row: Record<string, unknown>): EnrollmentRow {
   };
 }
 
-/** `TurnBridgeAdminClient` sobre `pg.Pool` — produção do worker 24/7. */
-export function createPgAdminClient(pool: pg.Pool): TurnBridgeAdminClient {
+/** `TurnBridgeAdminClient` sobre `pg.Pool` — produção do worker 24/7.
+ * Reutiliza os pipelines canônicos do Deskcomm para tags e movimentação de etapa. */
+export function createPgAdminClient(
+  pool: pg.Pool,
+  adminClient?: SupabaseClient,
+): TurnBridgeAdminClient {
+  const getAdmin = () => adminClient ?? createAdminClient();
   const revisions=new Map<string,number>();
   return {
     async assertFollowupJob(orgId,jobId,enrollmentId,nodeId,claim){
@@ -512,10 +519,10 @@ export function createPgAdminClient(pool: pg.Pool): TurnBridgeAdminClient {
       await persistirRespostaFollowupPg((sql, params) => pool.query(sql, params), input);
     },
     async updateLeadTags(input) {
-      await aplicarTagsFollowupPg((sql, params) => pool.query(sql, params), input);
+      await aplicarTagsFollowupCanonica(getAdmin(), input);
     },
     async updateLeadStage(input) {
-      await moverEtapaFollowupPg((sql, params) => pool.query(sql, params), input);
+      await moverEtapaFollowupCanonica(getAdmin(), input);
     },
     async enqueueJob(job) {
       await pool.query(

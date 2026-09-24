@@ -138,13 +138,14 @@ export async function moverEtapaFollowupSupabase(
     organization_id: string;
     contact_id: string;
     stage_id: string;
+    lost_reason?: string | null;
     enrollment_id?: string;
     node_id?: string;
   },
 ): Promise<void> {
   const { data: lead, error: selErr } = await admin
     .from("crm_leads")
-    .select("id, pipeline_id, stage_id")
+    .select("id, pipeline_id, stage_id, lost_reason")
     .eq("organization_id", input.organization_id)
     .eq("contact_id", input.contact_id)
     .order("updated_at", { ascending: false })
@@ -155,6 +156,9 @@ export async function moverEtapaFollowupSupabase(
   if (!lead) {
     throw new Error(`lead_not_found_for_contact: contato ${input.contact_id} não possui lead ativo para mover etapa`);
   }
+
+  // Idempotente: se já está na etapa de destino, não faz nada
+  if (lead.stage_id === input.stage_id) return;
 
   const requestId = input.enrollment_id
     ? `flow:${input.enrollment_id}:${input.node_id ?? input.stage_id}`
@@ -177,74 +181,12 @@ export async function moverEtapaFollowupSupabase(
 
   await moveLeadHandler(admin, handlerCtx, lead.id, {
     to_stage_id: input.stage_id,
+    lost_reason: input.lost_reason,
     reason: "Movido automaticamente pelo fluxo de acompanhamento",
   });
 }
 
-export async function aplicarTagsFollowupPg(
-  query: (sql: string, params: unknown[]) => Promise<unknown>,
-  input: {
-    organization_id: string;
-    contact_id: string;
-    action: "add" | "remove";
-    tags: string[];
-  },
-): Promise<void> {
-  if (input.tags.length === 0) return;
-  if (input.action === "add") {
-    await query(
-      `update crm_leads
-          set tags = (
-            select array_agg(distinct t)
-            from unnest(array_cat(coalesce(crm_leads.tags, '{}'::text[]), $3::text[])) as t
-          ),
-          updated_at = now()
-        where id = (
-          select id from crm_leads
-           where organization_id = $1 and contact_id = $2
-           order by updated_at desc
-           limit 1
-        )`,
-      [input.organization_id, input.contact_id, input.tags],
-    );
-  } else {
-    await query(
-      `update crm_leads
-          set tags = (
-            select coalesce(array_agg(t), '{}'::text[])
-            from unnest(coalesce(crm_leads.tags, '{}'::text[])) as t
-            where not (t = any($3::text[]))
-          ),
-          updated_at = now()
-        where id = (
-          select id from crm_leads
-           where organization_id = $1 and contact_id = $2
-           order by updated_at desc
-           limit 1
-        )`,
-      [input.organization_id, input.contact_id, input.tags],
-    );
-  }
-}
+// Aliases canônicos explícitos compartilhados entre App e Worker
+export const aplicarTagsFollowupCanonica = aplicarTagsFollowupSupabase;
+export const moverEtapaFollowupCanonica = moverEtapaFollowupSupabase;
 
-export async function moverEtapaFollowupPg(
-  query: (sql: string, params: unknown[]) => Promise<unknown>,
-  input: {
-    organization_id: string;
-    contact_id: string;
-    stage_id: string;
-  },
-): Promise<void> {
-  await query(
-    `update crm_leads
-        set stage_id = $3::uuid,
-            updated_at = now()
-      where id = (
-        select id from crm_leads
-         where organization_id = $1 and contact_id = $2
-         order by updated_at desc
-         limit 1
-      )`,
-    [input.organization_id, input.contact_id, input.stage_id],
-  );
-}

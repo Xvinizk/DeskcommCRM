@@ -154,11 +154,16 @@ export interface AdminClient {
     contact_id: string;
     action: "add" | "remove";
     tags: string[];
+    enrollment_id?: string;
+    node_id?: string;
   }): Promise<void>;
   updateLeadStage?(input: {
     organization_id: string;
     contact_id: string;
     stage_id: string;
+    lost_reason?: string | null;
+    enrollment_id?: string;
+    node_id?: string;
   }): Promise<void>;
   signalPresence?(input: {
     organization_id: string;
@@ -453,6 +458,8 @@ async function applyResult(
           contact_id: enrollment.contact_id,
           action: node.config.action,
           tags: node.config.tags,
+          enrollment_id: enrollment.id,
+          node_id: node.id,
         });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -467,6 +474,8 @@ async function applyResult(
           organization_id: enrollment.organization_id,
           contact_id: enrollment.contact_id,
           stage_id: node.config.stage_id,
+          enrollment_id: enrollment.id,
+          node_id: node.id,
         });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
