@@ -1,8 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
 
 import { completeTurnForEnrollment, createPgAdminClient, type TurnBridgeAdminClient } from "./turn-bridge";
-import type { EnrollmentRow } from "./node-handlers";
+import type { EnrollmentRow, EnrollmentEventRef } from "./node-handlers";
 import type { FlowGraph } from "./graph-schema";
+import type { FollowupJobRequest } from "./engine";
 
 const NOW = new Date("2026-07-22T12:00:00.000Z");
 const clock = () => NOW;
@@ -491,4 +492,275 @@ it("adapter PG preserva provenance e leitor de inbound filtra a conversa solicit
   const [sql, values] = query.mock.calls.at(-1)! as unknown as [string, unknown[]];
   expect(sql).toMatch(/conversation_id\s*=\s*\$3/);
   expect(values[2]).toBe("conv-1");
+});
+
+describe("PATH B — turn-bridge timing nodes (typing & delay)", () => {
+  function createPathBHarness(opts: {
+    enrollment: EnrollmentRow;
+    graph: FlowGraph;
+  }) {
+    let currentEnrollment = { ...opts.enrollment };
+    const events: EnrollmentEventRef[] = [];
+    const enqueuedJobs: FollowupJobRequest[] = [];
+    const signals: Array<{ presence: string }> = [];
+
+    const db: TurnBridgeAdminClient = {
+      claimDueEnrollments: async () => [currentEnrollment],
+      loadEnrollmentById: async (_orgId, id) => {
+        if (currentEnrollment.id === id) return { ...currentEnrollment };
+        return null;
+      },
+      loadFlowGraph: async (_orgId, versionId) => {
+        if (opts.enrollment.version_id === versionId) return opts.graph;
+        return null;
+      },
+      loadLeadFacts: async () => ({ lead_stage: null, tags: [] }),
+      loadLastInboundBody: async () => null,
+      loadEnrollmentEvents: async () => [...events],
+      insertEnrollmentEvent: async (event) => {
+        const exists = events.some((e) => e.idempotency_key === event.idempotency_key);
+        if (exists) return { inserted: false };
+        events.push({
+          node_id: event.node_id,
+          event_type: event.event_type,
+          payload: event.payload,
+          idempotency_key: event.idempotency_key,
+        });
+        return { inserted: true };
+      },
+      updateEnrollment: async (_id, _orgId, patch) => {
+        currentEnrollment = {
+          ...currentEnrollment,
+          ...patch,
+          updated_at: new Date().toISOString(),
+        };
+      },
+      loadFlowPointerName: async () => "Fluxo Teste",
+      insertDeadInboxItem: async () => {},
+      persistirRespostaFollowup: async () => {},
+      signalPresence: async (input) => {
+        signals.push({ presence: input.presence });
+      },
+      enqueueJob: async (job) => {
+        enqueuedJobs.push(job);
+      },
+    };
+
+    return {
+      db,
+      getEnrollment: () => currentEnrollment,
+      getEvents: () => events,
+      getEnqueuedJobs: () => enqueuedJobs,
+      getSignals: () => signals,
+    };
+  }
+
+  it("send_message -> typing 5s -> send_message: creates wait_wake and NOT future send_message", async () => {
+    const GRAPH: FlowGraph = {
+      nodes: [
+        { id: "txt1", type: "message_text", label: "Texto 1", position: { x: 0, y: 0 }, config: { body: "Msg 1" } },
+        { id: "typ", type: "typing", label: "Typing 5s", position: { x: 0, y: 0 }, config: { duration_seconds: 5 } },
+        { id: "txt2", type: "message_text", label: "Texto 2", position: { x: 0, y: 0 }, config: { body: "Msg 2" } },
+        { id: "end", type: "end", label: "Fim", position: { x: 0, y: 0 }, config: { outcome: "converted" } },
+      ],
+      edges: [
+        { id: "e1", source: "txt1", target: "typ", priority: 0, condition: { type: "always" } },
+        { id: "e2", source: "typ", target: "txt2", priority: 0, condition: { type: "always" } },
+        { id: "e3", source: "txt2", target: "end", priority: 0, condition: { type: "always" } },
+      ],
+    };
+
+    const T0 = new Date("2026-09-24T12:00:00.000Z");
+    let currentTime = T0;
+    const testClock = () => currentTime;
+
+    const initialEnrollment = enrollment({
+      current_node_id: "txt1",
+      steps_taken: 1,
+      started_at: T0.toISOString(),
+      updated_at: T0.toISOString(),
+    });
+
+    const harness = createPathBHarness({ enrollment: initialEnrollment, graph: GRAPH });
+
+    // Step 1: txt1 completes sending ("sent") via turn-bridge
+    await completeTurnForEnrollment(
+      harness.db,
+      "org-1",
+      initialEnrollment.id,
+      "txt1",
+      { kind: "sent" },
+      testClock,
+    );
+
+    // 1a: Enrollment must be parked on 'typ'
+    expect(harness.getEnrollment().current_node_id).toBe("typ");
+    expect(harness.getEnrollment().status).toBe("active");
+
+    // 1b: Intermediate job must be wait_wake
+    const wakeJobs = harness.getEnqueuedJobs().filter((j) => j.payload.purpose === "wait_wake");
+    expect(wakeJobs.length).toBe(1);
+    expect(wakeJobs[0]!.payload.node_id).toBe("typ");
+    expect(wakeJobs[0]!.payload.followup_enrollment_id).toBe(initialEnrollment.id);
+    expect(wakeJobs[0]!.run_after!.getTime() - T0.getTime()).toBe(5000);
+
+    // 1c: CRITICAL: MUST NOT create any send_message job yet!
+    const sendJobsStep1 = harness.getEnqueuedJobs().filter((j) => j.payload.purpose === "send_message");
+    expect(sendJobsStep1.length).toBe(0);
+
+    // 1d: Events check
+    expect(harness.getEvents().some((e) => e.node_id === "typ" && e.event_type === "wait_started")).toBe(true);
+
+    // Step 2: 5s later, wake job fires
+    currentTime = new Date(T0.getTime() + 5000);
+    await completeTurnForEnrollment(
+      harness.db,
+      "org-1",
+      initialEnrollment.id,
+      "typ",
+      { kind: "wake" },
+      testClock,
+    );
+
+    // 2a: Advanced to txt2
+    expect(harness.getEnrollment().current_node_id).toBe("txt2");
+
+    // 2b: Next message is now enqueued with immediate run_after
+    const sendJobsStep2 = harness.getEnqueuedJobs().filter((j) => j.payload.purpose === "send_message");
+    expect(sendJobsStep2.length).toBe(1);
+    expect(sendJobsStep2[0]!.payload.node_id).toBe("txt2");
+    expect(sendJobsStep2[0]!.payload.fixed_body).toBe("Msg 2");
+    expect(sendJobsStep2[0]!.run_after).toBeUndefined();
+  });
+
+  it("send_message -> delay 60s -> send_message: creates wait_wake and NOT future send_message", async () => {
+    const GRAPH: FlowGraph = {
+      nodes: [
+        { id: "txt1", type: "message_text", label: "Texto 1", position: { x: 0, y: 0 }, config: { body: "Msg 1" } },
+        { id: "del", type: "delay", label: "Delay 60s", position: { x: 0, y: 0 }, config: { duration_value: 60, unit: "minutes" } },
+        { id: "txt2", type: "message_text", label: "Texto 2", position: { x: 0, y: 0 }, config: { body: "Msg 2" } },
+        { id: "end", type: "end", label: "Fim", position: { x: 0, y: 0 }, config: { outcome: "converted" } },
+      ],
+      edges: [
+        { id: "e1", source: "txt1", target: "del", priority: 0, condition: { type: "always" } },
+        { id: "e2", source: "del", target: "txt2", priority: 0, condition: { type: "always" } },
+        { id: "e3", source: "txt2", target: "end", priority: 0, condition: { type: "always" } },
+      ],
+    };
+
+    const T0 = new Date("2026-09-24T12:00:00.000Z");
+    let currentTime = T0;
+    const testClock = () => currentTime;
+
+    const initialEnrollment = enrollment({
+      current_node_id: "txt1",
+      steps_taken: 1,
+      started_at: T0.toISOString(),
+      updated_at: T0.toISOString(),
+    });
+
+    const harness = createPathBHarness({ enrollment: initialEnrollment, graph: GRAPH });
+
+    // Step 1: txt1 completes sending ("sent")
+    await completeTurnForEnrollment(
+      harness.db,
+      "org-1",
+      initialEnrollment.id,
+      "txt1",
+      { kind: "sent" },
+      testClock,
+    );
+
+    // 1a: Enrollment parked on 'del'
+    expect(harness.getEnrollment().current_node_id).toBe("del");
+    expect(harness.getEnrollment().status).toBe("active");
+
+    // 1b: Intermediate job must be wait_wake with run_after = 60 * 60 * 1000 = 3600000ms
+    const wakeJobs = harness.getEnqueuedJobs().filter((j) => j.payload.purpose === "wait_wake");
+    expect(wakeJobs.length).toBe(1);
+    expect(wakeJobs[0]!.payload.node_id).toBe("del");
+    expect(wakeJobs[0]!.run_after!.getTime() - T0.getTime()).toBe(3600000);
+
+    // 1c: CRITICAL: NO send_message job created yet!
+    const sendJobsStep1 = harness.getEnqueuedJobs().filter((j) => j.payload.purpose === "send_message");
+    expect(sendJobsStep1.length).toBe(0);
+
+    // Step 2: 60 minutes later, wake job fires
+    currentTime = new Date(T0.getTime() + 3600000);
+    await completeTurnForEnrollment(
+      harness.db,
+      "org-1",
+      initialEnrollment.id,
+      "del",
+      { kind: "wake" },
+      testClock,
+    );
+
+    // 2a: Advanced to txt2
+    expect(harness.getEnrollment().current_node_id).toBe("txt2");
+
+    // 2b: Next message enqueued immediately
+    const sendJobsStep2 = harness.getEnqueuedJobs().filter((j) => j.payload.purpose === "send_message");
+    expect(sendJobsStep2.length).toBe(1);
+    expect(sendJobsStep2[0]!.payload.node_id).toBe("txt2");
+    expect(sendJobsStep2[0]!.run_after).toBeUndefined();
+  });
+
+  it("delay with immune_to_reply: true marks status as 'dormente' and wakes to active", async () => {
+    const GRAPH: FlowGraph = {
+      nodes: [
+        { id: "txt1", type: "message_text", label: "Texto 1", position: { x: 0, y: 0 }, config: { body: "Msg 1" } },
+        { id: "del", type: "delay", label: "Delay Imune", position: { x: 0, y: 0 }, config: { duration_value: 2, unit: "hours", immune_to_reply: true } },
+        { id: "txt2", type: "message_text", label: "Texto 2", position: { x: 0, y: 0 }, config: { body: "Msg 2" } },
+        { id: "end", type: "end", label: "Fim", position: { x: 0, y: 0 }, config: { outcome: "converted" } },
+      ],
+      edges: [
+        { id: "e1", source: "txt1", target: "del", priority: 0, condition: { type: "always" } },
+        { id: "e2", source: "del", target: "txt2", priority: 0, condition: { type: "always" } },
+        { id: "e3", source: "txt2", target: "end", priority: 0, condition: { type: "always" } },
+      ],
+    };
+
+    const T0 = new Date("2026-09-24T12:00:00.000Z");
+    let currentTime = T0;
+    const testClock = () => currentTime;
+
+    const initialEnrollment = enrollment({
+      current_node_id: "txt1",
+      steps_taken: 1,
+      started_at: T0.toISOString(),
+      updated_at: T0.toISOString(),
+    });
+
+    const harness = createPathBHarness({ enrollment: initialEnrollment, graph: GRAPH });
+
+    await completeTurnForEnrollment(
+      harness.db,
+      "org-1",
+      initialEnrollment.id,
+      "txt1",
+      { kind: "sent" },
+      testClock,
+    );
+
+    expect(harness.getEnrollment().current_node_id).toBe("del");
+    expect(harness.getEnrollment().status).toBe("dormente");
+
+    const wakeJobs = harness.getEnqueuedJobs().filter((j) => j.payload.purpose === "wait_wake");
+    expect(wakeJobs.length).toBe(1);
+
+    // Wake
+    currentTime = new Date(T0.getTime() + 2 * 3600000);
+    await completeTurnForEnrollment(
+      harness.db,
+      "org-1",
+      initialEnrollment.id,
+      "del",
+      { kind: "wake" },
+      testClock,
+    );
+
+    expect(harness.getEnrollment().current_node_id).toBe("txt2");
+    expect(harness.getEnrollment().status).toBe("active");
+  });
 });
