@@ -862,8 +862,14 @@ export function processNode(input: {
         if (!edge) return { kind: "fail", error: `typing node "${node.id}" has no outbound edge after elapsing` };
         return { kind: "advance", next_node_id: edge.target, next_eval_at: clock() };
       }
+      const durSec = node.config.duration_seconds ?? 0;
+      if (durSec <= 0) {
+        const edge = selectEdge(edges, node.id, { type: "always" });
+        if (!edge) return { kind: "fail", error: `typing node "${node.id}" has no outbound edge after elapsing` };
+        return { kind: "advance", next_node_id: edge.target, next_eval_at: clock() };
+      }
       if (!waitElapsed) {
-        const durationMs = (node.config.duration_seconds || 3) * 1000;
+        const durationMs = durSec * 1000;
         return {
           kind: "wait",
           next_eval_at: new Date(clock().getTime() + durationMs),

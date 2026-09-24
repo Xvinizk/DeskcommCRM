@@ -10,12 +10,14 @@ import { beginServiceAtOrigin } from "@/lib/atendimento/origem";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { audit } from "@/lib/audit";
+import { logger } from "@/lib/logger";
 import {
   createSupabaseFollowupGateDb,
   resolveAgentForAutomaticTrigger,
 } from "@/lib/followup/agent-followup-gate";
 import { flowGraphSchema } from "@/lib/followup/graph-schema";
 import { cancelEnrollment, LIVE_STATUSES } from "@/lib/followup/cancel";
+import { avancarEnrollmentAtivo, createSupabaseAdminClient } from "@/lib/followup/engine";
 
 export const ENROLLMENT_LIST_COLUMNS =
   "id, pointer_id, version_id, contact_id, status, current_node_id, next_eval_at, outcome, started_at, completed_at, updated_at";
@@ -328,6 +330,34 @@ export async function enrollFollowupFlow(
       ...(input.triggerMetadata ?? {}),
     },
   });
+
+  try {
+    const adminClient = createSupabaseAdminClient(supabase);
+    const fullRow = await adminClient.loadEnrollmentById?.(organizationId, created.id);
+    if (fullRow) {
+      await avancarEnrollmentAtivo(
+        {
+          db: adminClient,
+          clock: () => new Date(),
+          enqueueJob: async (job) => {
+            const { error: jobErr } = await supabase.from("job_queue").insert({
+              organization_id: job.organization_id,
+              contact_id: job.contact_id,
+              kind: "followup_turn",
+              payload: job.payload,
+            });
+            if (jobErr) throw new Error(jobErr.message);
+          },
+        },
+        fullRow,
+      );
+    }
+  } catch (err) {
+    logger.warn("followup: avanço imediato pós-inscrição falhou; cron assumirá", {
+      error: err instanceof Error ? err.message : String(err),
+      enrollment_id: created.id,
+    });
+  }
 
   return { ok: true, enrollment: created as Record<string, unknown> };
 }

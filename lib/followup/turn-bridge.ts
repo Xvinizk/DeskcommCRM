@@ -18,11 +18,11 @@ import { requireCurrentServiceBoundary } from "@/lib/atendimento/fronteira-serve
  */
 import type pg from "pg";
 
-import type { AdminClient, EnrollmentPatch } from "./engine";
+import { avancarEnrollmentAtivo, type AdminClient, type EnrollmentPatch } from "./engine";
 import { flowGraphSchema, isSendMessageNode } from "./graph-schema";
 import { EVENTO_ACAO_ADIADA, classEdgeMatch, selectEdge, type EnrollmentRow } from "./node-handlers";
 import { coletarEsperasAdaptativas, montarTimingPlan, type PropostaDeEspera } from "./timing-plan";
-import { persistirRespostaFollowupPg } from "./persistir-resposta";
+import { aplicarTagsFollowupPg, moverEtapaFollowupPg, persistirRespostaFollowupPg } from "./persistir-resposta";
 
 /** Superset de AdminClient: a ponte precisa do snapshot COMPLETO do enrollment
  *  (current_node_id/version_id/steps_taken) pra montar o passo de conclusão —
@@ -109,13 +109,13 @@ export async function completeTurnForEnrollment(
     eventType: string,
     payload: Record<string, unknown>,
     patch: EnrollmentPatch,
-  ): Promise<void> => {
+  ): Promise<boolean> => {
     await db.assertServiceBoundary?.(enrollment);
     if(result.kind === "planned" || result.kind === "classified") await db.assertAgenda?.(enrollment);
     if(db.applyEnrollmentStep){
-      await db.applyEnrollmentStep(enrollmentId,orgId,{...patch,steps_taken:enrollment.steps_taken+1,claimed_until:null,updated_at:now.toISOString()},
+      const ok = await db.applyEnrollmentStep(enrollmentId,orgId,{...patch,steps_taken:enrollment.steps_taken+1,claimed_until:null,updated_at:now.toISOString()},
         {...(jobId?{job_id:jobId,job_claim:jobClaim}:{}),node_id:node.id,event_type:eventType,payload,idempotency_key:idemKey});
-      return;
+      return ok !== false;
     }
     const { inserted } = await db.insertEnrollmentEvent({
       organization_id: orgId,
@@ -125,7 +125,7 @@ export async function completeTurnForEnrollment(
       payload,
       idempotency_key: idemKey,
     });
-    if (!inserted) return; // replay — a 1ª aplicação já progrediu o enrollment
+    if (!inserted) return false; // replay — a 1ª aplicação já progrediu o enrollment
     await db.assertServiceBoundary?.(enrollment);
     await db.updateEnrollment(enrollmentId, orgId, {
       ...patch,
@@ -133,6 +133,7 @@ export async function completeTurnForEnrollment(
       claimed_until: null,
       updated_at: now.toISOString(),
     });
+    return true;
   };
 
   if(result.kind === "skipped"){
@@ -201,11 +202,25 @@ export async function completeTurnForEnrollment(
     }
     const edge = selectEdge(graph.edges, node.id, { type: "always" });
     if (!edge) throw new Error(`node "${node.id}" (${node.type}) sem aresta 'always' de saída`);
-    await applyStep(
+    const applied = await applyStep(
       "action_sent",
       {},
       { current_node_id: edge.target, status: "active", next_eval_at: now.toISOString() },
     );
+    if (applied && db.enqueueJob) {
+      await avancarEnrollmentAtivo(
+        { db, clock, enqueueJob: db.enqueueJob },
+        {
+          ...enrollment,
+          current_node_id: edge.target,
+          steps_taken: enrollment.steps_taken + 1,
+          status: "active",
+          next_eval_at: now.toISOString(),
+          updated_at: now.toISOString(),
+          claimed_until: null,
+        },
+      );
+    }
     return;
   }
 
@@ -217,11 +232,25 @@ export async function completeTurnForEnrollment(
     if (!edge) {
       throw new Error(`ai_classify node "${node.id}" sem aresta pra classe "${result.class}" (fallback 'always' também ausente)`);
     }
-    await applyStep(
+    const applied = await applyStep(
       "ai_classified",
       { class: result.class },
       { current_node_id: edge.target, status: "active", next_eval_at: now.toISOString() },
     );
+    if (applied && db.enqueueJob) {
+      await avancarEnrollmentAtivo(
+        { db, clock, enqueueJob: db.enqueueJob },
+        {
+          ...enrollment,
+          current_node_id: edge.target,
+          steps_taken: enrollment.steps_taken + 1,
+          status: "active",
+          next_eval_at: now.toISOString(),
+          updated_at: now.toISOString(),
+          claimed_until: null,
+        },
+      );
+    }
     return;
   }
 
@@ -239,7 +268,7 @@ export async function completeTurnForEnrollment(
   });
   const edge = selectEdge(graph.edges, node.id, { type: "always" });
   if (!edge) throw new Error(`trigger node "${node.id}" sem aresta 'always' de saída`);
-  await applyStep(
+  const applied = await applyStep(
     "timing_plan_decidido",
     // O plano inteiro no evento (não só um ponteiro pra coluna): a timeline do
     // enrollment precisa ser legível sozinha, com o motivo de cada espera.
@@ -251,6 +280,21 @@ export async function completeTurnForEnrollment(
       timing_plan: plano,
     },
   );
+  if (applied && db.enqueueJob) {
+    await avancarEnrollmentAtivo(
+      { db, clock, enqueueJob: db.enqueueJob },
+      {
+        ...enrollment,
+        current_node_id: edge.target,
+        steps_taken: enrollment.steps_taken + 1,
+        status: "active",
+        next_eval_at: now.toISOString(),
+        updated_at: now.toISOString(),
+        claimed_until: null,
+        timing_plan: plano,
+      },
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -392,7 +436,8 @@ export function createPgAdminClient(pool: pg.Pool): TurnBridgeAdminClient {
     async applyEnrollmentStep(id,orgId,patch,event){
       const revision=revisions.get(id);if(revision===undefined) throw new StaleServiceBoundaryError();
       try{const {rows}=await pool.query("select fn_followup_apply_step($1,$2,$3,$4,$5) revision",[orgId,id,revision,patch,event]);revisions.set(id,Number(rows[0].revision));}
-      catch(error){if((error as {code?:string}).code==="23505") return;if(isFollowupCasRecusado(error as {code?:string;message?:string})) throw new StaleServiceBoundaryError();throw error;}
+      catch(error){if((error as {code?:string}).code==="23505") return false;if(isFollowupCasRecusado(error as {code?:string;message?:string})) throw new StaleServiceBoundaryError();throw error;}
+      return true;
     },
     async updateEnrollment(id, orgId, patch) {
       const revision=revisions.get(id);
@@ -465,6 +510,19 @@ export function createPgAdminClient(pool: pg.Pool): TurnBridgeAdminClient {
     },
     async persistirRespostaFollowup(input) {
       await persistirRespostaFollowupPg((sql, params) => pool.query(sql, params), input);
+    },
+    async updateLeadTags(input) {
+      await aplicarTagsFollowupPg((sql, params) => pool.query(sql, params), input);
+    },
+    async updateLeadStage(input) {
+      await moverEtapaFollowupPg((sql, params) => pool.query(sql, params), input);
+    },
+    async enqueueJob(job) {
+      await pool.query(
+        `insert into job_queue (organization_id, contact_id, kind, payload)
+         values ($1, $2, 'followup_turn', $3)`,
+        [job.organization_id, job.contact_id, job.payload],
+      );
     },
   };
 }

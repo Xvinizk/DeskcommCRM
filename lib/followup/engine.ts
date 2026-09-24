@@ -2,7 +2,7 @@ import type { JobClaim } from "@/lib/agent-engine/queue/claim";
 import { assertAgendaEffectSupabase } from "@/lib/agenda/efeito";
 import { AgendaDeferredError } from "@/lib/agenda/protecao-followup";
 import type { ServiceBoundary } from "@/lib/atendimento/fronteira";
-import { isFollowupCasRecusado, StaleServiceBoundaryError } from "@/lib/atendimento/fronteira";
+import { isFollowupCasRecusado, parseServiceBoundary, StaleServiceBoundaryError } from "@/lib/atendimento/fronteira";
 import { assertServiceBoundarySupabase } from "@/lib/atendimento/origem";
 /**
  * Follow-up flow engine — worker tick (Task 4.1). Orchestrates DB access
@@ -132,7 +132,7 @@ export interface AdminClient {
     payload: Record<string, unknown>;
     idempotency_key: string;
   }): Promise<{ inserted: boolean }>;
-  applyEnrollmentStep?(id:string,orgId:string,patch:EnrollmentPatch,event:{job_claim?:JobClaim;job_id?:string;node_id:string;event_type:string;payload:Record<string,unknown>;idempotency_key:string}):Promise<void>;
+  applyEnrollmentStep?(id:string,orgId:string,patch:EnrollmentPatch,event:{job_claim?:JobClaim;job_id?:string;node_id:string;event_type:string;payload:Record<string,unknown>;idempotency_key:string}):Promise<boolean | void>;
   updateEnrollment(id: string, orgId: string, patch: EnrollmentPatch): Promise<void>;
   loadFlowPointerName(orgId: string, pointerId: string): Promise<string | null>;
   insertDeadInboxItem(item: { organization_id: string; title: string; body: string; ref_id: string }): Promise<void>;
@@ -166,6 +166,8 @@ export interface AdminClient {
     conversation_id?: string | null;
     presence: "typing" | "paused";
   }): Promise<void>;
+  enqueueJob?(job: FollowupJobRequest): Promise<void>;
+  loadEnrollmentById?(orgId: string, id: string): Promise<EnrollmentRow | null>;
 }
 
 export interface TickDeps {
@@ -404,7 +406,7 @@ async function applyResult(
   smartWaits: EsperaAdaptativa[] = [],
   events: EnrollmentEventRef[] = [],
   respostaParaGravar: string | null = null,
-): Promise<void> {
+): Promise<boolean> {
   const { db, clock, enqueueJob } = deps;
   await db.assertServiceBoundary?.(enrollment);
 
@@ -420,7 +422,7 @@ async function applyResult(
       } catch {}
     }
     await applyHandlerFailure(deps, enrollment, result.error, summary);
-    return;
+    return false;
   }
 
   if (result.kind === "dead") {
@@ -439,7 +441,7 @@ async function applyResult(
     // max_steps/exhausted-backoff — so the operator sees exactly one dead-letter notice.
     await markDead(db, clock, enrollment, result.reason);
     summary.dead++;
-    return;
+    return false;
   }
 
   if (result.kind === "advance") {
@@ -455,7 +457,7 @@ async function applyResult(
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         await applyHandlerFailure(deps, enrollment, `tag: ${msg}`, summary);
-        return;
+        return false;
       }
     }
     if (node.type === "stage_move" && db.updateLeadStage) {
@@ -469,7 +471,7 @@ async function applyResult(
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         await applyHandlerFailure(deps, enrollment, `stage_move: ${msg}`, summary);
-        return;
+        return false;
       }
     }
   }
@@ -559,7 +561,7 @@ async function applyResult(
         });
         tallyOutcome(result, summary);
       }
-      return;
+      return false;
     }
   }
 
@@ -662,6 +664,7 @@ async function applyResult(
   }
 
   if (!isReplay) tallyOutcome(result, summary);
+  return !isReplay;
 }
 
 /**
@@ -689,229 +692,246 @@ export async function avancarEnrollmentAtivo(
 
 async function processEnrollment(
   deps: TickDeps,
-  enrollment: EnrollmentRow,
+  initialEnrollment: EnrollmentRow,
   summary: TickSummary,
   inboundBodyOverride?: string,
 ): Promise<void> {
   const { db, clock } = deps;
-  try { await db.assertServiceBoundary?.(enrollment); await db.assertAgenda?.(enrollment); }
-  catch (error) {
-    if(error instanceof AgendaDeferredError){
-      if(error.protection.motivo === "leitura_indisponivel") throw error;
-      await db.updateEnrollment(enrollment.id,enrollment.organization_id,{next_eval_at:error.protection.reavaliar_em,claimed_until:null,last_error:error.message});
+  let currentEnrollment = initialEnrollment;
+  let currentInboundBody = inboundBodyOverride;
+
+  while (currentEnrollment.steps_taken <= MAX_STEPS) {
+    try { await db.assertServiceBoundary?.(currentEnrollment); await db.assertAgenda?.(currentEnrollment); }
+    catch (error) {
+      if(error instanceof AgendaDeferredError){
+        if(error.protection.motivo === "leitura_indisponivel") throw error;
+        await db.updateEnrollment(currentEnrollment.id,currentEnrollment.organization_id,{next_eval_at:error.protection.reavaliar_em,claimed_until:null,last_error:error.message});
+        return;
+      }
+      if (!(error instanceof StaleServiceBoundaryError)) throw error;
+      // ⚠️ A ESPERA LONGA MORRE AQUI, E NÃO PODE MORRER CALADA.
+      //
+      // A fronteira é congelada quando a inscrição nasce, e fica stale quando a
+      // conversa fecha, a demanda fecha ou `service_revision` muda — o que, num
+      // retorno de semanas, é provável e é justamente o que caracteriza um
+      // retorno: o atendimento que o originou ACABOU. Quem espera dias volta e
+      // encontra a inscrição cancelada com um motivo que parece rotina.
+      //
+      // Reancorar aqui não é opção: `beginServiceAtOrigin` é explícito em
+      // "nunca usado por job/tick/retry", e fronteira nula é recusada de
+      // propósito (`assertCurrentServiceBoundary`, e o teste que a vigia). Enquanto
+      // a decisão de arquitetura não vem, o dever é tornar a perda VISÍVEL — um
+      // acompanhamento que some sem aviso é a ilha que a doutrina proíbe.
+      if (currentEnrollment.status === "dormente") {
+        const nome =
+          (await db.loadFlowPointerName(currentEnrollment.organization_id, currentEnrollment.pointer_id)) ??
+          currentEnrollment.pointer_id;
+        await db.insertDeadInboxItem({
+          organization_id: currentEnrollment.organization_id,
+          title: "Um retorno programado não pôde ser enviado",
+          body:
+            `O fluxo "${nome}" esperava a data do retorno, mas o atendimento que o originou ` +
+            `foi encerrado ou substituído no meio da espera, e o envio foi cancelado ` +
+            `(enrollment ${currentEnrollment.id}). Fale com o contato por outro caminho se ainda fizer sentido.`,
+          ref_id: currentEnrollment.id,
+        });
+      }
+      await db.updateEnrollment(currentEnrollment.id, currentEnrollment.organization_id, { status: "cancelled", cancel_reason: "Atendimento encerrado ou substituído", claimed_until: null, completed_at: clock().toISOString() });
       return;
     }
-    if (!(error instanceof StaleServiceBoundaryError)) throw error;
-    // ⚠️ A ESPERA LONGA MORRE AQUI, E NÃO PODE MORRER CALADA.
-    //
-    // A fronteira é congelada quando a inscrição nasce, e fica stale quando a
-    // conversa fecha, a demanda fecha ou `service_revision` muda — o que, num
-    // retorno de semanas, é provável e é justamente o que caracteriza um
-    // retorno: o atendimento que o originou ACABOU. Quem espera dias volta e
-    // encontra a inscrição cancelada com um motivo que parece rotina.
-    //
-    // Reancorar aqui não é opção: `beginServiceAtOrigin` é explícito em
-    // "nunca usado por job/tick/retry", e fronteira nula é recusada de
-    // propósito (`assertCurrentServiceBoundary`, e o teste que a vigia). Enquanto
-    // a decisão de arquitetura não vem, o dever é tornar a perda VISÍVEL — um
-    // acompanhamento que some sem aviso é a ilha que a doutrina proíbe.
-    if (enrollment.status === "dormente") {
-      const nome =
-        (await db.loadFlowPointerName(enrollment.organization_id, enrollment.pointer_id)) ??
-        enrollment.pointer_id;
-      await db.insertDeadInboxItem({
-        organization_id: enrollment.organization_id,
-        title: "Um retorno programado não pôde ser enviado",
-        body:
-          `O fluxo "${nome}" esperava a data do retorno, mas o atendimento que o originou ` +
-          `foi encerrado ou substituído no meio da espera, e o envio foi cancelado ` +
-          `(enrollment ${enrollment.id}). Fale com o contato por outro caminho se ainda fizer sentido.`,
-        ref_id: enrollment.id,
-      });
+
+    if (currentEnrollment.steps_taken > MAX_STEPS) {
+      await markDead(db, clock, currentEnrollment, "max_steps");
+      summary.dead++;
+      return;
     }
-    await db.updateEnrollment(enrollment.id, enrollment.organization_id, { status: "cancelled", cancel_reason: "Atendimento encerrado ou substituído", claimed_until: null, completed_at: clock().toISOString() });
-    return;
-  }
 
+    const graph = await db.loadFlowGraph(currentEnrollment.organization_id, currentEnrollment.version_id);
+    if (!graph) throw new Error("flow_version_not_found");
 
-  if (enrollment.steps_taken > MAX_STEPS) {
-    await markDead(db, clock, enrollment, "max_steps");
-    summary.dead++;
-    return;
-  }
-
-  const graph = await db.loadFlowGraph(enrollment.organization_id, enrollment.version_id);
-  if (!graph) throw new Error("flow_version_not_found");
-
-  const node = graph.nodes.find((n) => n.id === enrollment.current_node_id);
-  if (!node) throw new Error("node_not_found");
-  if (
-    inboundBodyOverride !== undefined &&
-    node.type !== "match_reply" &&
-    node.type !== "wait" &&
-    node.type !== "delay" &&
-    node.type !== "typing"
-  ) {
-    return;
-  }
-
-  const leadRow = await db.loadLeadFacts(enrollment.organization_id, enrollment.contact_id);
-  const lead: LeadFacts = {
-    lead_stage: leadRow.lead_stage,
-    tags: leadRow.tags,
-    steps_taken: enrollment.steps_taken,
-    // Preenchido LOGO ABAIXO, depois que os eventos forem lidos: o desfecho do
-    // passo anterior é dado que mora nos eventos, não na linha do lead.
-    last_outcome: null,
-    contact_name: leadRow.contact_name ?? null,
-    custom_fields: leadRow.custom_fields,
-  };
-
-  let waitElapsed: boolean | undefined;
-  let wokeEarly: boolean | undefined;
-  let actionEnqueued: boolean | undefined;
-  let actionRecheckCount: number | undefined;
-  let actionCompleted: boolean | undefined;
-  let planEnqueued: boolean | undefined;
-  let planRecheckCount: number | undefined;
-  let repeatTaken: number | undefined;
-  let repeatTotal: number | null | undefined;
-  let events: EnrollmentEventRef[] = [];
-
-  const smartWaits = node.type === "trigger" ? coletarEsperasAdaptativas(graph.nodes) : [];
-  const vaiPlanejar = smartWaits.length > 0 && (enrollment.timing_plan ?? null) === null;
-  const precisaEventos =
-    vaiPlanejar ||
-    node.type === "wait" ||
-    node.type === "delay" ||
-    node.type === "typing" ||
-    node.type === "ai_classify" ||
-    node.type === "match_reply" ||
-    node.type === "action" ||
-    node.type === "message_text" ||
-    node.type === "message_image" ||
-    node.type === "message_video" ||
-    node.type === "message_audio" ||
-    node.type === "repeat" ||
-    // O `condition` só entra aqui por causa de `last_outcome`: o desfecho do
-    // passo anterior mora nos eventos (evento `ai_classified`), e sem lê-los o
-    // motor avaliava a condição contra `null` fixo — controle decorativo.
-    node.type === "condition";
-
-  if (precisaEventos) {
-    events = await db.loadEnrollmentEvents(enrollment.id);
-  }
-
-  if (node.type === "condition") {
-    lead.last_outcome = ultimoDesfechoDe(events);
-  }
-
-  if (vaiPlanejar) {
-    planEnqueued = resolveWaitPhase(events, node.id, enrollment.steps_taken);
-    planRecheckCount = events.filter((e) => e.node_id === node.id).length;
-  }
-
-  if (
-    node.type === "wait" ||
-    node.type === "delay" ||
-    node.type === "typing" ||
-    node.type === "ai_classify" ||
-    node.type === "match_reply" ||
-    isSendMessageNode(node)
-  ) {
-    waitElapsed = resolveWaitPhase(events, node.id, enrollment.steps_taken);
-    // match_reply de captação: a confirmação já enfileirou um evento neste nó.
-    // O claim seguinte às vezes chega com steps_taken desalinhado da chave
-    // `${node}:${steps-1}` — sem isto o motor trata como 1ª visita e MANDA A
-    // PERGUNTA DE NOVO em vez de ler o SIM.
-    if (node.type === "match_reply") {
-      waitElapsed = waitElapsed || occupancyEventCount(events, node.id) > 0;
-    }
+    const node = graph.nodes.find((n) => n.id === currentEnrollment.current_node_id);
+    if (!node) throw new Error("node_not_found");
     if (
-      node.type === "ai_classify" ||
-      node.type === "match_reply" ||
+      currentInboundBody !== undefined &&
+      node.type !== "match_reply" &&
+      node.type !== "wait" &&
+      node.type !== "delay" &&
+      node.type !== "typing"
+    ) {
+      return;
+    }
+
+    const leadRow = await db.loadLeadFacts(currentEnrollment.organization_id, currentEnrollment.contact_id);
+    const lead: LeadFacts = {
+      lead_stage: leadRow.lead_stage,
+      tags: leadRow.tags,
+      steps_taken: currentEnrollment.steps_taken,
+      // Preenchido LOGO ABAIXO, depois que os eventos forem lidos: o desfecho do
+      // passo anterior é dado que mora nos eventos, não na linha do lead.
+      last_outcome: null,
+      contact_name: leadRow.contact_name ?? null,
+      custom_fields: leadRow.custom_fields,
+    };
+
+    let waitElapsed: boolean | undefined;
+    let wokeEarly: boolean | undefined;
+    let actionEnqueued: boolean | undefined;
+    let actionRecheckCount: number | undefined;
+    let actionCompleted: boolean | undefined;
+    let planEnqueued: boolean | undefined;
+    let planRecheckCount: number | undefined;
+    let repeatTaken: number | undefined;
+    let repeatTotal: number | null | undefined;
+    let events: EnrollmentEventRef[] = [];
+
+    const smartWaits = node.type === "trigger" ? coletarEsperasAdaptativas(graph.nodes) : [];
+    const vaiPlanejar = smartWaits.length > 0 && (currentEnrollment.timing_plan ?? null) === null;
+    const precisaEventos =
+      vaiPlanejar ||
       node.type === "wait" ||
       node.type === "delay" ||
-      node.type === "typing"
+      node.type === "typing" ||
+      node.type === "ai_classify" ||
+      node.type === "match_reply" ||
+      node.type === "action" ||
+      node.type === "message_text" ||
+      node.type === "message_image" ||
+      node.type === "message_video" ||
+      node.type === "message_audio" ||
+      node.type === "repeat" ||
+      // O `condition` só entra aqui por causa de `last_outcome`: o desfecho do
+      // passo anterior mora nos eventos (evento `ai_classified`), e sem lê-los o
+      // motor avaliava a condição contra `null` fixo — controle decorativo.
+      node.type === "condition";
+
+    if (precisaEventos) {
+      events = await db.loadEnrollmentEvents(currentEnrollment.id);
+    }
+
+    if (node.type === "condition") {
+      lead.last_outcome = ultimoDesfechoDe(events);
+    }
+
+    if (vaiPlanejar) {
+      planEnqueued = resolveWaitPhase(events, node.id, currentEnrollment.steps_taken);
+      planRecheckCount = events.filter((e) => e.node_id === node.id).length;
+    }
+
+    if (
+      node.type === "wait" ||
+      node.type === "delay" ||
+      node.type === "typing" ||
+      node.type === "ai_classify" ||
+      node.type === "match_reply" ||
+      isSendMessageNode(node)
     ) {
-      const wakeKey = `${node.id}:${enrollment.steps_taken}:wake`;
-      wokeEarly = events.some((e) => e.node_id === node.id && e.idempotency_key === wakeKey);
+      waitElapsed = resolveWaitPhase(events, node.id, currentEnrollment.steps_taken);
+      // match_reply de captação: a confirmação já enfileirou um evento neste nó.
+      // O claim seguinte às vezes chega com steps_taken desalinhado da chave
+      // `${node}:${steps-1}` — sem isto o motor trata como 1ª visita e MANDA A
+      // PERGUNTA DE NOVO em vez de ler o SIM.
+      if (node.type === "match_reply") {
+        waitElapsed = waitElapsed || occupancyEventCount(events, node.id) > 0;
+      }
+      if (
+        node.type === "ai_classify" ||
+        node.type === "match_reply" ||
+        node.type === "wait" ||
+        node.type === "delay" ||
+        node.type === "typing"
+      ) {
+        const wakeKey = `${node.id}:${currentEnrollment.steps_taken}:wake`;
+        wokeEarly = events.some((e) => e.node_id === node.id && e.idempotency_key === wakeKey);
+      }
+      if (isSendMessageNode(node)) {
+        actionEnqueued = waitElapsed;
+        // NÃO é `occupancyEventCount`: o dead-man mede ociosidade DESDE A ÚLTIMA
+        // prova de vida do turno, e um adiamento de janela é prova de vida. Ver
+        // `rechecksOciososDaAcao` / `EVENTO_ACAO_ADIADA` em node-handlers.ts.
+        actionRecheckCount = rechecksOciososDaAcao(events, node.id);
+        actionCompleted = actionTurnCompleted(events, node.id);
+      }
     }
-    if (isSendMessageNode(node)) {
-      actionEnqueued = waitElapsed;
-      // NÃO é `occupancyEventCount`: o dead-man mede ociosidade DESDE A ÚLTIMA
-      // prova de vida do turno, e um adiamento de janela é prova de vida. Ver
-      // `rechecksOciososDaAcao` / `EVENTO_ACAO_ADIADA` em node-handlers.ts.
-      actionRecheckCount = rechecksOciososDaAcao(events, node.id);
-      actionCompleted = actionTurnCompleted(events, node.id);
-    }
-  }
-  const textoInbound = inboundBodyOverride?.trim() ?? "";
-  if (
-    textoInbound &&
-    (node.type === "match_reply" || node.type === "wait" || node.type === "delay" || node.type === "typing")
-  ) {
-    wokeEarly = true;
-  }
-
-  if (node.type === "repeat") {
-    repeatTaken = repeatTakenFromEvents(events, node.id);
-    repeatTotal = repeatTotalFromEvents(events, node.id);
-  }
-
-  let lastInboundBody: string | undefined;
-  if (textoInbound && node.type === "match_reply") {
-    lastInboundBody = textoInbound;
-  } else if (
-    (node.type === "match_reply" && (wokeEarly || waitElapsed)) ||
-    (node.type === "repeat" && repeatTotal == null)
-  ) {
-    // Sempre no contato inteiro: a captação e o WhatsApp podem ser conversas
-    // diferentes, e filtrar pela conversation_id do enrollment esconde o SIM.
-    lastInboundBody =
-      (await db.loadLastInboundBody(
-        enrollment.organization_id,
-        enrollment.contact_id,
-        null,
-        enrollment.updated_at,
-      )) ?? "";
-    if (node.type === "match_reply" && lastInboundBody.trim()) {
+    const textoInbound = currentInboundBody?.trim() ?? "";
+    if (
+      textoInbound &&
+      (node.type === "match_reply" || node.type === "wait" || node.type === "delay" || node.type === "typing")
+    ) {
       wokeEarly = true;
     }
+
+    if (node.type === "repeat") {
+      repeatTaken = repeatTakenFromEvents(events, node.id);
+      repeatTotal = repeatTotalFromEvents(events, node.id);
+    }
+
+    let lastInboundBody: string | undefined;
+    if (textoInbound && node.type === "match_reply") {
+      lastInboundBody = textoInbound;
+    } else if (
+      (node.type === "match_reply" && (wokeEarly || waitElapsed)) ||
+      (node.type === "repeat" && repeatTotal == null)
+    ) {
+      // Sempre no contato inteiro: a captação e o WhatsApp podem ser conversas
+      // diferentes, e filtrar pela conversation_id do enrollment esconde o SIM.
+      lastInboundBody =
+        (await db.loadLastInboundBody(
+          currentEnrollment.organization_id,
+          currentEnrollment.contact_id,
+          null,
+          currentEnrollment.updated_at,
+        )) ?? "";
+      if (node.type === "match_reply" && lastInboundBody.trim()) {
+        wokeEarly = true;
+      }
+    }
+
+    const nextAlways = selectEdge(graph.edges, node.id, { type: "always" });
+    const proximo = nextAlways ? (graph.nodes.find((n) => n.id === nextAlways.target) ?? null) : null;
+
+    const result = processNode({
+      node,
+      edges: graph.edges,
+      enrollment: currentEnrollment,
+      lead,
+      clock,
+      waitElapsed,
+      wokeEarly,
+      lastInboundBody,
+      actionEnqueued,
+      actionRecheckCount,
+      actionCompleted,
+      smartWaits,
+      planEnqueued,
+      planRecheckCount,
+      repeatTaken,
+      repeatTotal,
+      proximo,
+    });
+    const applied = await applyResult(
+      deps,
+      currentEnrollment,
+      node,
+      result,
+      summary,
+      smartWaits,
+      events,
+      node.type === "match_reply" && wokeEarly ? (lastInboundBody ?? "").trim() || null : null,
+    );
+
+    if (!applied || result.kind !== "advance") {
+      break;
+    }
+
+    currentEnrollment = {
+      ...currentEnrollment,
+      current_node_id: result.next_node_id,
+      steps_taken: currentEnrollment.steps_taken + 1,
+      next_eval_at: result.next_eval_at.toISOString(),
+      updated_at: clock().toISOString(),
+    };
+    currentInboundBody = undefined;
   }
-
-  const nextAlways = selectEdge(graph.edges, node.id, { type: "always" });
-  const proximo = nextAlways ? (graph.nodes.find((n) => n.id === nextAlways.target) ?? null) : null;
-
-  const result = processNode({
-    node,
-    edges: graph.edges,
-    enrollment,
-    lead,
-    clock,
-    waitElapsed,
-    wokeEarly,
-    lastInboundBody,
-    actionEnqueued,
-    actionRecheckCount,
-    actionCompleted,
-    smartWaits,
-    planEnqueued,
-    planRecheckCount,
-    repeatTaken,
-    repeatTotal,
-    proximo,
-  });
-  await applyResult(
-    deps,
-    enrollment,
-    node,
-    result,
-    summary,
-    smartWaits,
-    events,
-    node.type === "match_reply" && wokeEarly ? (lastInboundBody ?? "").trim() || null : null,
-  );
 }
 
 export async function runFollowupTick(deps: TickDeps, opts?: { limit?: number }): Promise<TickSummary> {
@@ -1048,9 +1068,10 @@ export function createSupabaseAdminClient(admin: SupabaseClient): AdminClient {
     async applyEnrollmentStep(id,orgId,patch,event){
       const revision=revisions.get(id);if(revision===undefined) throw new StaleServiceBoundaryError();
       const {data,error}=await admin.rpc("fn_followup_apply_step",{p_org:orgId,p_id:id,p_revision:revision,p_patch:patch,p_event:event});
-      if(error?.code==="23505") return;
+      if(error?.code==="23505") return false;
       if(isFollowupCasRecusado(error)) throw new StaleServiceBoundaryError();
       if(error) throw error;revisions.set(id,Number(data));
+      return true;
     },
     async updateEnrollment(id, orgId, patch) {
       const revision=revisions.get(id);
@@ -1175,6 +1196,52 @@ export function createSupabaseAdminClient(admin: SupabaseClient): AdminClient {
         conversationId,
         presence: input.presence,
       });
+    },
+    async loadEnrollmentById(orgId, id) {
+      const { data, error } = await admin
+        .from("followup_enrollments")
+        .select("*")
+        .eq("organization_id", orgId)
+        .eq("id", id)
+        .maybeSingle();
+      if (error) throw new Error(error.message);
+      if (!data) return null;
+      revisions.set(id, Number(data.revision));
+      return {
+        id: data.id,
+        organization_id: data.organization_id,
+        pointer_id: data.pointer_id,
+        version_id: data.version_id,
+        contact_id: data.contact_id,
+        conversation_id: data.conversation_id ?? null,
+        service_boundary: parseServiceBoundary(data.service_boundary),
+        revision: Number(data.revision),
+        appointment_id: data.appointment_id ?? null,
+        appointment_revision: data.appointment_revision ?? null,
+        current_node_id: data.current_node_id,
+        status: data.status,
+        next_eval_at: data.next_eval_at,
+        claimed_until: data.claimed_until,
+        attempts: Number(data.attempts),
+        max_attempts: Number(data.max_attempts),
+        last_error: data.last_error ?? null,
+        steps_taken: Number(data.steps_taken),
+        outcome: data.outcome ?? null,
+        cancel_reason: data.cancel_reason ?? null,
+        started_at: data.started_at,
+        completed_at: data.completed_at,
+        updated_at: data.updated_at,
+        timing_plan: (data.timing_plan as TimingPlan | null) ?? null,
+      };
+    },
+    async enqueueJob(job) {
+      const { error } = await admin.from("job_queue").insert({
+        organization_id: job.organization_id,
+        contact_id: job.contact_id,
+        kind: "followup_turn",
+        payload: job.payload,
+      });
+      if (error) throw new Error(error.message);
     },
   };
 }
