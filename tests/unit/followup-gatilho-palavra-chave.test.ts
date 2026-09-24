@@ -4,6 +4,13 @@ import {
   avaliarGatilhoPalavraChave,
 } from "@/lib/followup/gatilho-palavra-chave";
 
+vi.mock("@/lib/followup/enroll", () => ({
+  enrollFollowupFlow: vi.fn(async (_admin, input) => ({
+    ok: true,
+    enrollment: { id: "enr-123", ...input },
+  })),
+}));
+
 describe("Gatilho por Palavra-Chave — Casamento de Texto (casarPalavraChave)", () => {
   it("modo exact: casa texto exato", () => {
     const res = casarPalavraChave("fluxo123", {
@@ -146,7 +153,7 @@ describe("Gatilho por Palavra-Chave — Execução e Isolamento (avaliarGatilhoP
     expect(res.motivo).toBe("sem_fluxos_ativos");
   });
 
-  it("deduplicação: não cria enrollment duplicado se o contato já tiver enrollment ativo", async () => {
+  it("dispara com sucesso quando palavra-chave casa e passa replaceActive: true", async () => {
     const mockAdmin = {
       from: vi.fn((table: string) => {
         if (table === "followup_flow_pointers") {
@@ -175,23 +182,20 @@ describe("Gatilho por Palavra-Chave — Execução e Isolamento (avaliarGatilhoP
             }),
           };
         }
-        if (table === "followup_enrollments") {
+        if (table === "idempotency_keys") {
           return {
-            select: () => ({
+            insert: () => Promise.resolve({ error: null }),
+            update: () => ({
               eq: () => ({
                 eq: () => ({
-                  in: () => ({
-                    limit: () => Promise.resolve({
-                      data: [
-                        {
-                          id: "active-enr-1",
-                          pointer_id: POINTER_ID,
-                          status: "active",
-                        },
-                      ],
-                      error: null,
-                    }),
-                  }),
+                  eq: () => Promise.resolve({ error: null }),
+                }),
+              }),
+            }),
+            delete: () => ({
+              eq: () => ({
+                eq: () => ({
+                  eq: () => Promise.resolve({ error: null }),
                 }),
               }),
             }),
@@ -209,8 +213,59 @@ describe("Gatilho por Palavra-Chave — Execução e Isolamento (avaliarGatilhoP
       texto: "fluxo123",
     });
 
+    expect(res.disparou).toBe(true);
+    expect(res.pointerId).toBe(POINTER_ID);
+    expect(res.palavraCasada).toBe("fluxo123");
+  });
+
+  it("idempotência: rejeita message_id duplicado se a chave já existir (erro 23505)", async () => {
+    const mockAdmin = {
+      from: vi.fn((table: string) => {
+        if (table === "followup_flow_pointers") {
+          return {
+            select: () => ({
+              eq: () => ({
+                eq: () => ({
+                  not: () => Promise.resolve({
+                    data: [
+                      {
+                        id: POINTER_ID,
+                        name: "Fluxo de Vendas",
+                        status: "active",
+                        active_version_id: VERSION_ID,
+                        trigger_config: {
+                          kind: "keyword",
+                          keywords: ["fluxo123"],
+                          match_mode: "exact",
+                        },
+                      },
+                    ],
+                    error: null,
+                  }),
+                }),
+              }),
+            }),
+          };
+        }
+        if (table === "idempotency_keys") {
+          return {
+            insert: () => Promise.resolve({ error: { code: "23505", message: "duplicate key" } }),
+          };
+        }
+        return {};
+      }),
+    };
+
+    const res = await avaliarGatilhoPalavraChave(mockAdmin as never, {
+      organizationId: ORG_ID,
+      contactId: CONTACT_ID,
+      conversationId: CONVERSATION_ID,
+      messageId: "msg-1",
+      texto: "fluxo123",
+    });
+
     expect(res.disparou).toBe(false);
-    expect(res.motivo).toBe("duplicate_active_enrollment");
+    expect(res.motivo).toBe("message_already_processed");
     expect(res.palavraCasada).toBe("fluxo123");
   });
 });

@@ -17,7 +17,7 @@ import {
 } from "@/lib/followup/agent-followup-gate";
 import { flowGraphSchema } from "@/lib/followup/graph-schema";
 import { cancelEnrollment, LIVE_STATUSES } from "@/lib/followup/cancel";
-import { avancarEnrollmentAtivo, createSupabaseAdminClient } from "@/lib/followup/engine";
+import { avancarEnrollmentAtivo, createSupabaseAdminClient, deterministicUuid } from "@/lib/followup/engine";
 
 export const ENROLLMENT_LIST_COLUMNS =
   "id, pointer_id, version_id, contact_id, status, current_node_id, next_eval_at, outcome, started_at, completed_at, updated_at";
@@ -340,13 +340,18 @@ export async function enrollFollowupFlow(
           db: adminClient,
           clock: () => new Date(),
           enqueueJob: async (job) => {
+            const sourceEventId = job.payload.source_step_key
+              ? deterministicUuid(`followup:${job.payload.followup_enrollment_id}:${job.payload.source_step_key}`)
+              : undefined;
             const { error: jobErr } = await supabase.from("job_queue").insert({
               organization_id: job.organization_id,
               contact_id: job.contact_id,
               kind: "followup_turn",
               payload: job.payload,
+              ...(job.run_after ? { run_after: job.run_after.toISOString() } : {}),
+              ...(sourceEventId ? { source_event_id: sourceEventId } : {}),
             });
-            if (jobErr) throw new Error(jobErr.message);
+            if (jobErr && jobErr.code !== "23505") throw new Error(jobErr.message);
           },
         },
         fullRow,

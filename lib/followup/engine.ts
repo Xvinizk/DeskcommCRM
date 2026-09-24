@@ -1,9 +1,22 @@
+import { createHash } from "node:crypto";
 import type { JobClaim } from "@/lib/agent-engine/queue/claim";
 import { assertAgendaEffectSupabase } from "@/lib/agenda/efeito";
 import { AgendaDeferredError } from "@/lib/agenda/protecao-followup";
 import type { ServiceBoundary } from "@/lib/atendimento/fronteira";
 import { isFollowupCasRecusado, parseServiceBoundary, StaleServiceBoundaryError } from "@/lib/atendimento/fronteira";
 import { assertServiceBoundarySupabase } from "@/lib/atendimento/origem";
+
+export function deterministicUuid(seed: string): string {
+  const hash = createHash("sha1").update(seed).digest("hex");
+  return [
+    hash.slice(0, 8),
+    hash.slice(8, 12),
+    "5" + hash.slice(13, 16),
+    ((parseInt(hash.slice(16, 18), 16) & 0x3f) | 0x80).toString(16).padStart(2, "0") + hash.slice(18, 20),
+    hash.slice(20, 32),
+  ].join("-");
+}
+
 /**
  * Follow-up flow engine — worker tick (Task 4.1). Orchestrates DB access
  * around the pure decisions in `node-handlers.ts`: claim due enrollments,
@@ -74,12 +87,13 @@ export interface EnrollmentPatch {
 export interface FollowupJobRequest {
   organization_id: string;
   contact_id: string;
+  run_after?: Date;
   payload: {
     service_boundary?: ServiceBoundary | null;
     followup_enrollment_id: string;
     node_id: string;
     source_step_key?: string;
-    purpose: "send_message" | "classify" | "plan_timing";
+    purpose: "send_message" | "classify" | "plan_timing" | "wait_wake";
     /** action (mode 'ai_message') — Task 5.1: repassado ao turno pra virar o bloco de orientação. */
     prompt_hint?: string;
     /** action (mode 'text') — corpo pronto; o turno envia sem chamar o modelo. */
@@ -590,6 +604,21 @@ async function applyResult(
       patch.current_node_id = enrollment.current_node_id;
       patch.status = result.wake_status ?? "active";
       patch.next_eval_at = result.next_eval_at.toISOString();
+      if (!isReplay) {
+        const wakeKey = `${node.id}:${enrollment.steps_taken}:wake`;
+        await enqueueJob({
+          organization_id: enrollment.organization_id,
+          contact_id: enrollment.contact_id,
+          run_after: result.next_eval_at,
+          payload: {
+            service_boundary: enrollment.service_boundary ?? null,
+            followup_enrollment_id: enrollment.id,
+            node_id: node.id,
+            purpose: "wait_wake",
+            source_step_key: wakeKey,
+          },
+        });
+      }
       break;
     case "recheck":
       // recheck = action turn in flight: stay on the node, stay active, look again after the
@@ -1244,13 +1273,18 @@ export function createSupabaseAdminClient(admin: SupabaseClient): AdminClient {
       };
     },
     async enqueueJob(job) {
+      const sourceEventId = job.payload.source_step_key
+        ? deterministicUuid(`followup:${job.payload.followup_enrollment_id}:${job.payload.source_step_key}`)
+        : undefined;
       const { error } = await admin.from("job_queue").insert({
         organization_id: job.organization_id,
         contact_id: job.contact_id,
         kind: "followup_turn",
         payload: job.payload,
+        ...(job.run_after ? { run_after: job.run_after.toISOString() } : {}),
+        ...(sourceEventId ? { source_event_id: sourceEventId } : {}),
       });
-      if (error) throw new Error(error.message);
+      if (error && error.code !== "23505") throw new Error(error.message);
     },
   };
 }

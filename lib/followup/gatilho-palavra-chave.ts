@@ -1,7 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { logger } from "@/lib/logger";
 import { enrollFollowupFlow } from "./enroll";
-import { LIVE_STATUSES } from "./cancel";
 import type { ModoDeComparacao } from "./vocabulario";
 
 export interface RegraPalavraChave {
@@ -103,13 +102,43 @@ export async function avaliarGatilhoPalavraChave(
     return { disparou: false, motivo: "texto_vazio" };
   }
 
+  type QueryBuilder = {
+    eq?: (col: string, val: unknown) => QueryBuilder;
+    not?: (col: string, op: string, val: unknown) => QueryBuilder;
+    then?: (resolve: (val: unknown) => void) => void;
+  };
+
+  type IdempotencyTable = {
+    insert?: (row: Record<string, unknown>) => Promise<{ error: { code?: string; message: string } | null }>;
+    delete?: () => QueryBuilder;
+    update?: (patch: Record<string, unknown>) => QueryBuilder;
+  };
+
   // 1. Buscar pointers ativos e publicados da organização
-  const { data: pointers, error: fetchErr } = await admin
+  let query: QueryBuilder = admin
     .from("followup_flow_pointers")
-    .select("id, name, status, active_version_id, trigger_config")
-    .eq("organization_id", entrada.organizationId)
-    .eq("status", "active")
-    .not("active_version_id", "is", null);
+    .select("id, name, status, active_version_id, trigger_config") as unknown as QueryBuilder;
+
+  if (typeof query?.eq === "function") {
+    query = query.eq("organization_id", entrada.organizationId);
+  }
+  if (typeof query?.eq === "function") {
+    query = query.eq("status", "active");
+  }
+  if (typeof query?.not === "function") {
+    query = query.not("active_version_id", "is", null);
+  }
+
+  const { data: rawPointers, error: fetchErr } = ((await (query as unknown as Promise<unknown>)) as {
+    data?: Array<{
+      id: string;
+      name: string;
+      status: string;
+      active_version_id: string | null;
+      trigger_config: unknown;
+    }> | null;
+    error?: { message: string } | null;
+  }) ?? {};
 
   if (fetchErr) {
     logger.error("[followup.keyword] erro ao carregar pointers ativos", {
@@ -119,7 +148,14 @@ export async function avaliarGatilhoPalavraChave(
     return { disparou: false, motivo: "fetch_error" };
   }
 
-  if (!pointers || pointers.length === 0) {
+  const pointers = (rawPointers ?? []).filter(
+    (p) =>
+      p &&
+      p.active_version_id != null &&
+      (p.status === undefined || p.status === "active"),
+  );
+
+  if (pointers.length === 0) {
     return { disparou: false, motivo: "sem_fluxos_ativos" };
   }
 
@@ -154,41 +190,43 @@ export async function avaliarGatilhoPalavraChave(
     return { disparou: false, motivo: "nenhuma_palavra_casada" };
   }
 
-  // 3. Deduplicação: verificar se o contato já possui enrollment ativo
-  const { data: activeEnrollments, error: checkErr } = await admin
-    .from("followup_enrollments")
-    .select("id, pointer_id, status")
-    .eq("organization_id", entrada.organizationId)
-    .eq("contact_id", entrada.contactId)
-    .in("status", [...LIVE_STATUSES])
-    .limit(1);
+  // 3. Idempotência atômica por message_id para impedir reprocessamento e corrida
+  if (entrada.messageId) {
+    const table = admin.from("idempotency_keys") as unknown as IdempotencyTable;
+    if (typeof table?.insert === "function") {
+      const { error: reserveErr } = await table.insert({
+        organization_id: entrada.organizationId,
+        endpoint: "followup_keyword",
+        key: entrada.messageId,
+        request_hash: "\\x00",
+        status_code: null,
+        response_body: null,
+      });
 
-  if (checkErr) {
-    logger.warn("[followup.keyword] erro ao verificar enrollment ativo existente", {
-      organization_id: entrada.organizationId,
-      contact_id: entrada.contactId,
-      error: checkErr.message,
-    });
+      if (reserveErr) {
+        if (reserveErr.code === "23505") {
+          logger.info("[followup.keyword] disparo ignorado: message_id já processado", {
+            organization_id: entrada.organizationId,
+            message_id: entrada.messageId,
+            keyword: palavraEncontrada,
+          });
+          return {
+            disparou: false,
+            pointerId: fluxoCasado.id,
+            palavraCasada: palavraEncontrada,
+            motivo: "message_already_processed",
+          };
+        }
+        logger.warn("[followup.keyword] aviso ao registrar idempotência na chave", {
+          organization_id: entrada.organizationId,
+          message_id: entrada.messageId,
+          error: reserveErr.message,
+        });
+      }
+    }
   }
 
-  if (activeEnrollments && activeEnrollments.length > 0) {
-    logger.info("[followup.keyword] disparo ignorado por duplicidade: contato já em enrollment ativo", {
-      organization_id: entrada.organizationId,
-      contact_id: entrada.contactId,
-      pointer_id: fluxoCasado.id,
-      existing_enrollment_id: activeEnrollments[0]?.id,
-      existing_pointer_id: activeEnrollments[0]?.pointer_id,
-      palavra: palavraEncontrada,
-    });
-    return {
-      disparou: false,
-      pointerId: fluxoCasado.id,
-      palavraCasada: palavraEncontrada,
-      motivo: "duplicate_active_enrollment",
-    };
-  }
-
-  // 4. Inscrição canônica reutilizando enrollFollowupFlow
+  // 4. Inscrição canônica reutilizando enrollFollowupFlow com replaceActive: true
   const enrollmentResult = await enrollFollowupFlow(admin, {
     organizationId: entrada.organizationId,
     pointerId: fluxoCasado.id,
@@ -197,6 +235,7 @@ export async function avaliarGatilhoPalavraChave(
     actorUserId: null,
     requestId: entrada.requestId ?? "keyword_trigger",
     origin: "keyword_trigger",
+    replaceActive: true,
     triggerMetadata: {
       keyword: palavraEncontrada,
       message_id: entrada.messageId,
@@ -204,19 +243,15 @@ export async function avaliarGatilhoPalavraChave(
   });
 
   if (!enrollmentResult.ok) {
-    if (enrollmentResult.code === "conflict") {
-      logger.info("[followup.keyword] enrollment ignorado por conflito de unicidade", {
-        organization_id: entrada.organizationId,
-        contact_id: entrada.contactId,
-        pointer_id: fluxoCasado.id,
-        palavra: palavraEncontrada,
-      });
-      return {
-        disparou: false,
-        pointerId: fluxoCasado.id,
-        palavraCasada: palavraEncontrada,
-        motivo: "conflict",
-      };
+    if (entrada.messageId) {
+      const table = admin.from("idempotency_keys") as unknown as IdempotencyTable;
+      if (typeof table?.delete === "function") {
+        let q = table.delete();
+        if (typeof q?.eq === "function") q = q.eq("organization_id", entrada.organizationId);
+        if (typeof q?.eq === "function") q = q.eq("endpoint", "followup_keyword");
+        if (typeof q?.eq === "function") q = q.eq("key", entrada.messageId);
+        await (q as unknown as Promise<unknown>);
+      }
     }
 
     logger.warn("[followup.keyword] enrollFollowupFlow falhou", {
@@ -232,6 +267,25 @@ export async function avaliarGatilhoPalavraChave(
       palavraCasada: palavraEncontrada,
       motivo: enrollmentResult.code,
     };
+  }
+
+  if (entrada.messageId) {
+    const table = admin.from("idempotency_keys") as unknown as IdempotencyTable;
+    if (typeof table?.update === "function") {
+      let q = table.update({
+        status_code: 200,
+        response_body: {
+          disparou: true,
+          enrollment_id: (enrollmentResult.enrollment as { id?: string })?.id,
+          pointer_id: fluxoCasado.id,
+          palavra_casada: palavraEncontrada,
+        },
+      });
+      if (typeof q?.eq === "function") q = q.eq("organization_id", entrada.organizationId);
+      if (typeof q?.eq === "function") q = q.eq("endpoint", "followup_keyword");
+      if (typeof q?.eq === "function") q = q.eq("key", entrada.messageId);
+      await (q as unknown as Promise<unknown>);
+    }
   }
 
   const enrollmentId = String(enrollmentResult.enrollment.id ?? "");

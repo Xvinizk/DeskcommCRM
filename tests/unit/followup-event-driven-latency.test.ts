@@ -27,6 +27,7 @@ interface QueuedJob {
   organization_id: string;
   contact_id: string;
   payload: Record<string, unknown>;
+  run_after?: Date;
 }
 
 class InMemoryHarness {
@@ -198,6 +199,7 @@ class InMemoryHarness {
           organization_id: job.organization_id,
           contact_id: job.contact_id,
           payload: job.payload,
+          run_after: job.run_after,
         });
       },
     };
@@ -212,27 +214,47 @@ class InMemoryHarness {
     };
   }
 
-  /** Simula o worker executando todos os jobs enfileirados até a fila esgotar. */
+  /** Simula o worker executando todos os jobs enfileirados que estejam prontos (run_after <= now). */
   async drainWorker(maxIterations = 20): Promise<{ jobsProcessed: number }> {
     let count = 0;
     const admin = this.getAdminClient();
 
-    while (this.queue.length > 0 && count < maxIterations) {
+    while (count < maxIterations) {
+      const now = this.clock();
+      const readyIdx = this.queue.findIndex(
+        (j) => !j.run_after || j.run_after <= now,
+      );
+      if (readyIdx === -1) break;
+
       count++;
-      const job = this.queue.shift()!;
+      const [job] = this.queue.splice(readyIdx, 1);
+      if (!job) break;
+
       const enrollmentId = job.payload.followup_enrollment_id as string;
       const nodeId = job.payload.node_id as string;
+      const purpose = job.payload.purpose as string | undefined;
 
-      // Executa o envio do turno e chama a ponte de conclusão (turn-bridge)
-      await completeTurnForEnrollment(
-        admin,
-        job.organization_id,
-        enrollmentId,
-        nodeId,
-        { kind: "sent" },
-        this.clock,
-        job.id,
-      );
+      if (purpose === "wait_wake") {
+        await completeTurnForEnrollment(
+          admin,
+          job.organization_id,
+          enrollmentId,
+          nodeId,
+          { kind: "wake" },
+          this.clock,
+          job.id,
+        );
+      } else {
+        await completeTurnForEnrollment(
+          admin,
+          job.organization_id,
+          enrollmentId,
+          nodeId,
+          { kind: "sent" },
+          this.clock,
+          job.id,
+        );
+      }
     }
     return { jobsProcessed: count };
   }
@@ -330,7 +352,9 @@ describe("Follow-up Event-Driven Latency Tests", () => {
     const tickSummaryBefore = await runFollowupTick(harness.getTickDeps());
     expect(tickSummaryBefore.claimed).toBe(0);
     expect(harness.enrollments.get(enr.id)!.current_node_id).toBe("dly_60");
-    expect(harness.queue.length).toBe(0);
+    // O job temporal de wait_wake está agendado na fila
+    expect(harness.queue.length).toBe(1);
+    expect(harness.queue[0]?.payload.purpose).toBe("wait_wake");
 
     // 4. Aos 60s exatos: cron tick acorda o delay, avança e enfileira a imagem imediatamente na mesma execução
     harness.advanceTime(1_000); // completou 60s
@@ -338,8 +362,7 @@ describe("Follow-up Event-Driven Latency Tests", () => {
     expect(tickSummaryAfter.claimed).toBe(1);
 
     // Imagem foi enfileirada no mesmo tick!
-    expect(harness.queue.length).toBe(1);
-    expect(harness.queue[0]?.payload.node_id).toBe("msg_img");
+    expect(harness.queue.some((j) => j.payload.node_id === "msg_img")).toBe(true);
 
     // 5. Worker conclui a imagem -> fluxo finalizado
     await harness.drainWorker();
@@ -382,13 +405,13 @@ describe("Follow-up Event-Driven Latency Tests", () => {
     // 3. Antes dos 5s (ex: 4s): não acorda
     harness.advanceTime(4_000);
     await runFollowupTick(harness.getTickDeps());
-    expect(harness.queue.length).toBe(0);
+    expect(harness.queue.length).toBe(1);
+    expect(harness.queue[0]?.payload.purpose).toBe("wait_wake");
 
     // 4. Aos 5s: acorda e imediatamente enfileira Texto 2
     harness.advanceTime(1_000);
     await runFollowupTick(harness.getTickDeps());
-    expect(harness.queue.length).toBe(1);
-    expect(harness.queue[0]?.payload.node_id).toBe("t2");
+    expect(harness.queue.some((j) => j.payload.node_id === "t2")).toBe(true);
 
     // 5. Worker envia Texto 2 -> conclui
     await harness.drainWorker();

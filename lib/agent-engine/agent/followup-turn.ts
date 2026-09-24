@@ -78,7 +78,7 @@ export const followupTurnPayloadSchema = z
     // (schedule_followup / F3-03 / F3-04) intocado — nem lido.
     followup_enrollment_id: z.string().uuid().optional(),
     node_id: z.string().min(1).optional(),
-    purpose: z.enum(['send_message', 'classify', 'plan_timing']).optional(),
+    purpose: z.enum(['send_message', 'classify', 'plan_timing', 'wait_wake']).optional(),
     prompt_hint: z.string().optional(),
     /** action mode `text` — enviado pela cadeia de guardrails, sem LLM. */
     fixed_body: z.string().min(1).max(4000).optional(),
@@ -114,7 +114,8 @@ export type FollowupFlowTurnResult =
   | { kind: 'classified'; class: string }
   /** O envio ficou estacionado até `until` (janela fechada) — nem saiu, nem foi recusado. */
   | { kind: 'deferred'; until: Date; reason: string }
-  | { kind: 'planned'; propostas: PropostaDeEsperaBruta[]; modelo: string };
+  | { kind: 'planned'; propostas: PropostaDeEsperaBruta[]; modelo: string }
+  | { kind: 'wake' };
 
 /**
  * `InboundTurnDeps` + o callback que fecha o turno dirigido por fluxo de volta
@@ -416,7 +417,7 @@ async function runFlowDrivenTurn(
   input: {
     enrollmentId: string;
     nodeId: string | undefined;
-    purpose: 'send_message' | 'classify' | 'plan_timing' | undefined;
+    purpose: 'send_message' | 'classify' | 'plan_timing' | 'wait_wake' | undefined;
     promptHint: string | undefined;
     fixedBody: string | undefined;
     templateId: string | undefined;
@@ -441,6 +442,38 @@ async function runFlowDrivenTurn(
   }
   const { enrollmentId, nodeId } = input;
   const runLog = withFields(deps.log, { job_id: job.id, tenant_id: target.tenantId, lead_id: target.leadId, enrollment_id: enrollmentId });
+
+  if (input.purpose === 'wait_wake') {
+    const { rows } = await pool.query<{ status: string; current_node_id: string }>(
+      `select status, current_node_id from followup_enrollments
+       where organization_id = $1 and id = $2 limit 1`,
+      [target.tenantId, enrollmentId],
+    );
+    const row = rows[0];
+    if (
+      !row ||
+      row.current_node_id !== nodeId ||
+      (row.status !== 'active' && row.status !== 'waiting_reply' && row.status !== 'dormente')
+    ) {
+      runLog.info('wait_wake ignorado: enrollment nao encontrado, inativo ou em outro no', {
+        enrollment_id: enrollmentId,
+        node_id: nodeId,
+        status: row?.status,
+        current_node_id: row?.current_node_id,
+      });
+      return;
+    }
+
+    await complete(pool, {
+      jobId: job.id,
+      jobClaim: claimOfJob(job),
+      organizationId: target.tenantId,
+      enrollmentId,
+      nodeId,
+      result: { kind: 'wake' },
+    });
+    return;
+  }
 
   if (input.purpose === 'send_message') {
     const body = await resolveFlowSendBody(pool, target.tenantId, input);

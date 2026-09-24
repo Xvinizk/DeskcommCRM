@@ -18,7 +18,7 @@ import { requireCurrentServiceBoundary } from "@/lib/atendimento/fronteira-serve
  */
 import type pg from "pg";
 
-import { avancarEnrollmentAtivo, type AdminClient, type EnrollmentPatch } from "./engine";
+import { avancarEnrollmentAtivo, deterministicUuid, type AdminClient, type EnrollmentPatch } from "./engine";
 import { flowGraphSchema, isSendMessageNode } from "./graph-schema";
 import { EVENTO_ACAO_ADIADA, classEdgeMatch, selectEdge, type EnrollmentRow } from "./node-handlers";
 import { coletarEsperasAdaptativas, montarTimingPlan, type PropostaDeEspera } from "./timing-plan";
@@ -51,7 +51,8 @@ export type TurnResult =
    */
   | { kind: "deferred"; until: Date; reason: string }
   /** Plano de tempo do fluxo inteiro, proposto no acionamento — cru, antes do clamp. */
-  | { kind: "planned"; propostas: PropostaDeEspera[]; modelo: string };
+  | { kind: "planned"; propostas: PropostaDeEspera[]; modelo: string }
+  | { kind: "wake" };
 
 /**
  * Traduz o resultado de um turno concluído em progressão do enrollment —
@@ -94,7 +95,20 @@ export async function completeTurnForEnrollment(
   // Aconteceu de novo com `paused_manual` (migration 0145): sem esta troca, um
   // envio que terminasse depois do clique desfazia a pausa em silêncio.
   // Descartar o resultado é o comportamento CERTO, não perda de dado.
-  if (enrollment.status !== "active" && enrollment.status !== "waiting_reply") return;
+  if (enrollment.status !== "active" && enrollment.status !== "waiting_reply" && enrollment.status !== "dormente") return;
+
+  if (result.kind === "wake") {
+    const fresh = await db.loadEnrollmentById(orgId, enrollmentId);
+    if (!fresh || fresh.current_node_id !== nodeId) return;
+    if (fresh.status !== "active" && fresh.status !== "waiting_reply" && fresh.status !== "dormente") return;
+    if (db.enqueueJob) {
+      await avancarEnrollmentAtivo(
+        { db, clock, enqueueJob: db.enqueueJob },
+        fresh,
+      );
+    }
+    return;
+  }
 
   if(jobId) await db.assertFollowupJob?.(orgId,jobId,enrollmentId,nodeId,jobClaim);
   await db.assertServiceBoundary?.(enrollment);
@@ -525,10 +539,20 @@ export function createPgAdminClient(
       await moverEtapaFollowupCanonica(getAdmin(), input);
     },
     async enqueueJob(job) {
+      const sourceEventId = job.payload.source_step_key
+        ? deterministicUuid(`followup:${job.payload.followup_enrollment_id}:${job.payload.source_step_key}`)
+        : null;
       await pool.query(
-        `insert into job_queue (organization_id, contact_id, kind, payload)
-         values ($1, $2, 'followup_turn', $3)`,
-        [job.organization_id, job.contact_id, job.payload],
+        `insert into job_queue (organization_id, contact_id, kind, payload, run_after, source_event_id)
+         values ($1, $2, 'followup_turn', $3, coalesce($4::timestamptz, now()), $5)
+         on conflict (organization_id, source_event_id) where source_event_id is not null do nothing`,
+        [
+          job.organization_id,
+          job.contact_id,
+          job.payload,
+          job.run_after?.toISOString() ?? null,
+          sourceEventId,
+        ],
       );
     },
   };

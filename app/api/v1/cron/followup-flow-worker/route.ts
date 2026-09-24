@@ -33,7 +33,7 @@ import { audit } from "@/lib/audit";
 import { env } from "@/lib/env";
 import { logger } from "@/lib/logger";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { createSupabaseAdminClient, runFollowupTick, type FollowupJobRequest } from "@/lib/followup/engine";
+import { createSupabaseAdminClient, deterministicUuid, runFollowupTick, type FollowupJobRequest } from "@/lib/followup/engine";
 import { createSupabaseFollowupGateDb } from "@/lib/followup/agent-followup-gate";
 import { enviarTextoFixoPendente } from "@/lib/followup/enviar-texto-fixo";
 import { createSupabaseSilenceSweepDb, runSilenceSweep } from "@/lib/followup/silence-sweep";
@@ -44,13 +44,18 @@ export const dynamic = "force-dynamic";
  *  pelo handler já pronto em lib/agent-engine/agent/followup-turn.ts. */
 async function enqueueJob(job: FollowupJobRequest): Promise<void> {
   const admin = createAdminClient();
+  const sourceEventId = job.payload.source_step_key
+    ? deterministicUuid(`followup:${job.payload.followup_enrollment_id}:${job.payload.source_step_key}`)
+    : undefined;
   const { error } = await admin.from("job_queue").insert({
     organization_id: job.organization_id,
     contact_id: job.contact_id,
     kind: "followup_turn",
     payload: job.payload,
+    ...(job.run_after ? { run_after: job.run_after.toISOString() } : {}),
+    ...(sourceEventId ? { source_event_id: sourceEventId } : {}),
   });
-  if (error) throw new Error(error.message);
+  if (error && error.code !== "23505") throw new Error(error.message);
 }
 
 async function handle(req: NextRequest): Promise<Response> {
