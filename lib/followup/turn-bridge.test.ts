@@ -637,7 +637,7 @@ describe("PATH B — turn-bridge timing nodes (typing & delay)", () => {
     const GRAPH: FlowGraph = {
       nodes: [
         { id: "txt1", type: "message_text", label: "Texto 1", position: { x: 0, y: 0 }, config: { body: "Msg 1" } },
-        { id: "del", type: "delay", label: "Delay 60s", position: { x: 0, y: 0 }, config: { duration_value: 60, unit: "minutes" } },
+        { id: "del", type: "delay", label: "Delay 60s", position: { x: 0, y: 0 }, config: { duration_value: 1, unit: "minutes" } },
         { id: "txt2", type: "message_text", label: "Texto 2", position: { x: 0, y: 0 }, config: { body: "Msg 2" } },
         { id: "end", type: "end", label: "Fim", position: { x: 0, y: 0 }, config: { outcome: "converted" } },
       ],
@@ -675,18 +675,18 @@ describe("PATH B — turn-bridge timing nodes (typing & delay)", () => {
     expect(harness.getEnrollment().current_node_id).toBe("del");
     expect(harness.getEnrollment().status).toBe("active");
 
-    // 1b: Intermediate job must be wait_wake with run_after = 60 * 60 * 1000 = 3600000ms
+    // 1b: Intermediate job must be wait_wake with run_after = 1 * 60 * 1000 = 60000ms
     const wakeJobs = harness.getEnqueuedJobs().filter((j) => j.payload.purpose === "wait_wake");
     expect(wakeJobs.length).toBe(1);
     expect(wakeJobs[0]!.payload.node_id).toBe("del");
-    expect(wakeJobs[0]!.run_after!.getTime() - T0.getTime()).toBe(3600000);
+    expect(wakeJobs[0]!.run_after!.getTime() - T0.getTime()).toBe(60000);
 
     // 1c: CRITICAL: NO send_message job created yet!
     const sendJobsStep1 = harness.getEnqueuedJobs().filter((j) => j.payload.purpose === "send_message");
     expect(sendJobsStep1.length).toBe(0);
 
-    // Step 2: 60 minutes later, wake job fires
-    currentTime = new Date(T0.getTime() + 3600000);
+    // Step 2: 60 seconds later, wake job fires
+    currentTime = new Date(T0.getTime() + 60000);
     await completeTurnForEnrollment(
       harness.db,
       "org-1",
