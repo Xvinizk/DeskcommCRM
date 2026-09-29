@@ -107,6 +107,9 @@ export const PUBLIC_PATHS: RegExp[] = [
   // dois nomes de propósito: `/^\/legal/` deixaria qualquer sub-path futuro
   // nascer público de carona.
   /^\/legal\/(terms|privacy)$/,
+  // Compartilhamento público de Fluxos por link imutável
+  /^\/fluxos\/compartilhado\/[a-zA-Z0-9_-]+$/,
+  /^\/api\/v1\/ai\/followup-flows\/shared\/[a-zA-Z0-9_-]+$/,
 ];
 
 export function isPublicPath(pathname: string): boolean {

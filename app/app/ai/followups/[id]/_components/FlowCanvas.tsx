@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ReactFlow,
   ReactFlowProvider,
@@ -40,7 +40,11 @@ import {
   type NodeType,
 } from "@/lib/followup/graph-schema";
 import { rotuloDoRamo } from "@/lib/followup/rotulo-do-ramo";
-import { useFollowupFlow, type FollowupFlowDetailRow } from "@/hooks/followup/useFollowupFlow";
+import {
+  useFollowupFlow,
+  useSaveFollowupFlowDraft,
+  type FollowupFlowDetailRow,
+} from "@/hooks/followup/useFollowupFlow";
 import { useT } from "@/hooks/i18n/useT";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
@@ -125,6 +129,28 @@ function FlowCanvasInner({ flowId, initialData }: Props) {
 
   const liveGraph = useMemo(() => fromReactFlow(nodes, edges), [nodes, edges]);
   const dirty = useMemo(() => !graphsEqual(liveGraph, savedGraph), [liveGraph, savedGraph]);
+
+  const saveDraftMutation = useSaveFollowupFlowDraft(flowId);
+  const [autosaving, setAutosaving] = useState(false);
+  const [lastAutosavedAt, setLastAutosavedAt] = useState<Date | null>(null);
+
+  useEffect(() => {
+    if (!dirty) return;
+    const timer = setTimeout(async () => {
+      try {
+        setAutosaving(true);
+        await saveDraftMutation.mutateAsync(liveGraph);
+        setSavedGraph(liveGraph);
+        setLastAutosavedAt(new Date());
+      } catch {
+        // Falha silenciosa no autosave em background; o usuário pode salvar manualmente
+      } finally {
+        setAutosaving(false);
+      }
+    }, 2500);
+
+    return () => clearTimeout(timer);
+  }, [dirty, liveGraph, saveDraftMutation]);
 
   const markNodeErrors = useCallback(
     (errorsByNode: Record<string, string[]>) => {
@@ -329,6 +355,8 @@ function FlowCanvasInner({ flowId, initialData }: Props) {
           onPublishSuccess={clearNodeErrors}
           onAutoFit={onAutoFit}
           canAutoFit={nodes.length > 0}
+          autosaving={autosaving}
+          lastAutosavedAt={lastAutosavedAt}
         />
       )}
       <div className="flex flex-1 overflow-hidden">

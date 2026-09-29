@@ -8,12 +8,13 @@ import Link from "next/link";
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { FlowArrow, Plus, Sparkle } from "@/lib/ui/icons";
+import { FlowArrow, Plus, Sparkle, UploadSimple } from "@/lib/ui/icons";
 import { useFollowupFlows, type FollowupFlowPointerRow } from "@/hooks/followup/useFollowupFlows";
 import { DeleteFollowupFlowButton } from "./DeleteFollowupFlowButton";
 import { FlowStatusBadge } from "./FlowStatusBadge";
 import { ModelosDialog } from "./ModelosDialog";
 import { NewFlowDialog } from "./NewFlowDialog";
+import { ImportFlowJsonDialog } from "../[id]/_components/ImportFlowJsonDialog";
 
 interface Props {
   initialData: FollowupFlowPointerRow[];
@@ -34,6 +35,7 @@ export function FlowsList({ initialData, canWrite }: Props) {
   const { data } = useFollowupFlows({ initialData });
   const [dialogOpen, setDialogOpen] = useState(false);
   const [modelosOpen, setModelosOpen] = useState(false);
+  const [importJsonOpen, setImportJsonOpen] = useState(false);
 
   const flows = data ?? [];
 
@@ -54,6 +56,12 @@ export function FlowsList({ initialData, canWrite }: Props) {
     </Button>
   );
 
+  const importJsonButton = (
+    <Button onClick={() => setImportJsonOpen(true)} variant="outline" className="w-full sm:w-auto">
+      <UploadSimple size={14} aria-hidden className="mr-2" /> {t("Importar JSON")}
+    </Button>
+  );
+
   const dialogos = canWrite && (
     <>
       <NewFlowDialog open={dialogOpen} onOpenChange={setDialogOpen} />
@@ -62,6 +70,7 @@ export function FlowsList({ initialData, canWrite }: Props) {
         onOpenChange={setModelosOpen}
         nomesExistentes={flows.map((f) => f.name)}
       />
+      <ImportFlowJsonDialog open={importJsonOpen} onOpenChange={setImportJsonOpen} />
     </>
   );
 
@@ -80,6 +89,7 @@ export function FlowsList({ initialData, canWrite }: Props) {
             <div className="mt-1 flex flex-col items-center gap-2 sm:flex-row">
               {modelosButton}
               {newFlowButton}
+              {importJsonButton}
             </div>
           )}
         </Card>
@@ -94,6 +104,7 @@ export function FlowsList({ initialData, canWrite }: Props) {
         <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
           {modelosButton}
           {newFlowButton}
+          {importJsonButton}
         </div>
       )}
 

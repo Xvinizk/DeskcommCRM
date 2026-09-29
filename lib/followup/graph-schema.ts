@@ -345,6 +345,7 @@ export const messageImageConfigSchema = z
     media_type: z.literal("image").optional(),
     media_mime: z.string().max(100).optional(),
     media_filename: z.string().max(255).optional(),
+    media_size_bytes: z.number().int().nonnegative().optional(),
     caption: z.string().max(1000).optional(),
   })
   .refine((d) => Boolean(d.media_storage_path || d.media_url), {
@@ -358,6 +359,7 @@ export const messageVideoConfigSchema = z
     media_type: z.literal("video").optional(),
     media_mime: z.string().max(100).optional(),
     media_filename: z.string().max(255).optional(),
+    media_size_bytes: z.number().int().nonnegative().optional(),
     caption: z.string().max(1000).optional(),
   })
   .refine((d) => Boolean(d.media_storage_path || d.media_url), {
@@ -371,6 +373,7 @@ export const messageAudioConfigSchema = z
     media_type: z.literal("audio").optional(),
     media_mime: z.string().max(100).optional(),
     media_filename: z.string().max(255).optional(),
+    media_size_bytes: z.number().int().nonnegative().optional(),
   })
   .refine((d) => Boolean(d.media_storage_path || d.media_url), {
     message: "media_storage_path or media_url is required",
@@ -392,8 +395,10 @@ export const tagConfigSchema = z.strictObject({
 });
 
 export const stageMoveConfigSchema = z.strictObject({
-  pipeline_id: z.string().uuid(),
-  stage_id: z.string().uuid(),
+  pipeline_id: z.string().uuid().optional(),
+  stage_id: z.string().uuid().optional(),
+  stage_name: z.string().max(100).optional(),
+  needs_review: z.boolean().optional(),
 });
 
 export const triggerNodeConfigSchema = z.union([

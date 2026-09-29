@@ -37,6 +37,12 @@ interface Props {
 
 const MAX_BYTES = 50 * 1024 * 1024; // 50MB
 
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 export function MessageMediaForm({ type, config, onChange }: Props) {
   const t = useT();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -48,6 +54,9 @@ export function MessageMediaForm({ type, config, onChange }: Props) {
   );
   const [mediaMime, setMediaMime] = useState(config.media_mime ?? "");
   const [mediaFilename, setMediaFilename] = useState(config.media_filename ?? "");
+  const [mediaSizeBytes, setMediaSizeBytes] = useState<number | null>(
+    (config as Record<string, unknown>).media_size_bytes as number | null ?? null
+  );
   const [caption, setCaption] = useState(
     type !== "message_audio" ? (config as ConfigOf<"message_image">).caption ?? "" : ""
   );
@@ -62,7 +71,8 @@ export function MessageMediaForm({ type, config, onChange }: Props) {
     nextType: "image" | "video" | "audio",
     nextMime: string,
     nextFilename: string,
-    nextCaption: string
+    nextCaption: string,
+    nextSizeBytes?: number | null
   ) => {
     setMediaStoragePath(nextStoragePath);
     setMediaUrl(nextUrl);
@@ -70,6 +80,8 @@ export function MessageMediaForm({ type, config, onChange }: Props) {
     setMediaMime(nextMime);
     setMediaFilename(nextFilename);
     setCaption(nextCaption);
+    const sizeToSave = nextSizeBytes !== undefined ? nextSizeBytes : mediaSizeBytes;
+    setMediaSizeBytes(sizeToSave);
 
     const basePayload = {
       ...(nextStoragePath ? { media_storage_path: nextStoragePath } : {}),
@@ -77,6 +89,7 @@ export function MessageMediaForm({ type, config, onChange }: Props) {
       ...(nextType ? { media_type: nextType } : {}),
       ...(nextMime ? { media_mime: nextMime } : {}),
       ...(nextFilename ? { media_filename: nextFilename } : {}),
+      ...(sizeToSave ? { media_size_bytes: sizeToSave } : {}),
     };
 
     let parsed;
@@ -100,7 +113,18 @@ export function MessageMediaForm({ type, config, onChange }: Props) {
     }
 
     if (!parsed.success) {
-      setError(parsed.error.issues[0]?.message ?? t("Arquivo de mídia obrigatório."));
+      const issueMsg = parsed.error.issues[0]?.message;
+      if (issueMsg?.includes("media_storage_path or media_url is required")) {
+        setError(
+          type === "message_video"
+            ? t("Selecione um vídeo.")
+            : type === "message_image"
+              ? t("Selecione uma imagem.")
+              : t("Selecione um áudio.")
+        );
+      } else {
+        setError(issueMsg ?? t("Arquivo de mídia obrigatório."));
+      }
       return;
     }
     setError(null);
@@ -116,7 +140,22 @@ export function MessageMediaForm({ type, config, onChange }: Props) {
       return;
     }
 
-    const mime = file.type || "application/octet-stream";
+    let mime = file.type || "";
+    if (!mime || mime === "application/octet-stream") {
+      const ext = file.name.split(".").pop()?.toLowerCase();
+      if (ext === "mp4") mime = "video/mp4";
+      else if (ext === "mov") mime = "video/quicktime";
+      else if (ext === "webm") mime = "video/webm";
+      else if (ext === "jpg" || ext === "jpeg") mime = "image/jpeg";
+      else if (ext === "png") mime = "image/png";
+      else if (ext === "webp") mime = "image/webp";
+      else if (ext === "gif") mime = "image/gif";
+      else if (ext === "mp3") mime = "audio/mpeg";
+      else if (ext === "ogg") mime = "audio/ogg";
+      else if (ext === "wav") mime = "audio/wav";
+      else mime = "application/octet-stream";
+    }
+
     if (type === "message_image" && !mime.startsWith("image/")) {
       setError(t("Por favor, selecione uma imagem válida."));
       return;
@@ -143,7 +182,18 @@ export function MessageMediaForm({ type, config, onChange }: Props) {
 
       const json = await res.json();
       if (!res.ok || !json.data?.storage_path) {
-        setError(json.error?.message || t("Erro ao fazer upload da mídia."));
+        const rawMsg = json.error?.message;
+        if (rawMsg && rawMsg.includes("Campo 'file' (multipart) obrigatório")) {
+          setError(
+            type === "message_video"
+              ? t("Selecione um vídeo.")
+              : type === "message_image"
+                ? t("Selecione uma imagem.")
+                : t("Selecione um áudio.")
+          );
+        } else {
+          setError(rawMsg || t("Erro ao fazer upload da mídia."));
+        }
         return;
       }
 
@@ -152,6 +202,7 @@ export function MessageMediaForm({ type, config, onChange }: Props) {
         media_type: "image" | "video" | "audio";
         media_mime: string;
         media_filename: string;
+        media_size_bytes?: number;
       };
 
       commit(
@@ -160,7 +211,8 @@ export function MessageMediaForm({ type, config, onChange }: Props) {
         uploaded.media_type,
         uploaded.media_mime,
         uploaded.media_filename,
-        caption
+        caption,
+        uploaded.media_size_bytes ?? file.size
       );
     } catch {
       setError(t("Falha de conexão ao enviar o arquivo."));
@@ -205,6 +257,7 @@ export function MessageMediaForm({ type, config, onChange }: Props) {
     setMediaUrl("");
     setMediaFilename("");
     setMediaMime("");
+    setMediaSizeBytes(null);
     setError(null);
     onChange({
       media_storage_path: "",
@@ -347,11 +400,23 @@ export function MessageMediaForm({ type, config, onChange }: Props) {
             )}
 
             {/* Informações do arquivo */}
-            <div className="flex items-center justify-between text-xs text-muted-fg px-1">
-              <span className="truncate max-w-[200px]" title={mediaFilename || mediaStoragePath}>
-                {mediaFilename || (mediaStoragePath ? mediaStoragePath.split("/").pop() : t("Arquivo anexado"))}
-              </span>
-              {mediaMime && <span className="font-mono text-[10px] uppercase">{mediaMime.split("/")[1] || mediaMime}</span>}
+            <div className="flex flex-col gap-1.5 px-1 py-0.5">
+              <div className="flex items-center justify-between text-xs">
+                <span className="truncate max-w-[200px] font-medium text-text" title={mediaFilename || mediaStoragePath}>
+                  {mediaFilename || (mediaStoragePath ? mediaStoragePath.split("/").pop() : t("Arquivo anexado"))}
+                </span>
+                {mediaSizeBytes ? (
+                  <span className="font-mono text-xs text-text-muted">{formatBytes(mediaSizeBytes)}</span>
+                ) : null}
+              </div>
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="font-medium text-success-fg">
+                  ✓ {type === "message_video" ? t("Vídeo enviado") : type === "message_image" ? t("Imagem enviada") : t("Áudio enviado")}
+                </span>
+                {mediaMime && (
+                  <span className="font-mono text-[10px] uppercase text-text-muted">{mediaMime.split("/")[1] || mediaMime}</span>
+                )}
+              </div>
             </div>
 
             {/* Ações: Trocar e Remover */}

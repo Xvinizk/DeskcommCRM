@@ -18,12 +18,14 @@ export class MediaTooLargeError extends Error {
   }
 }
 
-const MIME_EXT: Record<string, string> = {
+export const MIME_EXT: Record<string, string> = {
   "image/jpeg": "jpg",
   "image/png": "png",
   "image/webp": "webp",
   "image/gif": "gif",
   "video/mp4": "mp4",
+  "video/quicktime": "mov",
+  "video/webm": "webm",
   "application/mp4": "mp4", // WAHA/NOWEB anuncia vídeo do WhatsApp com esse mime
   "video/3gpp": "3gp",
   "audio/ogg": "ogg",

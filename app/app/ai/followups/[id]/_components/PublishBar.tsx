@@ -36,10 +36,22 @@ import {
   useUpdateHandoffPolicy,
   type FollowupFlowDetailRow,
 } from "@/hooks/followup/useFollowupFlow";
-import { Trash, TreeStructure } from "@/lib/ui/icons";
+import {
+  Trash,
+  TreeStructure,
+  ShareNetwork,
+  ClockCounterClockwise,
+  Archive,
+  DownloadSimple,
+  UploadSimple,
+  CircleNotch,
+} from "@/lib/ui/icons";
 import { FlowStatusBadge } from "../../_components/FlowStatusBadge";
 import { DeleteFollowupFlowButton } from "../../_components/DeleteFollowupFlowButton";
 import { TriggerConfigControl } from "./TriggerConfigControl";
+import { ShareFlowDialog } from "./ShareFlowDialog";
+import { FlowVersionsDialog } from "./FlowVersionsDialog";
+import { ImportFlowJsonDialog } from "./ImportFlowJsonDialog";
 
 interface Props {
   flowId: string;
@@ -53,6 +65,8 @@ interface Props {
   onPublishSuccess: () => void;
   onAutoFit?: () => void;
   canAutoFit?: boolean;
+  autosaving?: boolean;
+  lastAutosavedAt?: Date | null;
 }
 
 const HANDOFF_LABEL: Record<FollowupFlowDetailRow["handoff_policy"], string> = {
@@ -73,9 +87,17 @@ export function PublishBar({
   onPublishSuccess,
   onAutoFit,
   canAutoFit = false,
+  autosaving = false,
+  lastAutosavedAt,
 }: Props) {
   const t = useT();
   const [openDeleteSelection, setOpenDeleteSelection] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
+  const [versionsOpen, setVersionsOpen] = useState(false);
+  const [initialCreateBackup, setInitialCreateBackup] = useState(false);
+  const [importJsonOpen, setImportJsonOpen] = useState(false);
+  const [exportingJson, setExportingJson] = useState(false);
+
   const save = useSaveFollowupFlowDraft(flowId);
   const publish = usePublishFollowupFlow(flowId);
   const disable = useDisableFollowupFlow(flowId);
@@ -124,118 +146,273 @@ export function PublishBar({
     rollback.mutate(flow.previous_version_id);
   };
 
+  const onExportJson = async () => {
+    setExportingJson(true);
+    try {
+      const res = await fetch(`/api/v1/ai/followup-flows/${flowId}/export`);
+      const json = await res.json();
+      if (!res.ok || !json.data) {
+        toast.error(json.error?.message || t("Erro ao exportar JSON do Fluxo."));
+        return;
+      }
+
+      const blob = new Blob([JSON.stringify(json.data, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const sanitizedName = (flow.name || "fluxo")
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]/g, "_");
+      a.download = `fluxo_${sanitizedName}_export.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      toast.success(t("Arquivo JSON exportado com sucesso!"));
+    } catch {
+      toast.error(t("Erro de conexão ao exportar JSON."));
+    } finally {
+      setExportingJson(false);
+    }
+  };
+
   const busy = save.isPending || publish.isPending || disable.isPending || rollback.isPending;
 
   return (
-    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-surface px-4 py-3">
-      <div className="flex items-center gap-2">
-        <h1 className="text-sm font-semibold text-text">{flow.name}</h1>
-        <FlowStatusBadge status={flow.status} />
-        {dirty && (
-          <Badge variant="warning" data-testid="dirty-indicator">
-            {t("Alterações não salvas")}
-          </Badge>
-        )}
-      </div>
+    <>
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-surface px-4 py-3">
+        <div className="flex items-center gap-2">
+          <h1 className="text-sm font-semibold text-text">{flow.name}</h1>
+          <FlowStatusBadge status={flow.status} />
+          {dirty && (
+            <Badge variant="warning" data-testid="dirty-indicator">
+              {autosaving ? t("Salvando rascunho…") : t("Alterações não salvas")}
+            </Badge>
+          )}
+          {!dirty && lastAutosavedAt && (
+            <span className="text-[11px] text-text-muted hidden sm:inline">
+              {t("Rascunho salvo")}
+            </span>
+          )}
+        </div>
 
-      <div className="flex flex-wrap items-center gap-2">
-        <TriggerConfigControl flowId={flowId} triggerConfig={flow.trigger_config} />
+        <div className="flex flex-wrap items-center gap-2">
+          <TriggerConfigControl flowId={flowId} triggerConfig={flow.trigger_config} />
 
-        <Select value={flow.handoff_policy} onValueChange={(v) => handoffPolicy.mutate(v as FollowupFlowDetailRow["handoff_policy"])}>
-          <SelectTrigger className="w-56" aria-label={t("Política de handoff")}>
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {(Object.keys(HANDOFF_LABEL) as Array<keyof typeof HANDOFF_LABEL>).map((k) => (
-              <SelectItem key={k} value={k}>
-                {t(HANDOFF_LABEL[k])}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+          <Select
+            value={flow.handoff_policy}
+            onValueChange={(v) => handoffPolicy.mutate(v as FollowupFlowDetailRow["handoff_policy"])}
+          >
+            <SelectTrigger className="w-52" aria-label={t("Política de handoff")}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {(Object.keys(HANDOFF_LABEL) as Array<keyof typeof HANDOFF_LABEL>).map((k) => (
+                <SelectItem key={k} value={k}>
+                  {t(HANDOFF_LABEL[k])}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
 
-        <Button type="button" variant="secondary" size="sm" disabled={!dirty || busy} onClick={onSave}>
-          {save.isPending ? t("Salvando…") : t("Salvar")}
-        </Button>
-        <Button type="button" size="sm" disabled={busy} onClick={onPublish} data-testid="publish-button">
-          {publish.isPending ? t("Publicando…") : t("Publicar")}
-        </Button>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          disabled={busy || flow.status === "disabled"}
-          onClick={onDisable}
-        >
-          {t("Desativar")}
-        </Button>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          disabled={busy || !canRollback}
-          onClick={onRollback}
-          data-testid="rollback-button"
-        >
-          {t("Rollback")}
-        </Button>
-        {onAutoFit && (
+          {/* Ações principais do Fluxo */}
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            disabled={!dirty || busy}
+            onClick={onSave}
+          >
+            {save.isPending ? t("Salvando…") : t("Salvar")}
+          </Button>
+
+          <Button
+            type="button"
+            size="sm"
+            disabled={busy}
+            onClick={onPublish}
+            data-testid="publish-button"
+          >
+            {publish.isPending ? t("Publicando…") : t("Publicar")}
+          </Button>
+
+          {/* Backup & Versionamento */}
           <Button
             type="button"
             variant="outline"
             size="sm"
-            disabled={!canAutoFit}
-            onClick={onAutoFit}
-            data-testid="auto-fit-flow"
+            onClick={() => {
+              setInitialCreateBackup(true);
+              setVersionsOpen(true);
+            }}
+            title={t("Criar backup manual deste Fluxo")}
           >
-            <TreeStructure size={14} aria-hidden className="mr-1" />
-            {t("Organizar")}
+            <Archive size={14} aria-hidden className="mr-1.5" />
+            {t("Criar backup")}
           </Button>
-        )}
-        {selection ? (
-          <>
+
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setInitialCreateBackup(false);
+              setVersionsOpen(true);
+            }}
+            title={t("Ver histórico de versões e backups")}
+          >
+            <ClockCounterClockwise size={14} aria-hidden className="mr-1.5" />
+            {t("Histórico de versões")}
+          </Button>
+
+          {/* Compartilhamento por link */}
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setShareOpen(true)}
+            title={t("Compartilhar Fluxo por link")}
+          >
+            <ShareNetwork size={14} aria-hidden className="mr-1.5" />
+            {t("Compartilhar Fluxo")}
+          </Button>
+
+          {/* Exportar / Importar JSON */}
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={exportingJson}
+            onClick={onExportJson}
+            title={t("Exportar estrutura do Fluxo como arquivo JSON")}
+          >
+            {exportingJson ? (
+              <CircleNotch size={14} className="mr-1.5 animate-spin" />
+            ) : (
+              <DownloadSimple size={14} aria-hidden className="mr-1.5" />
+            )}
+            {t("Exportar JSON")}
+          </Button>
+
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setImportJsonOpen(true)}
+            title={t("Importar novo Fluxo a partir de arquivo JSON")}
+          >
+            <UploadSimple size={14} aria-hidden className="mr-1.5" />
+            {t("Importar JSON")}
+          </Button>
+
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={busy || flow.status === "disabled"}
+            onClick={onDisable}
+          >
+            {t("Desativar")}
+          </Button>
+
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={busy || !canRollback}
+            onClick={onRollback}
+            data-testid="rollback-button"
+          >
+            {t("Rollback")}
+          </Button>
+
+          {onAutoFit && (
             <Button
               type="button"
               variant="outline"
               size="sm"
-              className="text-destructive"
-              data-testid="delete-selection"
-              onClick={() => setOpenDeleteSelection(true)}
+              disabled={!canAutoFit}
+              onClick={onAutoFit}
+              data-testid="auto-fit-flow"
             >
-              <Trash size={14} aria-hidden className="mr-1" />
-              {selection === "node" ? t("Excluir nó") : t("Excluir aresta")}
+              <TreeStructure size={14} aria-hidden className="mr-1" />
+              {t("Organizar")}
             </Button>
-            <AlertDialog open={openDeleteSelection} onOpenChange={setOpenDeleteSelection}>
-              <AlertDialogContent>
-                <AlertDialogHeader>
-                  <AlertDialogTitle>
-                    {selection === "node" ? t("Excluir este nó?") : t("Excluir esta aresta?")}
-                  </AlertDialogTitle>
-                  <AlertDialogDescription>
-                    {selection === "node"
-                      ? t("Este nó e as arestas ligadas a ele são apagados. Não é possível desfazer.")
-                      : t("A aresta entre os dois nós é apagada. Não é possível desfazer.")}
-                  </AlertDialogDescription>
-                </AlertDialogHeader>
-                <AlertDialogFooter>
-                  <AlertDialogCancel>{t("Cancelar")}</AlertDialogCancel>
-                  <AlertDialogAction
-                    onClick={(e) => {
-                      e.preventDefault();
-                      setOpenDeleteSelection(false);
-                      onDeleteSelection();
-                    }}
-                  >
-                    {t("Excluir")}
-                  </AlertDialogAction>
-                </AlertDialogFooter>
-              </AlertDialogContent>
-            </AlertDialog>
-          </>
-        ) : (
-          <DeleteFollowupFlowButton flowId={flowId} flowName={flow.name} redirectToList />
-        )}
+          )}
+
+          {selection ? (
+            <>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="text-destructive"
+                data-testid="delete-selection"
+                onClick={() => setOpenDeleteSelection(true)}
+              >
+                <Trash size={14} aria-hidden className="mr-1" />
+                {selection === "node" ? t("Excluir nó") : t("Excluir aresta")}
+              </Button>
+              <AlertDialog open={openDeleteSelection} onOpenChange={setOpenDeleteSelection}>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>
+                      {selection === "node" ? t("Excluir este nó?") : t("Excluir esta aresta?")}
+                    </AlertDialogTitle>
+                    <AlertDialogDescription>
+                      {selection === "node"
+                        ? t("Este nó e as arestas ligadas a ele são apagados. Não é possível desfazer.")
+                        : t("A aresta entre os dois nós é apagada. Não é possível desfazer.")}
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>{t("Cancelar")}</AlertDialogCancel>
+                    <AlertDialogAction
+                      onClick={(e) => {
+                        e.preventDefault();
+                        setOpenDeleteSelection(false);
+                        onDeleteSelection();
+                      }}
+                    >
+                      {t("Excluir")}
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+            </>
+          ) : (
+            <DeleteFollowupFlowButton flowId={flowId} flowName={flow.name} redirectToList />
+          )}
+        </div>
       </div>
-    </div>
+
+      {/* Modais de Compartilhamento, Versões e Importação */}
+      <ShareFlowDialog
+        flowId={flowId}
+        flowName={flow.name}
+        open={shareOpen}
+        onOpenChange={setShareOpen}
+      />
+
+      <FlowVersionsDialog
+        flowId={flowId}
+        flowName={flow.name}
+        open={versionsOpen}
+        onOpenChange={setVersionsOpen}
+        initialCreateBackup={initialCreateBackup}
+        onRestoreSuccess={() => {
+          setVersionsOpen(false);
+          window.location.reload();
+        }}
+      />
+
+      <ImportFlowJsonDialog
+        open={importJsonOpen}
+        onOpenChange={setImportJsonOpen}
+      />
+    </>
   );
 }

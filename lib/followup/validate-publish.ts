@@ -28,6 +28,7 @@ export const PUBLISH_ERROR_CODES = [
   'immune_wait_too_short',
   'cycle_without_wait',
   'max_steps_exceeded',
+  'stage_move_missing_stage',
 ] as const;
 export type PublishErrorCode = (typeof PUBLISH_ERROR_CODES)[number];
 
@@ -529,6 +530,19 @@ export function validateFlowForPublish(
         code: 'grace_too_short',
         message: `Nó "${node.id}" tem grace_timeout_ms abaixo do mínimo de 15min.`,
       });
+    }
+  }
+
+  for (const node of [...nodes].sort(byId)) {
+    if (node.type === 'stage_move') {
+      const cfg = node.config;
+      if (!cfg.pipeline_id || !cfg.stage_id || !UUID_RX.test(cfg.pipeline_id) || !UUID_RX.test(cfg.stage_id)) {
+        errors.push({
+          node_id: node.id,
+          code: 'stage_move_missing_stage',
+          message: `Nó "${node.label || node.id}" precisa de uma etapa válida configurada antes de publicar.`,
+        });
+      }
     }
   }
 

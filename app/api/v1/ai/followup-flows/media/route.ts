@@ -37,14 +37,83 @@ export async function POST(req: NextRequest): Promise<Response> {
     return fail("payload_too_large", t("Arquivo acima de 50MB."), 413, { requestId });
   }
 
-  const form = await req.formData().catch(() => null);
-  const file = form?.get("file");
-  if (!(file instanceof File)) {
-    return fail("validation_failed", t("Campo 'file' (multipart) obrigatório."), 422, { requestId });
+  let fileBlob: Blob | null = null;
+  let fileName = "media";
+  let mime = "";
+
+  const reqClone = req.clone();
+  const form = await req.formData().catch((err) => {
+    logger.warn("[followup-flows/media] req.formData falhou, usando fallback multipart", {
+      err: String(err),
+      requestId,
+    });
+    return null;
+  });
+
+  if (form) {
+    const file = form.get("file");
+    if (file && typeof file === "object" && typeof (file as Blob).arrayBuffer === "function") {
+      fileBlob = file as Blob;
+      fileName = (file as { name?: string }).name || "media";
+      mime = fileBlob.type || "";
+    }
   }
 
-  const mime = file.type || "application/octet-stream";
-  const verdict = validateOutboundMedia(mime, file.size);
+  if (!fileBlob) {
+    try {
+      const rawBuffer = Buffer.from(await reqClone.arrayBuffer());
+      const contentType = req.headers.get("content-type") || "";
+      const boundaryMatch = contentType.match(/boundary=([^;]+)/i);
+      const rawBoundary = boundaryMatch?.[1];
+      if (rawBoundary) {
+        const boundary = rawBoundary.trim().replace(/^["']|["']$/g, "");
+        const rawStr = rawBuffer.toString("binary");
+        const parts = rawStr.split(`--${boundary}`);
+        for (const part of parts) {
+          if (part.includes('name="file"') || part.includes("name='file'")) {
+            const headerEnd = part.indexOf("\r\n\r\n");
+            if (headerEnd !== -1) {
+              const headerStr = part.slice(0, headerEnd);
+              const fnMatch = headerStr.match(/filename=["']?([^"';\r\n]+)/i);
+              if (fnMatch?.[1]) fileName = fnMatch[1].trim();
+              const ctMatch = headerStr.match(/Content-Type:\s*([^\r\n]+)/i);
+              if (ctMatch?.[1]) mime = ctMatch[1].trim();
+
+              let bodyStr = part.slice(headerEnd + 4);
+              if (bodyStr.endsWith("\r\n")) {
+                bodyStr = bodyStr.slice(0, -2);
+              }
+              const fileBuf = Buffer.from(bodyStr, "binary");
+              fileBlob = new Blob([fileBuf], { type: mime });
+              break;
+            }
+          }
+        }
+      }
+    } catch {
+      // Falha silenciosa no fallback
+    }
+  }
+
+  if (!fileBlob) {
+    return fail("validation_failed", t("Campo 'file' (multipart) obrigatório."), 422, { requestId });
+  }
+  if (!mime || mime === "application/octet-stream") {
+    const ext = fileName.split(".").pop()?.toLowerCase();
+    if (ext === "mp4") mime = "video/mp4";
+    else if (ext === "mov") mime = "video/quicktime";
+    else if (ext === "webm") mime = "video/webm";
+    else if (ext === "jpg" || ext === "jpeg") mime = "image/jpeg";
+    else if (ext === "png") mime = "image/png";
+    else if (ext === "webp") mime = "image/webp";
+    else if (ext === "gif") mime = "image/gif";
+    else if (ext === "mp3") mime = "audio/mpeg";
+    else if (ext === "ogg") mime = "audio/ogg";
+    else if (ext === "wav") mime = "audio/wav";
+    else mime = "application/octet-stream";
+  }
+
+  const verdict = validateOutboundMedia(mime, fileBlob.size);
   if (!verdict.ok) {
     const status = verdict.code === "payload_too_large" ? 413 : verdict.code === "unsupported_media_type" ? 415 : 422;
     return fail(verdict.code, verdict.message, status, { requestId });
@@ -55,7 +124,7 @@ export async function POST(req: NextRequest): Promise<Response> {
     return fail("unsupported_media_type", t("Tipo de arquivo não suportado. Permitidos: imagem, vídeo ou áudio."), 415, { requestId });
   }
 
-  const bruto = Buffer.from(await file.arrayBuffer());
+  const bruto = Buffer.from(await fileBlob.arrayBuffer());
 
   let mimeFinal = mime;
   let buffer: Buffer = bruto;
@@ -85,7 +154,7 @@ export async function POST(req: NextRequest): Promise<Response> {
       media_type: verdict.kind,
       media_mime: mimeFinal,
       media_size_bytes: buffer.length,
-      media_filename: file.name,
+      media_filename: fileName,
     },
     { requestId },
   );

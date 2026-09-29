@@ -149,4 +149,7 @@ export {
   GoogleLogo,
   MapPin,
   ArrowsOutSimple,
+  ShareNetwork,
+  ArrowClockwise,
+  XCircle,
 } from "@phosphor-icons/react/dist/ssr";

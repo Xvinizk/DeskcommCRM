@@ -482,6 +482,10 @@ async function applyResult(
       }
     }
     if (node.type === "stage_move" && db.updateLeadStage) {
+      if (!node.config.stage_id) {
+        await applyHandlerFailure(deps, enrollment, "stage_move: stage_id ausente", summary);
+        return false;
+      }
       try {
         await db.assertServiceBoundary?.(enrollment);
         await db.updateLeadStage({
