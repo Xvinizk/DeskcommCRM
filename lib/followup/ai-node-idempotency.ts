@@ -22,6 +22,7 @@ export interface AcquireAiNodeInboundTurnInput {
 export type AcquireAiNodeTurnResult =
   | {
       status: 'acquired';
+      is_retry: false;
       enrollment_id: string;
       node_id: string;
       agent_id: string | null;
@@ -31,7 +32,28 @@ export type AcquireAiNodeTurnResult =
       session: AiNodeSession;
     }
   | {
-      status: 'already_processed';
+      /**
+       * Claim já existia no banco mas o turno não havia sido concluído.
+       * Ocorre em crash/restart do worker: o retry DEVE retomar a execução
+       * sem incrementar turn_count novamente.
+       */
+      status: 'resumed';
+      is_retry: true;
+      enrollment_id: string;
+      node_id: string;
+      agent_id: string | null;
+      agent_version_id: string | null;
+      inbound_message_id: string;
+      turn_count: number;
+      session: AiNodeSession;
+    }
+  | {
+      /**
+       * O turno para esta mensagem já foi completamente processado e concluído.
+       * Retry é no-op seguro.
+       */
+      status: 'completed';
+      is_retry: true;
       enrollment_id: string;
       node_id: string;
       inbound_message_id: string;
@@ -58,7 +80,43 @@ export interface AcquireAiNodeInboundTurnDeps {
 }
 
 /**
- * Constrói a chave canônica de idempotência para o turno inbound no Node IA.
+ * Constrói a chave canônica para claim de turno inbound no Node IA.
+ */
+export function buildAiNodeTurnClaimKey(params: {
+  organizationId: string;
+  enrollmentId: string;
+  nodeId: string;
+  inboundMessageId: string;
+}): string {
+  return `ai_node_claim:${params.organizationId}:${params.enrollmentId}:${params.nodeId}:${params.inboundMessageId}`;
+}
+
+/**
+ * Constrói a chave canônica para turno concluído no Node IA.
+ */
+export function buildAiNodeTurnCompletedKey(params: {
+  organizationId: string;
+  enrollmentId: string;
+  nodeId: string;
+  inboundMessageId: string;
+}): string {
+  return `ai_node_completed:${params.organizationId}:${params.enrollmentId}:${params.nodeId}:${params.inboundMessageId}`;
+}
+
+/**
+ * Constrói a chave canônica para resposta gerada de LLM (idempotência de custo).
+ */
+export function buildAiNodeReplyKey(params: {
+  organizationId: string;
+  enrollmentId: string;
+  nodeId: string;
+  inboundMessageId: string;
+}): string {
+  return `ai_node_reply:${params.organizationId}:${params.enrollmentId}:${params.nodeId}:${params.inboundMessageId}`;
+}
+
+/**
+ * Mantido para compatibilidade retroativa. Aponta para o claim.
  */
 export function buildAiNodeTurnIdempotencyKey(params: {
   organizationId: string;
@@ -66,19 +124,22 @@ export function buildAiNodeTurnIdempotencyKey(params: {
   nodeId: string;
   inboundMessageId: string;
 }): string {
-  return `ai_node_turn:${params.organizationId}:${params.enrollmentId}:${params.nodeId}:${params.inboundMessageId}`;
+  return buildAiNodeTurnClaimKey(params);
 }
 
 /**
- * Adquire a idempotência e resolve atomicamente a corrida (Timeout x Inbound) para o Node IA.
+ * Adquire a idempotência com separação estrita entre CLAIM e CONCLUSÃO.
  *
  * Garante:
  * 1. Lock CAS via SELECT ... FOR UPDATE no enrollment.
  * 2. Se o nó já mudou (timeout correu antes), desiste sem incrementar turn_count (Cenário B).
- * 3. Adquire idempotência em `followup_enrollment_events` ANTES de qualquer mutação.
- * 4. Incrementa turn_count exatamente 1 vez por mensagem física única.
- * 5. Atualiza last_inbound_at e media_summary de forma determinística.
- * 6. Emite apenas os eventos permitidos nesta fase: `ai_node.inbound_received` e `ai_node.turn_started`.
+ * 3. Se o turno já foi concluído (evento ai_node.turn_completed), retorna 'completed' (no-op seguro).
+ * 4. Se o claim já existe mas não foi concluído (worker crashou), retorna 'resumed' (retomada pós-crash,
+ *    SEM incrementar turn_count novamente).
+ * 5. Se claim inédito, incrementa turn_count exatamente 1 vez e grava o claim.
+ * 6. Atualiza last_inbound_at de forma estritamente MONOTÔNICA (nunca regride com mensagem atrasada/retry).
+ * 7. Atualiza media_summary determinístico.
+ * 8. Emite eventos auditáveis do ciclo de vida: ai_node.inbound_received e ai_node.turn_started.
  */
 export async function acquireAiNodeInboundTurn(
   db: DbPoolLike,
@@ -137,14 +198,65 @@ export async function acquireAiNodeInboundTurn(
       };
     }
 
-    // 2. Idempotência estrita: adquirida ANTES de qualquer mutação
-    const idempotencyKey = buildAiNodeTurnIdempotencyKey({
+    const claimKey = buildAiNodeTurnClaimKey({
       organizationId: input.organizationId,
       enrollmentId: enrollment.id,
       nodeId: input.expectedNodeId,
       inboundMessageId: input.inboundMessageId,
     });
 
+    const completedKey = buildAiNodeTurnCompletedKey({
+      organizationId: input.organizationId,
+      enrollmentId: enrollment.id,
+      nodeId: input.expectedNodeId,
+      inboundMessageId: input.inboundMessageId,
+    });
+
+    // 2. CASO B: Verificar se este turno já foi COMPLETAMENTE concluído
+    const { rows: completedRows } = await client.query<{ id: string }>(
+      `SELECT id FROM followup_enrollment_events
+       WHERE enrollment_id = $1 AND idempotency_key = $2
+       LIMIT 1`,
+      [enrollment.id, completedKey],
+    );
+
+    if (completedRows.length > 0) {
+      await client.query('ROLLBACK');
+      return {
+        status: 'completed',
+        is_retry: true,
+        enrollment_id: enrollment.id,
+        node_id: input.expectedNodeId,
+        inbound_message_id: input.inboundMessageId,
+      };
+    }
+
+    // 3. CASO C: Verificar se já existe CLAIM em voo / pós-crash (Recoverability)
+    const { rows: claimRows } = await client.query<{ id: string }>(
+      `SELECT id FROM followup_enrollment_events
+       WHERE enrollment_id = $1 AND idempotency_key = $2
+       LIMIT 1`,
+      [enrollment.id, claimKey],
+    );
+
+    if (claimRows.length > 0) {
+      // O worker anterior adquiriu claim mas caiu antes de completar.
+      // RETOMAR A EXECUÇÃO sem incrementar turn_count novamente!
+      await client.query('COMMIT');
+      return {
+        status: 'resumed',
+        is_retry: true,
+        enrollment_id: enrollment.id,
+        node_id: input.expectedNodeId,
+        agent_id: session.agent_id ?? null,
+        agent_version_id: session.agent_version_id ?? null,
+        inbound_message_id: input.inboundMessageId,
+        turn_count: session.turn_count ?? 1,
+        session,
+      };
+    }
+
+    // 4. CASO A: Mensagem inédita → Adquirir claim
     const inboundEventInsert = await client.query<{ id: string }>(
       `INSERT INTO followup_enrollment_events (
          organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
@@ -160,27 +272,39 @@ export async function acquireAiNodeInboundTurn(
           inbound_message_id: input.inboundMessageId,
           received_at: nowIso,
         }),
-        idempotencyKey,
+        claimKey,
         nowIso,
       ],
     );
 
-    // Se já existia (retries / mensagens duplicadas recebidas concorrentemente):
+    // Corrida simultânea onde outra thread inseriu exatamente agora
     if (inboundEventInsert.rows.length === 0) {
-      await client.query('ROLLBACK');
+      await client.query('COMMIT');
       return {
-        status: 'already_processed',
+        status: 'resumed',
+        is_retry: true,
         enrollment_id: enrollment.id,
         node_id: input.expectedNodeId,
+        agent_id: session.agent_id ?? null,
+        agent_version_id: session.agent_version_id ?? null,
         inbound_message_id: input.inboundMessageId,
+        turn_count: session.turn_count ?? 1,
+        session,
       };
     }
 
-    // 3. Mutação atômica do session (turn_count, last_inbound_at, media_summary)
+    // 5. Mutação atômica do session (turn_count, last_inbound_at monotônico, media_summary)
     const turnCount = (session.turn_count ?? 0) + 1;
-    const lastInboundAt = input.messageSentAt
-      ? new Date(input.messageSentAt).toISOString()
-      : nowIso;
+
+    // MONOTONICIDADE de last_inbound_at: GREATEST(last_inbound_at, incoming_sent_at)
+    const incomingTimeMs = input.messageSentAt
+      ? new Date(input.messageSentAt).getTime()
+      : now.getTime();
+    const existingTimeMs = session.last_inbound_at
+      ? new Date(session.last_inbound_at).getTime()
+      : 0;
+    const monotonicTimeMs = Math.max(isNaN(existingTimeMs) ? 0 : existingTimeMs, isNaN(incomingTimeMs) ? now.getTime() : incomingTimeMs);
+    const lastInboundAt = new Date(monotonicTimeMs).toISOString();
 
     let mediaSummary = session.media_summary;
     const conversationId = input.conversationId ?? enrollment.conversation_id;
@@ -217,7 +341,7 @@ export async function acquireAiNodeInboundTurn(
       [JSON.stringify(updatedSession), nowIso, input.organizationId, enrollment.id],
     );
 
-    // 4. Emite evento permitido: ai_node.turn_started
+    // 6. Emite evento permitido: ai_node.turn_started
     const turnStartedKey = `ai_node_turn_started:${input.organizationId}:${enrollment.id}:${input.expectedNodeId}:${input.inboundMessageId}`;
     await client.query(
       `INSERT INTO followup_enrollment_events (
@@ -243,6 +367,7 @@ export async function acquireAiNodeInboundTurn(
 
     return {
       status: 'acquired',
+      is_retry: false,
       enrollment_id: enrollment.id,
       node_id: input.expectedNodeId,
       agent_id: session.agent_id ?? null,
@@ -261,4 +386,96 @@ export async function acquireAiNodeInboundTurn(
   } finally {
     release();
   }
+}
+
+/**
+ * Conclui formalmente o turno do Node IA.
+ * Deve ser chamado ao final do turno (após resposta/outbound ou handoff).
+ * Uma vez concluído, retries subsequentes recebem 'completed' (no-op seguro).
+ */
+export async function completeAiNodeInboundTurn(
+  db: DbPoolLike,
+  input: {
+    organizationId: string;
+    enrollmentId: string;
+    nodeId: string;
+    inboundMessageId: string;
+    outboundMessageId?: string | null;
+  },
+  deps: { clock?: () => Date } = {},
+): Promise<{ status: 'completed'; event_id?: string }> {
+  const clock = deps.clock ?? (() => new Date());
+  const nowIso = clock().toISOString();
+  const completedKey = buildAiNodeTurnCompletedKey(input);
+
+  const { rows } = await db.query<{ id: string }>(
+    `INSERT INTO followup_enrollment_events (
+       organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (enrollment_id, idempotency_key) DO UPDATE
+       SET payload = followup_enrollment_events.payload
+     RETURNING id`,
+    [
+      input.organizationId,
+      input.enrollmentId,
+      input.nodeId,
+      'ai_node.turn_completed',
+      JSON.stringify({
+        inbound_message_id: input.inboundMessageId,
+        outbound_message_id: input.outboundMessageId ?? null,
+        completed_at: nowIso,
+      }),
+      completedKey,
+      nowIso,
+    ],
+  );
+
+  return { status: 'completed', event_id: rows[0]?.id };
+}
+
+/**
+ * Registra resposta de LLM gerada para evitar custo duplicado de modelo
+ * em caso de crash pós-LLM e pré-outbound. (Preparado para Fase 3).
+ */
+export async function recordAiNodeReplyGenerated(
+  db: DbPoolLike,
+  input: {
+    organizationId: string;
+    enrollmentId: string;
+    nodeId: string;
+    inboundMessageId: string;
+    replyText: string;
+    tokensIn?: number;
+    tokensOut?: number;
+  },
+  deps: { clock?: () => Date } = {},
+): Promise<{ recorded: boolean }> {
+  const clock = deps.clock ?? (() => new Date());
+  const nowIso = clock().toISOString();
+  const replyKey = buildAiNodeReplyKey(input);
+
+  const { rows } = await db.query<{ id: string }>(
+    `INSERT INTO followup_enrollment_events (
+       organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (enrollment_id, idempotency_key) DO NOTHING
+     RETURNING id`,
+    [
+      input.organizationId,
+      input.enrollmentId,
+      input.nodeId,
+      'ai_node.reply_generated',
+      JSON.stringify({
+        inbound_message_id: input.inboundMessageId,
+        reply_text: input.replyText,
+        tokens_in: input.tokensIn ?? 0,
+        tokens_out: input.tokensOut ?? 0,
+        generated_at: nowIso,
+      }),
+      replyKey,
+      nowIso,
+    ],
+  );
+
+  return { recorded: rows.length > 0 };
 }
