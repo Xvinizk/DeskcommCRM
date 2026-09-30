@@ -33,6 +33,7 @@ import type { CrmEdgeConfig } from '@/lib/agent-engine/edge/crm/mcp-client';
 import type { LlmEdgeConfig } from '@/lib/agent-engine/edge/llm/credentials';
 import type { ProviderRegistry } from '@/lib/agent-engine/edge/llm/providers';
 import type { Logger } from '@/lib/agent-engine/obs/logger';
+import { logger } from '@/lib/logger';
 import { pickToolsFromMcp } from '@/lib/ai/runtime/tools';
 import type { McpAuthResult } from '@/lib/mcp/auth';
 import type { Actor } from '@/lib/api/handlers/types';
@@ -802,23 +803,76 @@ export async function executeAiNodeTurn(
   }
 
   // 10.1. Parser e validação do Structured Output
-  let structuredOutput: AiNodeStructuredOutput;
+  let structuredOutput: AiNodeStructuredOutput | null = null;
   const parsedStructured = parseAiNodeStructuredOutput(generatedText);
+
   if (parsedStructured.ok) {
     structuredOutput = parsedStructured.data;
   } else {
-    if (deps.structuredOutputRequired) {
-      return {
-        status: 'error',
-        reason: `structured_output_validation_failed: ${parsedStructured.error}`,
+    logger.warn('[ai-node-executor] Resposta da LLM fora do formato estruturado; tentando correção canônica', {
+      enrollment_id: input.enrollmentId,
+      node_id: input.nodeId,
+      error: parsedStructured.error,
+    });
+
+    try {
+      const correctionMessages = [
+        ...messages,
+        { role: 'assistant' as const, content: generatedText },
+        {
+          role: 'user' as const,
+          content: `Sua resposta anterior foi inválida (${parsedStructured.error}). Responda ESTRITAMENTE em formato JSON válido conforme o schema:\n{\n  "reply": "mensagem para o WhatsApp",\n  "node_status": "continue" | "completed" | "handoff",\n  "outcome": null,\n  "extracted_data": {}\n}`,
+        },
+      ];
+
+      const correctionCallInput: RunModelCallInput = {
+        tenantId: input.organizationId,
+        leadId: contactId,
+        jobId: null,
+        agentId: agentConfig?.agentId ?? null,
+        purpose: 'ai_node',
+        system: composedSystemPrompt,
+        messages: correctionMessages,
+        tools: {},
+        abortSignal: abortController.signal,
+        ...(agentConfig
+          ? {
+              model: agentConfig.model,
+              llmOverride: {
+                provider: agentConfig.provider,
+                credentialId: agentConfig.credentialId,
+              },
+            }
+          : {}),
       };
+
+      const retryResult = await runModelCallSeam(
+        db as unknown as pg.Pool,
+        deps.llmCfg ?? ({} as LlmEdgeConfig),
+        correctionCallInput,
+        {
+          registry: deps.registry,
+          log: deps.log,
+        },
+      );
+
+      const retryParsed = parseAiNodeStructuredOutput(retryResult.result.text);
+      if (retryParsed.ok) {
+        structuredOutput = retryParsed.data;
+        generatedText = retryResult.result.text;
+      }
+    } catch {
+      // Ignora erro no retry de correção; structuredOutput permanecerá null
     }
-    // Fallback de compatibilidade retroativa para chamadores da Fase 3
-    structuredOutput = {
-      reply: generatedText,
-      node_status: 'continue',
-      outcome: null,
-      extracted_data: {},
+  }
+
+  if (!structuredOutput) {
+    // Após tentativas, a resposta continua inválida!
+    // Regra estrita: NÃO enviar texto livre ao cliente, NÃO transformar em continue, runtime error.
+    const errReason = !parsedStructured.ok ? parsedStructured.error : 'invalid_structured_output';
+    return {
+      status: 'error',
+      reason: `invalid_structured_output: ${errReason}`,
     };
   }
 

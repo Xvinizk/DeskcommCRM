@@ -8,6 +8,8 @@ import type { PublishedAgentConfig } from '@/lib/agent-engine/agent/agent-config
 import type { AiNodeConfig } from '@/lib/followup/graph-schema';
 import type { AiNodeSession } from '@/lib/followup/ai-node-session';
 import { LlmModeloIncompativelComProvedorError } from '@/lib/agent-engine/edge/llm/run-model-call';
+import type { DbPoolLike } from '@/lib/followup/ai-node-idempotency';
+import type { CrmEdgeConfig } from '@/lib/agent-engine/edge/crm/mcp-client';
 
 describe('Node IA - Fase 3: Execução, Agentes Existentes, Fencing e Condições Determinísticas', () => {
   const orgId = '11111111-1111-4111-8111-111111111111';
@@ -18,13 +20,22 @@ describe('Node IA - Fase 3: Execução, Agentes Existentes, Fencing e Condiçõe
   const versionPublishedId = '55555555-5555-4555-8555-555555555555';
   const versionPinnedId = '66666666-6666-4666-8666-666666666666';
 
-  let mockDb: any;
+  let mockDb: DbPoolLike;
 
   beforeEach(() => {
     mockDb = {
       query: vi.fn().mockResolvedValue({ rows: [] }),
     };
   });
+
+  function mockStructuredText(reply: string, node_status: 'continue' | 'completed' | 'handoff' = 'continue'): string {
+    return JSON.stringify({
+      reply,
+      node_status,
+      outcome: null,
+      extracted_data: {},
+    });
+  }
 
   function buildMockSession(overrides: Partial<AiNodeSession> = {}): AiNodeSession {
     return {
@@ -90,7 +101,7 @@ describe('Node IA - Fase 3: Execução, Agentes Existentes, Fencing e Condiçõe
     const loadPublishedFn = vi.fn().mockResolvedValue(baseAgentConfig);
     const loadPinnedFn = vi.fn();
     const runModelCallFn = vi.fn().mockResolvedValue({
-      result: { text: 'Olá! Sou o Vinícius. Como posso te ajudar hoje?' },
+      result: { text: mockStructuredText('Olá! Sou o Vinícius. Como posso te ajudar hoje?') },
       provider: 'anthropic',
       model: 'claude-3-5-sonnet-20241022',
       usage: { inputTokens: 100, outputTokens: 30 },
@@ -155,7 +166,7 @@ describe('Node IA - Fase 3: Execução, Agentes Existentes, Fencing e Condiçõe
     const loadPublishedFn = vi.fn();
     const loadPinnedFn = vi.fn().mockResolvedValue(pinnedAgentConfig);
     const runModelCallFn = vi.fn().mockResolvedValue({
-      result: { text: 'Resposta da versão pinned congelada.' },
+      result: { text: mockStructuredText('Resposta da versão pinned congelada.') },
       provider: 'anthropic',
       model: 'claude-3-5-sonnet-20241022',
       usage: { inputTokens: 80, outputTokens: 25 },
@@ -201,7 +212,7 @@ describe('Node IA - Fase 3: Execução, Agentes Existentes, Fencing e Condiçõe
     const loadPublishedFn = vi.fn();
     const loadPinnedFn = vi.fn();
     const runModelCallFn = vi.fn().mockResolvedValue({
-      result: { text: 'Por favor, me informe seu CEP para calcularmos a entrega.' },
+      result: { text: mockStructuredText('Por favor, me informe seu CEP para calcularmos a entrega.') },
       provider: 'openai',
       model: 'gpt-4o-mini',
       usage: { inputTokens: 50, outputTokens: 20 },
@@ -258,7 +269,7 @@ describe('Node IA - Fase 3: Execução, Agentes Existentes, Fencing e Condiçõe
 
     const loadPublishedFn = vi.fn().mockResolvedValue(baseAgentConfig);
     const runModelCallFn = vi.fn().mockResolvedValue({
-      result: { text: 'Perfeito! Vamos finalizar com o plano anual?' },
+      result: { text: mockStructuredText('Perfeito! Vamos finalizar com o plano anual?') },
       provider: 'anthropic',
       model: 'claude-3-5-sonnet-20241022',
       usage: { inputTokens: 120, outputTokens: 25 },
@@ -622,7 +633,7 @@ describe('Node IA - Fase 3: Execução, Agentes Existentes, Fencing e Condiçõe
       // Avança 45 segundos (2 ciclos de heartbeat de 20s)
       await vi.advanceTimersByTimeAsync(45_000);
       return {
-        result: { text: 'Concluído após 45 segundos.' },
+        result: { text: mockStructuredText('Concluído após 45 segundos.') },
         provider: 'anthropic',
         model: 'claude-3-5-sonnet-20241022',
         usage: { inputTokens: 100, outputTokens: 20 },
@@ -673,7 +684,7 @@ describe('Node IA - Fase 3: Execução, Agentes Existentes, Fencing e Condiçõe
 
     const loadPublishedFn = vi.fn().mockResolvedValue(baseAgentConfig);
     const runModelCallFn = vi.fn().mockResolvedValue({
-      result: { text: 'Tentando gravar resposta vencida.' },
+      result: { text: mockStructuredText('Tentando gravar resposta vencida.') },
       provider: 'anthropic',
       model: 'claude-3-5-sonnet-20241022',
       usage: { inputTokens: 100, outputTokens: 20 },
@@ -718,7 +729,7 @@ describe('Node IA - Fase 3: Execução, Agentes Existentes, Fencing e Condiçõe
     };
 
     const runModelCallFn = vi.fn().mockResolvedValue({
-      result: { text: 'Orientações gerais fornecidas.' },
+      result: { text: mockStructuredText('Orientações gerais fornecidas.') },
       provider: 'anthropic',
       model: 'claude-3-5-haiku-20241022',
       usage: { inputTokens: 50, outputTokens: 10 },
@@ -797,7 +808,7 @@ describe('Node IA - Fase 3: Execução, Agentes Existentes, Fencing e Condiçõe
 
     const loadPublishedFn = vi.fn().mockResolvedValue(baseAgentConfig);
     const runModelCallFn = vi.fn().mockResolvedValue({
-      result: { text: 'Perfeito! Anotei seu e-mail.' },
+      result: { text: mockStructuredText('Perfeito! Anotei seu e-mail.') },
       provider: 'anthropic',
       model: 'claude-3-5-sonnet-20241022',
       usage: { inputTokens: 150, outputTokens: 20 },
@@ -832,7 +843,7 @@ describe('Node IA - Fase 3: Execução, Agentes Existentes, Fencing e Condiçõe
     };
 
     await executeAiNodeTurn(mockDb, input, {
-      crmCfg: { supabase: {} as any } as any,
+      crmCfg: { supabase: {} as unknown } as unknown as CrmEdgeConfig,
       loadPublishedAgentConfigByIdFn: loadPublishedFn,
       runModelCallFn,
       getLeadContextFn,

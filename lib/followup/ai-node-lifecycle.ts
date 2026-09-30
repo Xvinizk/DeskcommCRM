@@ -48,17 +48,38 @@ import {
   AI_NODE_ERROR_BRANCH_ID,
   type FlowGraph,
   type AiNodeConfig,
+  type FlowEdge,
 } from './graph-schema';
-import { selectEdge } from './node-handlers';
 import {
   executeAiNodeTurn,
   evaluateAiNodeDeterministicConditions,
   type ExecuteAiNodeTurnDeps,
 } from './ai-node-executor';
 import {
-  aiNodeStructuredOutputSchema,
   type AiNodeStructuredOutput,
 } from './ai-node-structured-output';
+
+/**
+ * Busca estritamente uma aresta de branch para ai_node.
+ * NUNCA faz fallback para 'always' ou aresta arbitrária.
+ * O modelo/resultado nunca deve provocar avanço por aresta não correspondente.
+ */
+export function findAiNodeStrictBranchEdge(
+  edges: FlowEdge[],
+  fromNodeId: string,
+  branchId: string,
+): FlowEdge | null {
+  const candidates = edges
+    .filter((e) => e.source === fromNodeId)
+    .slice()
+    .sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
+
+  return (
+    candidates.find(
+      (e) => e.condition.type === 'branch' && e.condition.branch_id === branchId,
+    ) ?? null
+  );
+}
 
 export interface ExecuteAiNodeLifecycleInput {
   organizationId: string;
@@ -91,7 +112,7 @@ export interface ExecuteAiNodeLifecycleResult {
   nextNodeId?: string | null;
   outboundStatus?: 'outbound_fresh' | 'outbound_already_sent' | 'blocked' | 'skipped' | 'failed';
   llmStatus?: 'generated_fresh' | 'recovered_structured_output';
-  transitionStatus?: 'transition_fresh' | 'transition_already_applied';
+  transitionStatus?: 'transition_fresh' | 'transition_already_applied' | 'skipped';
   reason?: string;
   error?: string;
   isRetry?: boolean;
@@ -276,15 +297,37 @@ export async function executeAiNodeLifecycle(
       status: 'completed',
     };
 
-    // Segue aresta completed do grafo
-    const nextEdge = selectEdge(graph.edges, input.nodeId, {
-      type: 'branch',
-      branch_id: AI_NODE_COMPLETED_BRANCH_ID,
-    }) ?? selectEdge(graph.edges, input.nodeId, { type: 'always' });
+    // Segue estritamente aresta branch_id=completed do grafo
+    const nextEdge = findAiNodeStrictBranchEdge(
+      graph.edges,
+      input.nodeId,
+      AI_NODE_COMPLETED_BRANCH_ID,
+    );
 
     const nextNodeId = nextEdge?.target ?? null;
 
-    if (nextNodeId) {
+    if (!nextNodeId) {
+      // Regra estrita: se não houver aresta branch_id=completed, NUNCA usar aresta arbitrária!
+      return await handleAiNodeError(
+        db,
+        input,
+        graph,
+        session,
+        'missing_completed_branch: deterministic_completed sem aresta branch_id=completed',
+      );
+    }
+
+    const exitedKey = `ai_node_exited:${input.organizationId}:${input.enrollmentId}:${input.nodeId}:${input.inboundMessageId}`;
+    const { rows: exitedRows } = await db.query<{ id: string }>(
+      `SELECT id FROM followup_enrollment_events WHERE enrollment_id = $1 AND idempotency_key = $2 LIMIT 1`,
+      [input.enrollmentId, exitedKey],
+    );
+
+    let transitionStatus: 'transition_fresh' | 'transition_already_applied' = 'transition_fresh';
+
+    if (exitedRows.length > 0) {
+      transitionStatus = 'transition_already_applied';
+    } else {
       await db.query(
         `UPDATE followup_enrollments
          SET current_node_id = $1, steps_taken = steps_taken + 1, ai_node_session = $2, updated_at = $3
@@ -309,17 +352,9 @@ export async function executeAiNodeLifecycle(
             reason: 'deterministic_completed',
             exited_at: nowIso,
           }),
-          `ai_node_exited:${input.organizationId}:${input.enrollmentId}:${input.nodeId}:${input.inboundMessageId}`,
+          exitedKey,
           nowIso,
         ],
-      );
-    } else {
-      // Fim do fluxo
-      await db.query(
-        `UPDATE followup_enrollments
-         SET status = 'completed', outcome = 'converted', completed_at = $1, ai_node_session = $2, updated_at = $1
-         WHERE organization_id = $3 AND id = $4`,
-        [nowIso, JSON.stringify(updatedSession), input.organizationId, input.enrollmentId],
       );
     }
 
@@ -337,7 +372,7 @@ export async function executeAiNodeLifecycle(
       status: 'deterministic_completed',
       nextNodeId,
       outboundStatus: 'skipped',
-      transitionStatus: 'transition_fresh',
+      transitionStatus,
       reason: deterministicEval.match,
     };
   }
@@ -398,25 +433,12 @@ export async function executeAiNodeLifecycle(
       return await handleAiNodeError(db, input, graph, session, execRes.reason ?? 'agent_or_provider_error');
     }
 
-    if (execRes.status === 'generated') {
-      if (execRes.structuredOutput) {
-        structuredOutput = execRes.structuredOutput;
-      } else if (execRes.reply) {
-        // Tenta validar reply via schema Zod
-        const parsed = aiNodeStructuredOutputSchema.safeParse({
-          reply: execRes.reply,
-          node_status: 'continue',
-          outcome: null,
-          extracted_data: {},
-        });
-        if (parsed.success) {
-          structuredOutput = parsed.data;
-        }
-      }
+    if (execRes.status === 'generated' && execRes.structuredOutput) {
+      structuredOutput = execRes.structuredOutput;
     }
 
     if (!structuredOutput) {
-      // Falha de parser ou schema inválido -> Runtime Error
+      // Falha de parser ou schema inválido -> Runtime Error (zero envio ao cliente, branch error)
       return await handleAiNodeError(db, input, graph, session, 'invalid_structured_output');
     }
 
@@ -602,6 +624,74 @@ export async function executeAiNodeLifecycle(
   }
 
   // =========================================================================
+  // 7.1. CHECAGEM DE HUMANO APÓS OUTBOUND E ANTES DA TRANSIÇÃO (HUMANO > IA)
+  // =========================================================================
+  if (contactId) {
+    const isHumanActivePostSend = await checkHumanTakeover(
+      db as unknown as pg.Pool,
+      input.organizationId,
+      contactId,
+    );
+
+    if (isHumanActivePostSend) {
+      logger.warn('[ai-node-lifecycle] Humano assumiu após outbound aceito e antes da transição (HUMANO > IA)', {
+        enrollment_id: input.enrollmentId,
+        node_id: input.nodeId,
+        contact_id: contactId,
+      });
+
+      await db.query(
+        `INSERT INTO followup_enrollment_events (
+           organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (enrollment_id, idempotency_key) DO NOTHING`,
+        [
+          input.organizationId,
+          input.enrollmentId,
+          input.nodeId,
+          'ai_node.human_takeover_pre_transition',
+          JSON.stringify({
+            inbound_message_id: input.inboundMessageId,
+            detected_at: nowIso,
+            reason: 'human_takeover_detected_after_outbound_before_transition',
+          }),
+          `ai_node_human_pre_trans:${input.organizationId}:${input.enrollmentId}:${input.nodeId}:${input.inboundMessageId}`,
+          nowIso,
+        ],
+      );
+
+      // Pausa o enrollment sem avançar o nó nem alterar etapas do lead
+      await db.query(
+        `UPDATE followup_enrollments
+         SET status = 'paused_handoff', updated_at = $1
+         WHERE organization_id = $2 AND id = $3`,
+        [nowIso, input.organizationId, input.enrollmentId],
+      );
+
+      // Conclui o turno liberando active_turn
+      await completeAiNodeInboundTurn(db, {
+        organizationId: input.organizationId,
+        enrollmentId: input.enrollmentId,
+        nodeId: input.nodeId,
+        inboundMessageId: input.inboundMessageId,
+        outboundMessageId: crmMessageId ?? undefined,
+        workerId: input.workerId,
+        leaseGeneration: input.leaseGeneration,
+      });
+
+      return {
+        status: 'aborted_human_takeover',
+        reply: structuredOutput.reply,
+        structuredOutput,
+        outboundStatus,
+        llmStatus,
+        transitionStatus: 'skipped',
+        reason: 'human_takeover_before_transition',
+      };
+    }
+  }
+
+  // =========================================================================
   // 8. TRANSIÇÃO DE ESTADO E NÓ NO ENROLLMENT (continue, completed, handoff)
   // =========================================================================
   const nodeStatus = structuredOutput.node_status;
@@ -702,15 +792,41 @@ export async function executeAiNodeLifecycle(
       ],
     );
 
-    // Encontra próxima aresta
-    const nextEdge = selectEdge(graph.edges, input.nodeId, {
-      type: 'branch',
-      branch_id: AI_NODE_COMPLETED_BRANCH_ID,
-    }) ?? selectEdge(graph.edges, input.nodeId, { type: 'always' });
+    // Segue estritamente aresta branch_id=completed do grafo
+    const nextEdge = findAiNodeStrictBranchEdge(
+      graph.edges,
+      input.nodeId,
+      AI_NODE_COMPLETED_BRANCH_ID,
+    );
 
     const nextNodeId = nextEdge?.target ?? null;
 
-    if (nextNodeId) {
+    if (!nextNodeId) {
+      // Regra estrita: se não houver aresta branch_id=completed, NUNCA usar aresta arbitrária!
+      return await handleAiNodeError(
+        db,
+        input,
+        graph,
+        session,
+        'missing_completed_branch: node_status=completed mas nenhuma aresta branch_id=completed foi configurada',
+      );
+    }
+
+    const exitedKey = `ai_node_exited:${input.organizationId}:${input.enrollmentId}:${input.nodeId}:${input.inboundMessageId}`;
+    const { rows: exitedRows } = await db.query<{ id: string }>(
+      `SELECT id FROM followup_enrollment_events WHERE enrollment_id = $1 AND idempotency_key = $2 LIMIT 1`,
+      [input.enrollmentId, exitedKey],
+    );
+
+    let transitionStatus: 'transition_fresh' | 'transition_already_applied' = 'transition_fresh';
+
+    if (exitedRows.length > 0) {
+      transitionStatus = 'transition_already_applied';
+      logger.info('[ai-node-lifecycle] Transição já havia sido aplicada anteriormente (zero re-transição)', {
+        enrollment_id: input.enrollmentId,
+        node_id: input.nodeId,
+      });
+    } else {
       await db.query(
         `UPDATE followup_enrollments
          SET current_node_id = $1, steps_taken = steps_taken + 1, ai_node_session = $2, updated_at = $3
@@ -735,22 +851,8 @@ export async function executeAiNodeLifecycle(
             outcome: structuredOutput.outcome,
             exited_at: nowIso,
           }),
-          `ai_node_exited:${input.organizationId}:${input.enrollmentId}:${input.nodeId}:${input.inboundMessageId}`,
+          exitedKey,
           nowIso,
-        ],
-      );
-    } else {
-      // Fim do fluxo
-      await db.query(
-        `UPDATE followup_enrollments
-         SET status = 'completed', outcome = $1, completed_at = $2, ai_node_session = $3, updated_at = $2
-         WHERE organization_id = $4 AND id = $5`,
-        [
-          structuredOutput.outcome ?? 'converted',
-          nowIso,
-          JSON.stringify(updatedSession),
-          input.organizationId,
-          input.enrollmentId,
         ],
       );
     }
@@ -773,7 +875,7 @@ export async function executeAiNodeLifecycle(
       nextNodeId,
       outboundStatus,
       llmStatus,
-      transitionStatus: 'transition_fresh',
+      transitionStatus,
     };
   }
 
@@ -829,10 +931,11 @@ export async function executeAiNodeLifecycle(
     }
 
     // Procura aresta de handoff
-    const handoffEdge = selectEdge(graph.edges, input.nodeId, {
-      type: 'branch',
-      branch_id: AI_NODE_HANDOFF_BRANCH_ID,
-    });
+    const handoffEdge = findAiNodeStrictBranchEdge(
+      graph.edges,
+      input.nodeId,
+      AI_NODE_HANDOFF_BRANCH_ID,
+    );
 
     const nextNodeId = handoffEdge?.target ?? null;
 
@@ -932,10 +1035,11 @@ async function handleAiNodeError(
     ],
   );
 
-  const errorEdge = selectEdge(graph.edges, input.nodeId, {
-    type: 'branch',
-    branch_id: AI_NODE_ERROR_BRANCH_ID,
-  });
+  const errorEdge = findAiNodeStrictBranchEdge(
+    graph.edges,
+    input.nodeId,
+    AI_NODE_ERROR_BRANCH_ID,
+  );
 
   const nextNodeId = errorEdge?.target ?? null;
 

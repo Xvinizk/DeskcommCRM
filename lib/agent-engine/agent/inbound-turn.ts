@@ -4396,6 +4396,22 @@ export function createInboundTurnHandler(deps: InboundTurnDeps) {
         acquire_status: acquireResult.status,
       });
 
+      if (acquireResult.status === 'in_progress') {
+        deps.log.info('inbound do Node IA adiado — turno anterior em andamento (rajada concorrente)', {
+          job_id: job.id,
+          enrollment_id: authorityResult.enrollment_id,
+          node_id: authorityResult.node_id,
+          active_inbound_message_id: acquireResult.active_inbound_message_id,
+        });
+
+        await rescheduleJob(pool, job.id, ctx.workerId, {
+          acquiredAt: claimOfJob(job)?.acquired_at,
+          delayMs: 2_000,
+          reason: `Node IA ocupado com turno ativo (${acquireResult.active_inbound_message_id}) — reagendando mensagem ${payload.inbound_message_id}`,
+        });
+        throw new JobSettledError('inbound do Node IA reagendado — turno anterior em andamento');
+      }
+
       if (acquireResult.status === 'acquired' || acquireResult.status === 'resumed') {
         const inboundText = await loadInboundBodyForJob(pool, {
           tenantId: job.organization_id,
