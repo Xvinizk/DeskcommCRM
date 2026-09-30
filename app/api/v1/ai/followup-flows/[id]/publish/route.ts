@@ -19,6 +19,8 @@ import { audit } from "@/lib/audit";
 import { requireRole } from "@/lib/auth/require-role";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { carregaEtapasCitadas } from "@/lib/followup/etapas-citadas";
+import { carregaAgentesCitados } from "@/lib/followup/agentes-citados";
+import { env } from "@/lib/env";
 import { validateFlowForPublish } from "@/lib/followup/validate-publish";
 import { publishFollowupFlowVersion } from "@/lib/followup/publish";
 import type { FlowGraph } from "@/lib/followup/graph-schema";
@@ -186,7 +188,15 @@ export async function POST(_req: NextRequest, ctx: RouteCtx): Promise<Response> 
   // está ativa — sem esta leitura, uma regra que nunca decide publicaria calada.
   const citadas = await carregaEtapasCitadas(admin, activeOrg.orgId, graph.nodes);
   if (!citadas.ok) return fail("internal_error", citadas.mensagem, 500, { requestId });
-  const validation = validateFlowForPublish(graph, { etapas: citadas.etapas });
+
+  const agentesCitados = await carregaAgentesCitados(admin, activeOrg.orgId, graph.nodes);
+  if (!agentesCitados.ok) return fail("internal_error", agentesCitados.mensagem, 500, { requestId });
+
+  const validation = validateFlowForPublish(graph, {
+    etapas: citadas.etapas,
+    aiNodeEnabled: env.FOLLOWUP_AI_NODE_ENABLED,
+    agentes: agentesCitados.agentes,
+  });
   if (!validation.ok) {
     return fail("validation_failed", t("Fluxo reprovado na validação de publish."), 422, {
       requestId,

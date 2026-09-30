@@ -2,6 +2,7 @@ import type { FlowGraph, FlowEdge, FlowNode } from './graph-schema';
 import { branchIdForCondition, nodeBranches } from './graph-schema';
 import { rotuloDoRamo } from './rotulo-do-ramo';
 import type { NomesDeValor } from './vocabulario';
+import type { AgenteCitado } from './agentes-citados';
 
 /**
  * Structural publish validator for follow-up flow graphs.
@@ -29,6 +30,12 @@ export const PUBLISH_ERROR_CODES = [
   'cycle_without_wait',
   'max_steps_exceeded',
   'stage_move_missing_stage',
+  // AI Node Publish Errors:
+  'feature_disabled',
+  'ai_node_agent_not_found',
+  'ai_node_agent_archived',
+  'ai_node_agent_unpublished',
+  'ai_node_pinned_version_invalid',
 ] as const;
 export type PublishErrorCode = (typeof PUBLISH_ERROR_CODES)[number];
 
@@ -51,6 +58,13 @@ export type PublishValidationResult =
 export interface ContextoDoPublish {
   /** Etapas da organização por `stage_id`, com o nome como a tela mostra («Etapa · Funil»). */
   etapas?: ReadonlyMap<string, { nome: string; arquivada: boolean }>;
+  /**
+   * Estado da feature flag FOLLOWUP_AI_NODE_ENABLED.
+   * Se false (ou omitido), qualquer fluxo contendo nó do tipo ai_node é rejeitado com feature_disabled.
+   */
+  aiNodeEnabled?: boolean;
+  /** Agentes da organização citados nos nós ai_node */
+  agentes?: ReadonlyMap<string, AgenteCitado>;
 }
 
 const LONG_WAIT_THRESHOLD_MS = 86_400_000; // 24h
@@ -542,6 +556,71 @@ export function validateFlowForPublish(
           code: 'stage_move_missing_stage',
           message: `Nó "${node.label || node.id}" precisa de uma etapa válida configurada antes de publicar.`,
         });
+      }
+    }
+  }
+
+  for (const node of [...nodes].sort(byId)) {
+    if (node.type !== 'ai_node') continue;
+
+    if (contexto.aiNodeEnabled !== true) {
+      errors.push({
+        node_id: node.id,
+        code: 'feature_disabled',
+        message: `Nó IA "${node.label || node.id}" não pode ser publicado porque a feature está desativada.`,
+      });
+      continue;
+    }
+
+    const cfg = node.config;
+    if (cfg.mode === 'existing_agent' || cfg.mode === 'existing_with_supplementary') {
+      const binding = cfg.agent_binding;
+      if (!binding?.agent_id) {
+        errors.push({
+          node_id: node.id,
+          code: 'ai_node_agent_not_found',
+          message: `Nó "${node.label || node.id}" requer um agente selecionado.`,
+        });
+        continue;
+      }
+
+      const agente = contexto.agentes?.get(binding.agent_id);
+      if (!agente) {
+        errors.push({
+          node_id: node.id,
+          code: 'ai_node_agent_not_found',
+          message: `Agente vinculado ao nó "${node.label || node.id}" não foi encontrado.`,
+        });
+        continue;
+      }
+
+      if (agente.archived_at !== null) {
+        errors.push({
+          node_id: node.id,
+          code: 'ai_node_agent_archived',
+          message: `Agente "${agente.name}" está arquivado e não pode ser usado no fluxo.`,
+        });
+        continue;
+      }
+
+      if (!agente.published_version_id) {
+        errors.push({
+          node_id: node.id,
+          code: 'ai_node_agent_unpublished',
+          message: `Agente "${agente.name}" não possui versão publicada.`,
+        });
+        continue;
+      }
+
+      if (binding.version_strategy === 'pinned') {
+        if (!binding.pinned_version_id || !agente.version_ids.includes(binding.pinned_version_id)) {
+          errors.push({
+            node_id: node.id,
+            code: 'ai_node_pinned_version_invalid',
+            message: `Versão fixada do agente "${agente.name}" é inválida ou não pertence ao agente.`,
+          });
+          continue;
+        }
       }
     }
   }

@@ -36363,6 +36363,13 @@ update public.ai_routers
  where config->>'classifier_model' = 'claude-haiku-4-5'
    and (config->>'classifier_provider' is null or config->>'classifier_provider' = '');
 
+-- 0385: Suporte a estado de sessão do Node IA no enrollment
+alter table public.followup_enrollments
+  add column if not exists ai_node_session jsonb;
+
+comment on column public.followup_enrollments.ai_node_session is
+  'Estado transiente de execução do nó IA (turn_count, last_inbound_at, agent_id, etc.). Fonte da verdade canônica do nó no enrollment.';
+
 -- ---- módulo suspenso vira ERRO que o kit reporta (migration 0340) ----
 --
 -- Um comando SEPARADO da reaplicação, de propósito: se ela relançasse, a marca

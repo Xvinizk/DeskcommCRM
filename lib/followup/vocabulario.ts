@@ -42,6 +42,11 @@ import type { z } from "zod";
 import type { TriggerConfig } from "./api-schemas";
 import { conditionLabel } from "./edge-condition-options";
 import {
+  AI_NODE_COMPLETED_BRANCH_ID,
+  AI_NODE_ERROR_BRANCH_ID,
+  AI_NODE_HANDOFF_BRANCH_ID,
+  AI_NODE_MAX_TURNS_BRANCH_ID,
+  AI_NODE_TIMEOUT_BRANCH_ID,
   CONDITION_FALSE_BRANCH_ID,
   CONDITION_TRUE_BRANCH_ID,
   FALLBACK_BRANCH_ID,
@@ -391,6 +396,11 @@ export const RAMOS_RESERVADOS_EM_FRASE: Record<RamoReservado, string> = {
   [CONDITION_FALSE_BRANCH_ID]: "quando a condição é falsa",
   [REPEAT_BODY_BRANCH_ID]: "quando ainda falta uma volta",
   [REPEAT_DONE_BRANCH_ID]: "quando as voltas acabaram",
+  [AI_NODE_COMPLETED_BRANCH_ID]: "quando a IA conclui o atendimento",
+  [AI_NODE_TIMEOUT_BRANCH_ID]: "quando o tempo limite da IA esgota",
+  [AI_NODE_MAX_TURNS_BRANCH_ID]: "quando o limite de turnos da IA é atingido",
+  [AI_NODE_HANDOFF_BRANCH_ID]: "quando a IA transfere para atendimento humano",
+  [AI_NODE_ERROR_BRANCH_ID]: "quando ocorre um erro na IA",
 };
 
 /**
@@ -449,6 +459,11 @@ export const RAMOS_RESERVADOS: Record<RamoReservado, string> = {
   [CONDITION_FALSE_BRANCH_ID]: conditionLabel({ type: "cond_result", value: false }),
   [REPEAT_BODY_BRANCH_ID]: "Próxima volta",
   [REPEAT_DONE_BRANCH_ID]: "Acabou",
+  [AI_NODE_COMPLETED_BRANCH_ID]: "Concluído",
+  [AI_NODE_TIMEOUT_BRANCH_ID]: "Tempo esgotado",
+  [AI_NODE_MAX_TURNS_BRANCH_ID]: "Limite de turnos",
+  [AI_NODE_HANDOFF_BRANCH_ID]: "Transbordo humano",
+  [AI_NODE_ERROR_BRANCH_ID]: "Erro / Fallback",
 };
 
 // ─── classificação pela IA ───────────────────────────────────────────────

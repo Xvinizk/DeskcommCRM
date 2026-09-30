@@ -50,6 +50,7 @@ const TYPE_ORDER: Record<NodeType, number> = {
   message_audio: 7,
   tag: 8,
   stage_move: 8,
+  ai_node: 5,
   end: 9,
 };
 

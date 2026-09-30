@@ -23,6 +23,8 @@ export const NODE_TYPES = [
   'delay',
   'tag',
   'stage_move',
+  // Flow Builder v2 (Node IA Fase 1):
+  'ai_node',
 ] as const;
 export type NodeType = (typeof NODE_TYPES)[number];
 
@@ -80,6 +82,21 @@ export const REPEAT_BODY_BRANCH_ID = 'body';
 /** Saída do `repeat` quando o contador chegou a zero. */
 export const REPEAT_DONE_BRANCH_ID = 'done';
 
+/** Saídas canônicas reservadas do `ai_node` */
+export const AI_NODE_COMPLETED_BRANCH_ID = 'completed';
+export const AI_NODE_TIMEOUT_BRANCH_ID = 'timeout';
+export const AI_NODE_MAX_TURNS_BRANCH_ID = 'max_turns';
+export const AI_NODE_HANDOFF_BRANCH_ID = 'handoff';
+export const AI_NODE_ERROR_BRANCH_ID = 'error';
+
+export const AI_NODE_BRANCH_IDS = [
+  AI_NODE_COMPLETED_BRANCH_ID,
+  AI_NODE_TIMEOUT_BRANCH_ID,
+  AI_NODE_MAX_TURNS_BRANCH_ID,
+  AI_NODE_HANDOFF_BRANCH_ID,
+  AI_NODE_ERROR_BRANCH_ID,
+] as const;
+
 /** Branch ids the contract owns — a user-declared branch may not claim one. */
 export const RESERVED_BRANCH_IDS = [
   FALLBACK_BRANCH_ID,
@@ -88,7 +105,12 @@ export const RESERVED_BRANCH_IDS = [
   CONDITION_FALSE_BRANCH_ID,
   REPEAT_BODY_BRANCH_ID,
   REPEAT_DONE_BRANCH_ID,
+  ...AI_NODE_BRANCH_IDS,
 ] as const;
+
+export function isReservedBranchId(id: string): boolean {
+  return (RESERVED_BRANCH_IDS as readonly string[]).includes(id);
+}
 
 /** Id of a branch the user declared (a check, an AI class) — opaque, stable across renames. */
 export const declaredBranchIdSchema = z
@@ -401,6 +423,99 @@ export const stageMoveConfigSchema = z.strictObject({
   needs_review: z.boolean().optional(),
 });
 
+/**
+ * Configuração do Nó IA (Flow Builder v2 — Node IA Fase 1).
+ * Suporta três modos:
+ * - existing_agent: referencia um agente existente na organização
+ * - custom_prompt: instrução autônoma específica do nó
+ * - existing_with_supplementary: agente existente com diretriz de etapa complementar
+ */
+export const aiNodeModeSchema = z.enum([
+  'existing_agent',
+  'custom_prompt',
+  'existing_with_supplementary',
+]);
+export type AiNodeMode = z.infer<typeof aiNodeModeSchema>;
+
+export const aiNodeVersionStrategySchema = z.enum(['published', 'pinned']).default('published');
+export type AiNodeVersionStrategy = z.infer<typeof aiNodeVersionStrategySchema>;
+
+export const aiNodeAgentBindingSchema = z.strictObject({
+  agent_id: z.string().uuid().nullable().optional(),
+  version_strategy: aiNodeVersionStrategySchema,
+  pinned_version_id: z.string().uuid().nullable().optional(),
+});
+export type AiNodeAgentBinding = z.infer<typeof aiNodeAgentBindingSchema>;
+
+export const aiNodeTimeoutSchema = z.strictObject({
+  duration_value: z.number().int().min(1).max(9999).default(24),
+  unit: z.enum(['minutes', 'hours', 'days']).default('hours'),
+});
+export type AiNodeTimeout = z.infer<typeof aiNodeTimeoutSchema>;
+
+export const aiNodeDeterministicConditionsSchema = z.union([
+  z.strictObject({
+    min_images: z.number().int().min(1).max(50).optional(),
+    require_audio: z.boolean().optional(),
+    require_document: z.boolean().optional(),
+    tag_exists: z.string().min(1).max(50).optional(),
+    stage_id: z.string().uuid().optional(),
+  }),
+  z.array(z.record(z.string(), z.unknown())),
+  z.record(z.string(), z.unknown()),
+]).optional();
+export type AiNodeDeterministicConditions = z.infer<typeof aiNodeDeterministicConditionsSchema>;
+
+export const aiNodeConfigSchema = z
+  .strictObject({
+    mode: aiNodeModeSchema,
+    agent_binding: aiNodeAgentBindingSchema.optional(),
+    objective: z.string().max(1000).optional(),
+    supplementary_instruction: z.string().max(2000).optional(),
+    custom_prompt: z.string().max(4000).optional(),
+    completion_condition: z.string().max(1000).optional(),
+    max_turns: z.number().int().min(1).max(100).default(10).optional(),
+    timeout: aiNodeTimeoutSchema.optional(),
+    timeout_ms: z
+      .number()
+      .int()
+      .min(60_000)
+      .max(30 * 86_400_000)
+      .default(86_400_000)
+      .optional(), // 1 min a 30 dias, default 24h
+    deterministic_conditions: aiNodeDeterministicConditionsSchema,
+  })
+  .superRefine((config, ctx) => {
+    if (config.mode === 'existing_agent' || config.mode === 'existing_with_supplementary') {
+      if (!config.agent_binding?.agent_id) {
+        ctx.addIssue({
+          code: 'custom',
+          message: 'agent_binding.agent_id é obrigatório para modos com agente existente',
+          path: ['agent_binding', 'agent_id'],
+        });
+      }
+      if (config.agent_binding?.version_strategy === 'pinned' && !config.agent_binding.pinned_version_id) {
+        ctx.addIssue({
+          code: 'custom',
+          message: 'pinned_version_id é obrigatório quando version_strategy é pinned',
+          path: ['agent_binding', 'pinned_version_id'],
+        });
+      }
+    }
+    if (config.mode === 'custom_prompt') {
+      const hasObjective = config.objective && config.objective.trim().length > 0;
+      const hasCustomPrompt = config.custom_prompt && config.custom_prompt.trim().length > 0;
+      if (!hasObjective && !hasCustomPrompt) {
+        ctx.addIssue({
+          code: 'custom',
+          message: 'objective ou custom_prompt é obrigatório quando o modo é custom_prompt',
+          path: ['objective'],
+        });
+      }
+    }
+  });
+export type AiNodeConfig = z.infer<typeof aiNodeConfigSchema>;
+
 export const triggerNodeConfigSchema = z.union([
   z.strictObject({}),
   z.strictObject({
@@ -558,6 +673,13 @@ export const flowNodeSchema = z.discriminatedUnion('type', [
     label: z.string().min(1).max(60),
     position: z.strictObject({ x: z.number(), y: z.number() }),
     config: stageMoveConfigSchema,
+  }),
+  z.strictObject({
+    id: z.string().min(1),
+    type: z.literal('ai_node'),
+    label: z.string().min(1).max(60),
+    position: z.strictObject({ x: z.number(), y: z.number() }),
+    config: aiNodeConfigSchema,
   }),
 ]);
 
@@ -856,6 +978,45 @@ export function nodeBranches(node: BranchableNode): FlowBranch[] {
         fallbackBranch(FALLBACK_OTHERS_LABEL),
       ];
 
+    case 'ai_node':
+      return [
+        {
+          id: AI_NODE_COMPLETED_BRANCH_ID,
+          label: 'Concluído',
+          check: null,
+          kind: 'match',
+          condition: { type: 'branch', branch_id: AI_NODE_COMPLETED_BRANCH_ID },
+        },
+        {
+          id: AI_NODE_TIMEOUT_BRANCH_ID,
+          label: 'Tempo esgotado',
+          check: null,
+          kind: 'match',
+          condition: { type: 'branch', branch_id: AI_NODE_TIMEOUT_BRANCH_ID },
+        },
+        {
+          id: AI_NODE_MAX_TURNS_BRANCH_ID,
+          label: 'Limite de turnos',
+          check: null,
+          kind: 'match',
+          condition: { type: 'branch', branch_id: AI_NODE_MAX_TURNS_BRANCH_ID },
+        },
+        {
+          id: AI_NODE_HANDOFF_BRANCH_ID,
+          label: 'Transbordo humano',
+          check: null,
+          kind: 'match',
+          condition: { type: 'branch', branch_id: AI_NODE_HANDOFF_BRANCH_ID },
+        },
+        {
+          id: AI_NODE_ERROR_BRANCH_ID,
+          label: 'Erro / Fallback',
+          check: null,
+          kind: 'fallback',
+          condition: { type: 'branch', branch_id: AI_NODE_ERROR_BRANCH_ID },
+        },
+      ];
+
     default:
       return [fallbackBranch(FALLBACK_ALWAYS_LABEL)];
   }
@@ -873,7 +1034,9 @@ export function branchIdForCondition(
   source: BranchableNode | undefined,
   condition: FlowEdgeCondition
 ): string | null {
-  if (condition.type === 'always') return FALLBACK_BRANCH_ID;
+  if (condition.type === 'always') {
+    return source?.type === 'ai_node' ? AI_NODE_ERROR_BRANCH_ID : FALLBACK_BRANCH_ID;
+  }
   if (source === undefined) {
     return condition.type === 'branch'
       ? condition.branch_id

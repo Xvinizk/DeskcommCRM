@@ -91,6 +91,8 @@ export function toFlowNode(n: RFNode): FlowNode {
       return { ...shared, type, config: n.data.config as ConfigOf<"tag"> };
     case "stage_move":
       return { ...shared, type, config: n.data.config as ConfigOf<"stage_move"> };
+    case "ai_node":
+      return { ...shared, type, config: n.data.config as ConfigOf<"ai_node"> };
     default: {
       const exhaustive: never = type;
       throw new Error(`unknown node type: ${String(exhaustive)}`);

@@ -219,6 +219,15 @@ export const NODE_VISUALS: Record<NodeType, NodeVisual> = {
     defaultLabel: "Mover no funil",
     defaultConfig: () => ({ pipeline_id: "00000000-0000-0000-0000-000000000000", stage_id: "00000000-0000-0000-0000-000000000000" }),
   },
+  ai_node: {
+    type: "ai_node",
+    paletteLabel: "Agente IA",
+    icon: Brain,
+    chipClassName: "bg-accent-soft text-accent",
+    borderClassName: "border-l-accent-500",
+    defaultLabel: "Atendimento IA",
+    defaultConfig: () => ({ mode: "custom_prompt", objective: "" }),
+  },
 };
 
 export const NODE_VISUAL_LIST = Object.values(NODE_VISUALS);
@@ -322,6 +331,12 @@ export function describeNodeConfig(
     }
     case "stage_move": {
       return t("Mover etapa do funil");
+    }
+    case "ai_node": {
+      const c = config as ConfigOf<"ai_node">;
+      if (c.mode === "existing_agent") return t("Agente existente");
+      if (c.mode === "existing_with_supplementary") return t("Agente com instrução complementar");
+      return c.objective || t("Instrução personalizada");
     }
     default: {
       const exhaustive: never = type;

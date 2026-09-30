@@ -281,6 +281,14 @@ const schema = z.object({
     .default("false")
     .transform((v) => v === "true"),
 
+  // Follow-up Flow: Node IA conversacional com agentes (S-18)
+  // Default 'false': o Node IA não executa e a publicação de fluxos com o nó fica bloqueada.
+  FOLLOWUP_AI_NODE_ENABLED: z
+    .enum(["true", "false"])
+    .optional()
+    .default("false")
+    .transform((v) => v === "true"),
+
   // Sentry
   SENTRY_DSN: z.string().optional().default(""),
 

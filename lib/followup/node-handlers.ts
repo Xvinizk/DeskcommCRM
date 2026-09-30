@@ -922,5 +922,9 @@ export function processNode(input: {
       }
       return { kind: "complete", outcome: node.config.outcome };
     }
+
+    case "ai_node": {
+      return { kind: "fail", error: `ai_node "${node.id}" execution is not enabled in this phase` };
+    }
   }
 }

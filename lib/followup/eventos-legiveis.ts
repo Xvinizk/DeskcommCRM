@@ -138,6 +138,7 @@ const TIPO_DO_NO: Record<FlowNode["type"], string> = {
   delay: "Atraso",
   tag: "Etiquetas",
   stage_move: "Mudança de etapa",
+  ai_node: "Atendimento IA",
 };
 
 const DESFECHO: Record<string, string> = {
@@ -212,6 +213,8 @@ export function resumoDoNo(node: FlowNode): NoDoDossie {
       return { ...base, resumo: `${node.config.action === "add" ? "adiciona" : "remove"} tags: ${node.config.tags.join(", ")}` };
     case "stage_move":
       return { ...base, resumo: "move o lead para outra etapa do funil" };
+    case "ai_node":
+      return { ...base, resumo: "atendimento automatizado por agente IA" };
   }
 }
 
