@@ -36351,6 +36351,18 @@ create index if not exists idx_followup_flow_shares_token
 create index if not exists idx_followup_flow_shares_pointer
   on public.followup_flow_shares (pointer_id);
 
+-- 0384: Ajusta o default de ai_routers.config para remover 'claude-haiku-4-5' hardcoded
+alter table public.ai_routers
+  alter column config set default jsonb_build_object(
+    'sticky', true,
+    'min_confidence', 0.6
+  );
+
+update public.ai_routers
+   set config = (config - 'classifier_model')
+ where config->>'classifier_model' = 'claude-haiku-4-5'
+   and (config->>'classifier_provider' is null or config->>'classifier_provider' = '');
+
 -- ---- módulo suspenso vira ERRO que o kit reporta (migration 0340) ----
 --
 -- Um comando SEPARADO da reaplicação, de propósito: se ela relançasse, a marca

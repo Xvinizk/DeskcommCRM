@@ -91,4 +91,16 @@ describe('classifyIntent — provedor do classificador', () => {
       { log: log(), runModelCall } as never);
     expect(runModelCall.mock.calls[0]![2]).not.toHaveProperty('llmOverride');
   });
+
+  it('com classifierModel null (modo AUTO) não passa model nem override — o seam resolve binding/org', async () => {
+    const runModelCall = vi.fn().mockResolvedValue({ result: { text: '{"intent":"vendas","confidence":0.9}' } });
+    await classifyIntent({} as never, {} as never,
+      {
+        tenantId: 'o1', leadId: null, jobId: null, signal: 'oi',
+        router: { ...router, classifierModel: null, classifierProvider: null },
+      },
+      { log: log(), runModelCall } as never);
+    expect(runModelCall.mock.calls[0]![2]).not.toHaveProperty('model');
+    expect(runModelCall.mock.calls[0]![2]).not.toHaveProperty('llmOverride');
+  });
 });

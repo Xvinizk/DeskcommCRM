@@ -35,6 +35,7 @@
  * de precedência é a parte que erra, e ela precisa ser exercitável por teste
  * unitário. O I/O fica em quem chama.
  */
+import { ehModeloIncompativelComProvedor } from "./provedores";
 import { PONTO_POR_ID, type PontoDeIa } from "./registro";
 
 /** De onde a escolha efetiva veio — vai para a tela e para o log. */
@@ -235,15 +236,27 @@ export function decidirBinding(entrada: EntradaDaDecisao): DecisaoDeBinding {
   // 3 · O knob de ambiente. Herda provider/credencial do padrão da org, que é
   // exatamente o que esse knob sempre pressupôs — ele nasceu quando só havia
   // um provider por instalação.
+  //
+  // ⚠️ MAS SÓ SE FOR COMPATÍVEL COM O PROVEDOR DA ORGANIZAÇÃO.
+  // Sem esta guarda, um modelo de outro fabricante (ex: `claude-haiku-4-5` num
+  // tenant cujo padrão é `openai`) viajava para o endpoint da OpenAI, tomava 404
+  // `modelo_inexistente` e quebrava o ponto com origem "variavel_de_ambiente",
+  // mesmo que nenhuma env var tivesse sido configurada.
   if (entrada.modeloDeAmbiente !== undefined) {
-    return {
-      provider: entrada.padraoDaOrganizacao.provider,
-      modelId: entrada.modeloDeAmbiente,
-      credentialId: null,
-      baseUrl: null,
-      origem: "variavel_de_ambiente",
-      avisos,
-    };
+    if (ehModeloIncompativelComProvedor(entrada.padraoDaOrganizacao.provider, entrada.modeloDeAmbiente)) {
+      avisos.push(
+        `O modelo "${entrada.modeloDeAmbiente}" não é compatível com o provedor "${entrada.padraoDaOrganizacao.provider}" da organização. Usando o padrão da organização.`,
+      );
+    } else {
+      return {
+        provider: entrada.padraoDaOrganizacao.provider,
+        modelId: entrada.modeloDeAmbiente,
+        credentialId: null,
+        baseUrl: null,
+        origem: "variavel_de_ambiente",
+        avisos,
+      };
+    }
   }
 
   // 3.5 · A herança de quem disparou a chamada.

@@ -33,6 +33,8 @@ const O_QUE_FAZER: Record<string, string> = {
     "O provedor não aceitou a chave. Confira se ela ainda é válida em Credenciais — chaves são revogadas ou expiram.",
   modelo_inexistente:
     "O modelo escolhido não existe mais nesse provedor. Escolha outro no painel de Provedores.",
+  modelo_incompativel_com_provedor:
+    "O modelo configurado para este ponto não está disponível no provedor selecionado. Ajuste o provedor ou escolha outro modelo no painel de Provedores.",
   limite_ou_saldo:
     "O provedor recusou por limite de uso ou saldo. Verifique o faturamento na conta do provedor.",
   provedor_indisponivel:

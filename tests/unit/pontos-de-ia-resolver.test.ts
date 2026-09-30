@@ -295,4 +295,32 @@ describe("o conjunto de pontos do agente publicado", () => {
     );
     expect(d.origem).toBe("binding");
   });
+
+  it("variável de ambiente com modelo incompatível com o provider da org cai no padrão com aviso", () => {
+    // Org com OpenAI como padrão e knob de ambiente apontando para Claude
+    const d = decidirBinding(
+      entrada({
+        padraoDaOrganizacao: { provider: "openai", defaultModel: "gpt-4o" },
+        modeloDeAmbiente: "claude-haiku-4-5",
+      }),
+    );
+    expect(d.origem).toBe("padrao_da_organizacao");
+    expect(d.provider).toBe("openai");
+    expect(d.modelId).toBe("gpt-4o");
+    expect(d.avisos.length).toBeGreaterThan(0);
+    expect(d.avisos[0]).toContain('não é compatível com o provedor "openai"');
+  });
+
+  it("variável de ambiente compatível continua vencendo padrão da organização", () => {
+    const d = decidirBinding(
+      entrada({
+        padraoDaOrganizacao: { provider: "openai", defaultModel: "gpt-4o" },
+        modeloDeAmbiente: "gpt-5-mini",
+      }),
+    );
+    expect(d.origem).toBe("variavel_de_ambiente");
+    expect(d.provider).toBe("openai");
+    expect(d.modelId).toBe("gpt-5-mini");
+  });
 });
+

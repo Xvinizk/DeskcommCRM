@@ -119,3 +119,62 @@ export const PROVEDOR_POR_ID: ReadonlyMap<string, ProvedorSuportado> = new Map(
 export function ehProvedorSuportado(id: string): boolean {
   return PROVEDOR_POR_ID.has(id);
 }
+
+/**
+ * Verifica se um identificador de modelo é manifestamente incompatível com o provedor técnico que vai executá-lo.
+ * Impede combinações inválidas como enviar `claude-*` para a OpenAI ou `gpt-*` para a Anthropic.
+ * Provedores abertos como OpenRouter aceitam múltiplos formatos e não são bloqueados aqui.
+ */
+export function ehModeloIncompativelComProvedor(provider: string, modelId: string): boolean {
+  const m = modelId.toLowerCase().trim();
+  const p = provider.toLowerCase().trim();
+
+  // OpenRouter suporta catálogo multi-provedor (geralmente com formato 'provedor/modelo')
+  if (p === "openrouter") return false;
+
+  if (p === "openai") {
+    // OpenAI aceita gpt-*, o1-*, o3-*, text-embedding-*, chatgpt-*, dall-e-*, whisper-*, tts-*
+    // Modelos Claude, Gemini ou DeepSeek nativos não existem na OpenAI
+    if (m.startsWith("claude-") || m.startsWith("gemini-") || m.startsWith("deepseek-")) {
+      return true;
+    }
+  }
+
+  if (p === "anthropic") {
+    // Anthropic aceita claude-*
+    // Modelos GPT, Gemini, DeepSeek, etc. não existem na Anthropic
+    if (
+      m.startsWith("gpt-") ||
+      m.startsWith("o1-") ||
+      m.startsWith("o3-") ||
+      m.startsWith("text-embedding-") ||
+      m.startsWith("gemini-") ||
+      m.startsWith("deepseek-")
+    ) {
+      return true;
+    }
+  }
+
+  if (p === "google") {
+    // Google aceita gemini-*
+    if (
+      m.startsWith("claude-") ||
+      m.startsWith("gpt-") ||
+      m.startsWith("o1-") ||
+      m.startsWith("o3-") ||
+      m.startsWith("deepseek-")
+    ) {
+      return true;
+    }
+  }
+
+  if (p === "deepseek") {
+    // DeepSeek aceita deepseek-*
+    if (m.startsWith("claude-") || m.startsWith("gpt-") || m.startsWith("o1-") || m.startsWith("o3-") || m.startsWith("gemini-")) {
+      return true;
+    }
+  }
+
+  return false;
+}
+

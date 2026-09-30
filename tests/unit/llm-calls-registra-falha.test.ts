@@ -18,7 +18,10 @@
  */
 import { describe, expect, it, vi } from "vitest";
 
-import { runModelCall } from "@/lib/agent-engine/edge/llm/run-model-call";
+import {
+  runModelCall,
+  LlmModeloIncompativelComProvedorError,
+} from "@/lib/agent-engine/edge/llm/run-model-call";
 
 const ORG = "22222222-2222-4222-8222-222222222222";
 
@@ -146,6 +149,18 @@ describe("a classificação separa os problemas que exigem conversas diferentes"
     expect(await codigoDe(Object.assign(new Error("x"), { statusCode: 404 }))).toBe(
       "modelo_inexistente",
     );
+  });
+
+  it("modelo incompatível com provedor", async () => {
+    expect(
+      await codigoDe(
+        new LlmModeloIncompativelComProvedorError({
+          provider: "openai",
+          model: "claude-haiku-4-5",
+          purpose: "intent_router",
+        }),
+      ),
+    ).toBe("modelo_incompativel_com_provedor");
   });
 
   it("limite ou saldo", async () => {

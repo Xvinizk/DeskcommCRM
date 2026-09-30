@@ -23,6 +23,7 @@
  * cada modelo sabe fazer, é `ai_models` — alimentado pelo catálogo do próprio
  * fabricante, não por heurística sobre o nome do modelo.
  */
+import { ehModeloIncompativelComProvedor } from "./provedores";
 import { PONTO_POR_ID } from "./registro";
 
 /** O que o catálogo sabe sobre o modelo escolhido. */
@@ -49,6 +50,7 @@ export type ResultadoDaValidacao =
  */
 export function validarBinding(entrada: {
   pontoId: string;
+  provider?: string;
   modelo: CapacidadeDoModelo;
 }): ResultadoDaValidacao {
   const ponto = PONTO_POR_ID.get(entrada.pontoId);
@@ -57,6 +59,14 @@ export function validarBinding(entrada: {
       ok: false,
       codigo: "ponto_desconhecido",
       mensagem: `"${entrada.pontoId}" não é um ponto configurável do sistema.`,
+    };
+  }
+
+  if (entrada.provider && ehModeloIncompativelComProvedor(entrada.provider, entrada.modelo.model_id)) {
+    return {
+      ok: false,
+      codigo: "modelo_incompativel_com_provedor",
+      mensagem: `"${entrada.modelo.model_id}" não pertence ao provedor "${entrada.provider}". Escolha um modelo compatível com esse provedor.`,
     };
   }
 

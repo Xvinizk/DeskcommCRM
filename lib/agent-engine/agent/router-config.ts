@@ -22,7 +22,7 @@ export interface RouterMember {
 export interface LoadedRouter {
   id: string;
   name: string;
-  classifierModel: string;
+  classifierModel: string | null;
   /**
    * Provedor do classificador, quando o roteador escolhe um diferente do da org.
    *
@@ -86,14 +86,15 @@ export async function loadActiveRouter(
     sticky?: unknown;
     min_confidence?: unknown;
   };
-  const classifierModel =
+  const rawModel =
     typeof cfg.classifier_model === 'string' && cfg.classifier_model.trim() !== ''
-      ? cfg.classifier_model
-      : 'claude-haiku-4-5';
-  const classifierProvider =
-    typeof cfg.classifier_provider === 'string' && cfg.classifier_provider.trim() !== ''
-      ? cfg.classifier_provider
+      ? cfg.classifier_model.trim()
       : null;
+  const rawProvider =
+    typeof cfg.classifier_provider === 'string' && cfg.classifier_provider.trim() !== ''
+      ? cfg.classifier_provider.trim()
+      : null;
+
   const sticky = typeof cfg.sticky === 'boolean' ? cfg.sticky : true;
   const minConfidence =
     typeof cfg.min_confidence === 'number' && cfg.min_confidence >= 0 && cfg.min_confidence <= 1
@@ -103,8 +104,8 @@ export async function loadActiveRouter(
   return {
     id: router.id,
     name: router.name,
-    classifierModel,
-    classifierProvider,
+    classifierModel: rawModel,
+    classifierProvider: rawProvider,
     sticky,
     minConfidence,
     fallbackAgentId: router.fallback_agent_id,

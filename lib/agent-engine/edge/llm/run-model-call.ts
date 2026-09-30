@@ -20,12 +20,13 @@ import { generateText, stepCountIs, type ModelMessage, type ToolSet } from 'ai';
 import type pg from 'pg';
 import { z } from 'zod';
 
+import { ehModeloIncompativelComProvedor } from '@/lib/ai/pontos/provedores';
 import { PONTO_POR_ID } from '@/lib/ai/pontos/registro';
 import { scrubMessage } from '@/lib/sentry/scrub';
 
 import type { Logger } from '../../obs/logger';
 import { decidirParaOSeam } from './binding-do-ponto';
-import { resolveOrgLlmConfig, type LlmEdgeConfig, type OrcamentoDaOrg } from './credentials';
+import { resolveOrgLlmConfig, type LlmEdgeConfig, type LlmResolveOverride, type OrcamentoDaOrg } from './credentials';
 import {
   AVISO_CORPO,
   AVISO_TITULO,
@@ -115,6 +116,28 @@ export class LlmEnderecoExigeChaveDaEmpresaError extends Error {
     super(
       'o endereço de IA configurado para esta empresa só é usado com a chave dela, e ela não tem chave cadastrada para este provedor — a chave da instalação não é enviada a endereço escolhido pela empresa; cadastre a chave da empresa em Agente de IA › Provedores, ou tire o endereço próprio para voltar ao provedor padrão da instalação',
     );
+  }
+}
+
+/**
+ * Modelo manifestamente incompatível com o provedor técnico que vai executá-lo
+ * (ex.: claude-haiku-4-5 num provedor openai).
+ * A chamada é recusada antes de fazer requisição fadada ao fracasso.
+ */
+export class LlmModeloIncompativelComProvedorError extends Error {
+  override readonly name = 'llm_modelo_incompativel_com_provedor';
+  readonly provider: string;
+  readonly model: string;
+  readonly purpose: string;
+
+  constructor(detalhes: { provider: string; model: string; purpose: string }) {
+    const rotuloPonto = PONTO_POR_ID.get(detalhes.purpose)?.rotulo ?? detalhes.purpose;
+    super(
+      `O modelo "${detalhes.model}" não está disponível no provedor "${detalhes.provider}" selecionado para "${rotuloPonto}". Ajuste o provedor ou escolha outro modelo no painel de Provedores.`,
+    );
+    this.provider = detalhes.provider;
+    this.model = detalhes.model;
+    this.purpose = detalhes.purpose;
   }
 }
 
@@ -220,7 +243,7 @@ export interface RunModelCallInput {
    * Override de provider/credencial vindo da versão PUBLICADA do agente (Fase
    * 2B) — resolvido no seam, nunca no call site. Sem ele, config da org.
    */
-  llmOverride?: import('./credentials').LlmResolveOverride;
+  llmOverride?: LlmResolveOverride;
 }
 
 export interface RunModelCallDeps {
@@ -561,6 +584,13 @@ export async function runModelCall(db: pg.Pool, cfg: LlmEdgeConfig, input: RunMo
   if (config.enabledModels.length > 0 && !config.enabledModels.includes(model)) {
     throw new LlmModelNotEnabledError(model);
   }
+  if (ehModeloIncompativelComProvedor(config.provider, model)) {
+    throw new LlmModeloIncompativelComProvedorError({
+      provider: config.provider,
+      model,
+      purpose,
+    });
+  }
   const factory = registry[config.provider];
   if (factory === undefined) {
     throw new LlmProviderUnknownError(config.provider);
@@ -822,6 +852,14 @@ export function normalizarErro(err: unknown): {
       error_code: 'endereco_exige_chave_da_empresa',
       error_message: redigirMensagemDoProvedor(bruto),
       http_status: null,
+    };
+  }
+  // Recusa por modelo incompatível com o provedor (ex: claude num provedor openai).
+  if (err instanceof LlmModeloIncompativelComProvedorError) {
+    return {
+      error_code: 'modelo_incompativel_com_provedor',
+      error_message: redigirMensagemDoProvedor(bruto),
+      http_status: 422,
     };
   }
 
