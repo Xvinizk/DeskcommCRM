@@ -132,6 +132,7 @@ import { avisarJanelaFechada, resolverAvisoDeJanela } from '../pacing/aviso-de-j
 import { resolveConversationTurn, type TurnAgentResolution } from './resolve-turn-agent';
 import { resolveTurnAuthority } from './turn-authority';
 import { acquireAiNodeInboundTurn } from '@/lib/followup/ai-node-idempotency';
+import { executeAiNodeTurn } from '@/lib/followup/ai-node-executor';
 import {
   hasOpenCaseForContact,
   getCaseAwaitingLead,
@@ -4395,8 +4396,45 @@ export function createInboundTurnHandler(deps: InboundTurnDeps) {
         acquire_status: acquireResult.status,
       });
 
-      // Fase 2 concluída para o Node IA: ownership adquirido, idempotência registrada,
-      // contadores e mídias atualizados. Execução do modelo reservada para a Fase 3.
+      if (acquireResult.status === 'acquired' || acquireResult.status === 'resumed') {
+        const inboundText = await loadInboundBodyForJob(pool, {
+          tenantId: job.organization_id,
+          conversationId: payload.conversation_id,
+          inboundMessageId: payload.inbound_message_id,
+        });
+
+        const turnExecResult = await executeAiNodeTurn(
+          pool,
+          {
+            organizationId: job.organization_id,
+            enrollmentId: authorityResult.enrollment_id,
+            nodeId: authorityResult.node_id,
+            inboundMessageId: payload.inbound_message_id,
+            conversationId: payload.conversation_id,
+            contactId: job.contact_id,
+            workerId: acquireResult.worker_id,
+            leaseGeneration: acquireResult.lease_generation,
+            session: acquireResult.session,
+            inboundText,
+          },
+          {
+            crmCfg: deps.crmCfg,
+            llmCfg: deps.llmCfg,
+            registry: deps.registry,
+            log: deps.log,
+          },
+        );
+
+        deps.log.info('execução do Node IA finalizada (Fase 3)', {
+          job_id: job.id,
+          enrollment_id: authorityResult.enrollment_id,
+          node_id: authorityResult.node_id,
+          exec_status: turnExecResult.status,
+          deterministic_match: turnExecResult.deterministic_match,
+          reply_cached: turnExecResult.cached,
+        });
+      }
+
       return;
     }
 

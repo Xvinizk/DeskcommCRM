@@ -205,7 +205,7 @@ async function handle(req: NextRequest): Promise<Response> {
         },
       };
 
-      // 4. Executa pipeline canônico: pacing, anti-ban, Storage sign, WAHA e persistência em messages.
+      // 4. Executa pipeline canônico: pacing, anti-ban, Storage sign, provedor de canal e persistência em messages.
       // O `internalMessageId: sm.id` ancora a identidade atômica na tabela `messages`.
       const sentMessage = await sendMessageHandler(
         admin,
