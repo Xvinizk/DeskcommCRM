@@ -46,6 +46,7 @@ describe('graph-schema', () => {
         'delay',
         'tag',
         'stage_move',
+        'ai_node',
       ]);
     });
 

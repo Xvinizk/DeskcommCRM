@@ -130,6 +130,8 @@ import { janelaDeEnvioAberta, proximaAberturaDaJanela } from '../pacing/engine';
 import { loadChannelKnobs } from '../pacing/store';
 import { avisarJanelaFechada, resolverAvisoDeJanela } from '../pacing/aviso-de-janela';
 import { resolveConversationTurn, type TurnAgentResolution } from './resolve-turn-agent';
+import { resolveTurnAuthority } from './turn-authority';
+import { acquireAiNodeInboundTurn } from '@/lib/followup/ai-node-idempotency';
 import {
   hasOpenCaseForContact,
   getCaseAwaitingLead,
@@ -4354,14 +4356,50 @@ export function createInboundTurnHandler(deps: InboundTurnDeps) {
   return async (job: JobRow, pool: pg.Pool, ctx: { workerId: string }): Promise<void> => {
     const payload = inboundTurnPayloadSchema.parse(job.payload);
     if (!job.contact_id) throw new Error('reply_without_contact');
-    const resolvedAgent = await resolveConversationTurn(pool, deps.llmCfg, {
-      tenantId: job.organization_id,
-      leadId: job.contact_id,
-      jobId: job.id,
-      conversationId: payload.conversation_id,
-      channelSessionId: payload.channel_session_id,
-      inbound: true,
-    }, { log: deps.log });
+    const authorityResult = await resolveTurnAuthority(
+      pool,
+      deps.llmCfg,
+      {
+        tenantId: job.organization_id,
+        leadId: job.contact_id,
+        jobId: job.id,
+        conversationId: payload.conversation_id,
+        channelSessionId: payload.channel_session_id,
+        inboundMessageId: payload.inbound_message_id,
+      },
+      { log: deps.log },
+    );
+
+    if (authorityResult.authority === 'human') {
+      deps.log.info('turno pulado — lead em handoff humano (bot silenciado)', {
+        job_id: job.id,
+        conversation_id: payload.conversation_id,
+      });
+      return;
+    }
+
+    if (authorityResult.authority === 'ai_node') {
+      const acquireResult = await acquireAiNodeInboundTurn(pool, {
+        organizationId: job.organization_id,
+        enrollmentId: authorityResult.enrollment_id,
+        expectedNodeId: authorityResult.node_id,
+        inboundMessageId: payload.inbound_message_id,
+        conversationId: payload.conversation_id,
+      });
+
+      deps.log.info('inbound consumido pelo Node IA (Fase 2: ownership e idempotência)', {
+        job_id: job.id,
+        enrollment_id: authorityResult.enrollment_id,
+        node_id: authorityResult.node_id,
+        acquire_status: acquireResult.status,
+      });
+
+      // Fase 2 concluída para o Node IA: ownership adquirido, idempotência registrada,
+      // contadores e mídias atualizados. Execução do modelo reservada para a Fase 3.
+      return;
+    }
+
+    const resolvedAgent = authorityResult.resolution;
     const operationAgent = resolvedAgent.config;
     if (operationAgent?.operationMode === 'assisted') {
       // O GATE VALE TAMBÉM NO ASSISTIDO, e é aqui que ele precisa estar.
