@@ -322,6 +322,14 @@ describe("a credencial da organização só vale para modelo que o provider dela
     expect(r?.origem).toBe("padrao");
   });
 
+  it("id sem prefixo manifestamente incompatível com o provedor da organização não usa a credencial dela", async () => {
+    vi.doMock("@/lib/supabase/admin", () => ({ createAdminClient: adminComOrg("openai") }));
+    vi.resetModules();
+    const mod = await import("@/lib/ai/gateway-binding");
+    const r = await mod.resolverModeloDoPonto("sentiment_classify", ORG, "claude-haiku-4-5");
+    expect(r?.origem).toBe("padrao");
+  });
+
   it("id do PRÓPRIO provedor entra sem o prefixo, que é nome de rota e não de modelo", async () => {
     // `createAnthropic()("anthropic/claude-haiku-4-5")` pede à Anthropic um
     // modelo cujo nome ela não conhece. O prefixo endereça o provedor; quem já

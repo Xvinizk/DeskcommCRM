@@ -32,6 +32,7 @@ import { logger } from "@/lib/logger";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 import { OPENROUTER_BASE_URL, resolveLanguageModel, type ModelId } from "./gateway";
+import { ehModeloIncompativelComProvedor } from "./pontos/provedores";
 
 export interface ModeloResolvido {
   model: LanguageModel;
@@ -163,6 +164,7 @@ async function lerBinding(
  */
 function idParaOProvider(provider: string, id: string): string | null {
   if (provider === "openrouter") return id;
+  if (ehModeloIncompativelComProvedor(provider, id)) return null;
   if (!id.includes("/")) return id;
   if (id.startsWith(`${provider}/`)) return id.slice(provider.length + 1);
   return null;
@@ -355,6 +357,7 @@ function instanciar(
   modelId: string,
   baseUrl: string | null,
 ): LanguageModel | null {
+  if (ehModeloIncompativelComProvedor(provider, modelId)) return null;
   switch (provider) {
     case "anthropic":
       return createAnthropic({ apiKey })(modelId);
