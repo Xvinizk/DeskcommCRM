@@ -23,7 +23,7 @@ export function createMockDb(initialEnrollment: {
     enrollment_id: string;
     node_id: string;
     event_type: string;
-    payload: unknown;
+    payload: Record<string, unknown> | null;
     idempotency_key: string | null;
     created_at?: string;
   }> = [];
@@ -58,7 +58,12 @@ export function createMockDb(initialEnrollment: {
           return { rows: [] };
         }
 
-        if (normalizedSql.includes('FROM followup_enrollments') && (normalizedSql.includes('WHERE id = $1') || normalizedSql.includes('WHERE organization_id = $1 AND id = $2'))) {
+        if (
+          normalizedSql.includes('FROM followup_enrollments') &&
+          (normalizedSql.includes('WHERE id = $1') ||
+            normalizedSql.includes('WHERE organization_id = $1 AND id = $2') ||
+            normalizedSql.includes('SELECT ai_node_session FROM followup_enrollments'))
+        ) {
           const orgId = params.length === 2 ? (params[0] as string) : enrollment.organization_id;
           const enrollmentId = params.length === 2 ? (params[1] as string) : (params[0] as string);
           if (enrollment.organization_id === orgId && enrollment.id === enrollmentId) {
@@ -102,12 +107,19 @@ export function createMockDb(initialEnrollment: {
         }
 
         if (normalizedSql.includes('UPDATE followup_enrollment_events SET payload')) {
-          const [payloadStr, enrollmentId, idemKey] = params;
+          const [payloadArg, enrollmentId, idemKey] = params;
           const existingIdx = events.findIndex(
             (e) => e.enrollment_id === enrollmentId && e.idempotency_key === idemKey,
           );
           if (existingIdx >= 0) {
-            events[existingIdx]!.payload = JSON.parse(payloadStr as string);
+            if (normalizedSql.includes('jsonb_set')) {
+              events[existingIdx]!.payload = {
+                ...events[existingIdx]!.payload,
+                lease_until: JSON.parse(payloadArg as string),
+              };
+            } else {
+              events[existingIdx]!.payload = JSON.parse(payloadArg as string);
+            }
           }
           return { rows: [] };
         }
@@ -209,7 +221,7 @@ describe('ai-node-idempotency', () => {
     })).toBe(claimKey);
   });
 
-  it('lifecycle de claim com lease: acquired -> in_progress (dentro da lease) -> resumed (takeover pós-expiração) -> completed', async () => {
+  it('lifecycle de claim com lease e fencing token: acquired (gen 1) -> in_progress -> resumed (gen 2) -> completed', async () => {
     const initialSession: AiNodeSession = {
       node_id: 'node-ai-main',
       flow_id: 'flow-123',
@@ -243,9 +255,10 @@ describe('ai-node-idempotency', () => {
       inboundMessageId: fixedMessageId,
       messageSentAt: '2026-09-30T10:05:00Z',
       leaseDurationMs: 60_000,
+      workerId: 'worker-initial',
     };
 
-    // 1ª execução em t0 = 10:05:00 (claim inédito)
+    // 1ª execução em t0 = 10:05:00 (claim inédito com generation = 1)
     let currentTime = new Date('2026-09-30T10:05:00Z');
     const result1 = await acquireAiNodeInboundTurn(mockDb, input, { clock: () => currentTime });
     expect(result1.status).toBe('acquired');
@@ -255,47 +268,57 @@ describe('ai-node-idempotency', () => {
       expect(result1.session.turn_count).toBe(1);
       expect(result1.session.last_inbound_at).toBe('2026-09-30T10:05:00.000Z');
       expect(result1.lease_until).toBe('2026-09-30T10:06:00.000Z');
+      expect(result1.lease_generation).toBe(1);
     }
 
     expect(getEnrollment().ai_node_session?.turn_count).toBe(1);
     expect(getEvents().filter((e) => e.event_type === 'ai_node.inbound_received')).toHaveLength(1);
 
-    // 2ª execução em t0 + 10s = 10:05:10 (dentro da lease de 60s, worker anterior ainda trabalhando):
-    // Deve retornar 'in_progress' para impedir que worker concorrente chame LLM!
+    // 2ª execução em t0 + 10s = 10:05:10 (dentro da lease de 60s):
+    // Retorna in_progress
     currentTime = new Date('2026-09-30T10:05:10Z');
     const retryInProgress = await acquireAiNodeInboundTurn(mockDb, input, { clock: () => currentTime });
     expect(retryInProgress.status).toBe('in_progress');
     if (retryInProgress.status === 'in_progress') {
       expect(retryInProgress.is_retry).toBe(true);
       expect(retryInProgress.lease_until).toBe('2026-09-30T10:06:00.000Z');
+      expect(retryInProgress.lease_generation).toBe(1);
     }
 
-    // turn_count permanece exatamente 1!
+    // turn_count permanece exatamente 1
     expect(getEnrollment().ai_node_session?.turn_count).toBe(1);
 
-    // 3ª execução em t0 + 70s = 10:06:10 (lease expirou, worker anterior crashou):
-    // Deve realizar TAKEOVER ATÔMICO com status 'resumed' SEM incrementar turn_count!
+    // 3ª execução em t0 + 70s = 10:06:10 (lease expirou):
+    // Takeover atômico com generation = 2
     currentTime = new Date('2026-09-30T10:06:10Z');
-    const retryResumed = await acquireAiNodeInboundTurn(mockDb, { ...input, workerId: 'worker-takeover' }, { clock: () => currentTime });
+    const retryResumed = await acquireAiNodeInboundTurn(
+      mockDb,
+      { ...input, workerId: 'worker-takeover' },
+      { clock: () => currentTime },
+    );
     expect(retryResumed.status).toBe('resumed');
     if (retryResumed.status === 'resumed') {
       expect(retryResumed.is_retry).toBe(true);
       expect(retryResumed.turn_count).toBe(1);
       expect(retryResumed.worker_id).toBe('worker-takeover');
       expect(retryResumed.lease_until).toBe('2026-09-30T10:07:10.000Z');
+      expect(retryResumed.lease_generation).toBe(2);
     }
 
-    // turn_count permanece 1!
+    // turn_count permanece 1
     expect(getEnrollment().ai_node_session?.turn_count).toBe(1);
 
-    // Agora o turno conclui formalmente (resposta enviada no WhatsApp):
-    await completeAiNodeInboundTurn(mockDb, {
+    // Turno conclui formalmente pelo worker legítimo (worker-takeover, gen 2):
+    const completeResult = await completeAiNodeInboundTurn(mockDb, {
       organizationId: 'org-1',
       enrollmentId: 'enrollment-1',
       nodeId: 'node-ai-main',
       inboundMessageId: fixedMessageId,
       outboundMessageId: 'out-msg-1',
+      workerId: 'worker-takeover',
+      leaseGeneration: 2,
     });
+    expect(completeResult.status).toBe('completed');
 
     // Tentativas após a conclusão devem retornar 'completed' (no-op seguro):
     currentTime = new Date('2026-09-30T10:10:00Z');

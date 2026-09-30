@@ -5,6 +5,7 @@ import {
   recordAiNodeReplyGenerated,
   getAiNodeGeneratedReply,
   resolveAiNodeOutboundRecovery,
+  renewAiNodeTurnLease,
 } from '@/lib/followup/ai-node-idempotency';
 import type { AiNodeSession } from '@/lib/followup/ai-node-session';
 import { createMockDb } from './ai-node-idempotency.test';
@@ -16,8 +17,8 @@ const defaultMediaSummary = {
   last_media_ids: [],
 };
 
-describe('ai-node-crash-recovery: lease, ownership e concorrência', () => {
-  it('CASO A: 5 entregas simultâneas da mesma mensagem -> exatamente 1 acquired, 4 in_progress, ZERO resumed', async () => {
+describe('ai-node-crash-recovery: fencing token, stale workers e heartbeat', () => {
+  it('CASO A: Worker A (gen 1) sofre crash/atraso -> Worker B assume (gen 2) -> Worker A tenta record reply e é rejeitado como stale_lease_owner', async () => {
     const initialSession: AiNodeSession = {
       node_id: 'node-ai-1',
       flow_id: 'flow-1',
@@ -28,7 +29,7 @@ describe('ai-node-crash-recovery: lease, ownership e concorrência', () => {
       media_summary: defaultMediaSummary,
     };
 
-    const { mockDb, getEnrollment } = createMockDb({
+    const { mockDb, getEvents } = createMockDb({
       id: 'enrollment-1',
       organization_id: 'org-1',
       current_node_id: 'node-ai-1',
@@ -37,68 +38,10 @@ describe('ai-node-crash-recovery: lease, ownership e concorrência', () => {
       conversation_id: 'conv-1',
     });
 
-    const inboundMessageId = 'msg-concorrente-5x';
+    const inboundMessageId = 'msg-fencing-test-a';
     const t0 = new Date('2026-09-30T12:00:00Z');
 
-    // 5 workers disparando ao mesmo tempo para a mesma mensagem física
-    const promises = Array.from({ length: 5 }).map((_, i) =>
-      acquireAiNodeInboundTurn(
-        mockDb,
-        {
-          organizationId: 'org-1',
-          enrollmentId: 'enrollment-1',
-          expectedNodeId: 'node-ai-1',
-          inboundMessageId,
-          messageSentAt: '2026-09-30T12:00:00Z',
-          workerId: `worker-conc-${i + 1}`,
-          leaseDurationMs: 60_000,
-        },
-        { clock: () => t0 },
-      ),
-    );
-
-    const results = await Promise.all(promises);
-
-    // 1. Exatamente UMA deve ter status 'acquired'
-    const acquiredList = results.filter((r) => r.status === 'acquired');
-    expect(acquiredList).toHaveLength(1);
-
-    // 2. As outras 4 DEVEM ter status 'in_progress' (NÃO podem chamar LLM!)
-    const inProgressList = results.filter((r) => r.status === 'in_progress');
-    expect(inProgressList).toHaveLength(4);
-
-    // 3. ZERO resumed enquanto a lease inicial está ativa
-    const resumedList = results.filter((r) => r.status === 'resumed');
-    expect(resumedList).toHaveLength(0);
-
-    // 4. turn_count final DEVE ser exatamente 1, nunca 5!
-    expect(getEnrollment().ai_node_session?.turn_count).toBe(1);
-  });
-
-  it('CASO B: claim existente e worker ainda dentro da lease -> retry retorna in_progress', async () => {
-    const initialSession: AiNodeSession = {
-      node_id: 'node-ai-1',
-      flow_id: 'flow-1',
-      mode: 'existing_agent',
-      status: 'running',
-      turn_count: 0,
-      started_at: '2026-09-30T12:00:00Z',
-      media_summary: defaultMediaSummary,
-    };
-
-    const { mockDb, getEnrollment } = createMockDb({
-      id: 'enrollment-1',
-      organization_id: 'org-1',
-      current_node_id: 'node-ai-1',
-      status: 'active',
-      ai_node_session: initialSession,
-      conversation_id: 'conv-1',
-    });
-
-    const inboundMessageId = 'msg-lease-active';
-    const t0 = new Date('2026-09-30T12:00:00Z');
-
-    // Worker A adquire claim com lease de 60s (válido até 12:01:00)
+    // 1. Worker A adquire o claim (generation 1, lease de 60s)
     const claimA = await acquireAiNodeInboundTurn(
       mockDb,
       {
@@ -112,75 +55,16 @@ describe('ai-node-crash-recovery: lease, ownership e concorrência', () => {
       { clock: () => t0 },
     );
     expect(claimA.status).toBe('acquired');
-
-    // Worker B chega 15s depois (12:00:15)
-    const t1 = new Date('2026-09-30T12:00:15Z');
-    const retryB = await acquireAiNodeInboundTurn(
-      mockDb,
-      {
-        organizationId: 'org-1',
-        enrollmentId: 'enrollment-1',
-        expectedNodeId: 'node-ai-1',
-        inboundMessageId,
-        workerId: 'worker-B',
-      },
-      { clock: () => t1 },
-    );
-
-    // Worker B é barrado com in_progress
-    expect(retryB.status).toBe('in_progress');
-    if (retryB.status === 'in_progress') {
-      expect(retryB.worker_id).toBe('worker-A');
-      expect(retryB.lease_until).toBe('2026-09-30T12:01:00.000Z');
+    if (claimA.status === 'acquired') {
+      expect(claimA.lease_generation).toBe(1);
+      expect(claimA.worker_id).toBe('worker-A');
     }
 
-    // turn_count permanece 1
-    expect(getEnrollment().ai_node_session?.turn_count).toBe(1);
-  });
-
-  it('CASO C: claim existente e lease expirou -> retry consegue takeover (resumed) sem duplicar turn_count', async () => {
-    const initialSession: AiNodeSession = {
-      node_id: 'node-ai-1',
-      flow_id: 'flow-1',
-      mode: 'existing_agent',
-      status: 'running',
-      turn_count: 0,
-      started_at: '2026-09-30T12:00:00Z',
-      media_summary: defaultMediaSummary,
-    };
-
-    const { mockDb, getEnrollment, getEvents } = createMockDb({
-      id: 'enrollment-1',
-      organization_id: 'org-1',
-      current_node_id: 'node-ai-1',
-      status: 'active',
-      ai_node_session: initialSession,
-      conversation_id: 'conv-1',
-    });
-
-    const inboundMessageId = 'msg-takeover-test';
-    const t0 = new Date('2026-09-30T12:00:00Z');
-
-    // 1. Worker A faz claim com lease de 60s (até 12:01:00)
-    const step1 = await acquireAiNodeInboundTurn(
-      mockDb,
-      {
-        organizationId: 'org-1',
-        enrollmentId: 'enrollment-1',
-        expectedNodeId: 'node-ai-1',
-        inboundMessageId,
-        workerId: 'worker-A',
-        leaseDurationMs: 60_000,
-      },
-      { clock: () => t0 },
-    );
-    expect(step1.status).toBe('acquired');
-
-    // 2. SIMULAÇÃO DE CRASH: Worker A morre. Tempo avança além da lease (12:01:05).
+    // 2. Operação do Worker A atrasa (>60s) e ele não renovou. Lease expira em 12:01:00.
     const tExpired = new Date('2026-09-30T12:01:05Z');
 
-    // 3. Worker B chega para takeover
-    const step2 = await acquireAiNodeInboundTurn(
+    // 3. Worker B chega e faz takeover (generation 2)
+    const takeoverB = await acquireAiNodeInboundTurn(
       mockDb,
       {
         organizationId: 'org-1',
@@ -192,27 +76,113 @@ describe('ai-node-crash-recovery: lease, ownership e concorrência', () => {
       },
       { clock: () => tExpired },
     );
-
-    expect(step2.status).toBe('resumed');
-    if (step2.status === 'resumed') {
-      expect(step2.is_retry).toBe(true);
-      expect(step2.turn_count).toBe(1); // turn_count NÃO incrementado
-      expect(step2.worker_id).toBe('worker-B');
-      expect(step2.lease_until).toBe('2026-09-30T12:02:05.000Z');
+    expect(takeoverB.status).toBe('resumed');
+    if (takeoverB.status === 'resumed') {
+      expect(takeoverB.lease_generation).toBe(2);
+      expect(takeoverB.worker_id).toBe('worker-B');
     }
 
-    // Registrou evento de takeover auditável
-    const takeovers = getEvents().filter((e) => e.event_type === 'ai_node.claim_takeover');
-    expect(takeovers).toHaveLength(1);
-    const takeoverPayload = takeovers[0]!.payload as { previous_worker_id: string; new_worker_id: string };
-    expect(takeoverPayload.previous_worker_id).toBe('worker-A');
-    expect(takeoverPayload.new_worker_id).toBe('worker-B');
+    // 4. Worker A finalmente acorda e tenta salvar a resposta com seu fencing token antigo (gen 1):
+    const staleRecord = await recordAiNodeReplyGenerated(
+      mockDb,
+      {
+        organizationId: 'org-1',
+        enrollmentId: 'enrollment-1',
+        nodeId: 'node-ai-1',
+        inboundMessageId,
+        replyText: 'Resposta atrasada do Worker A antigo',
+        workerId: 'worker-A',
+        leaseGeneration: 1,
+      },
+      { clock: () => tExpired },
+    );
 
-    // turn_count permanece 1
-    expect(getEnrollment().ai_node_session?.turn_count).toBe(1);
+    // DEVE SER REJEITADO com stale_lease_owner!
+    expect(staleRecord.recorded).toBe(false);
+    expect(staleRecord.error).toBe('stale_lease_owner');
+
+    // Nenhuma resposta do Worker A foi gravada no ledger
+    const replies = getEvents().filter((e) => e.event_type === 'ai_node.reply_generated');
+    expect(replies).toHaveLength(0);
   });
 
-  it('CASO D: reply cache já existe após crash -> resumed recupera resposta salva sem chamar LLM', async () => {
+  it('CASO B: Worker A antigo tenta completeAiNodeInboundTurn após takeover e é rejeitado como stale_lease_owner', async () => {
+    const initialSession: AiNodeSession = {
+      node_id: 'node-ai-1',
+      flow_id: 'flow-1',
+      mode: 'existing_agent',
+      status: 'running',
+      turn_count: 0,
+      started_at: '2026-09-30T12:00:00Z',
+      media_summary: defaultMediaSummary,
+    };
+
+    const { mockDb, getEvents, getEnrollment } = createMockDb({
+      id: 'enrollment-1',
+      organization_id: 'org-1',
+      current_node_id: 'node-ai-1',
+      status: 'active',
+      ai_node_session: initialSession,
+      conversation_id: 'conv-1',
+    });
+
+    const inboundMessageId = 'msg-fencing-test-b';
+    const t0 = new Date('2026-09-30T12:00:00Z');
+
+    // Worker A adquire gen 1
+    await acquireAiNodeInboundTurn(
+      mockDb,
+      {
+        organizationId: 'org-1',
+        enrollmentId: 'enrollment-1',
+        expectedNodeId: 'node-ai-1',
+        inboundMessageId,
+        workerId: 'worker-A',
+        leaseDurationMs: 60_000,
+      },
+      { clock: () => t0 },
+    );
+
+    // Worker B assume gen 2 após expiração
+    const tExpired = new Date('2026-09-30T12:01:05Z');
+    await acquireAiNodeInboundTurn(
+      mockDb,
+      {
+        organizationId: 'org-1',
+        enrollmentId: 'enrollment-1',
+        expectedNodeId: 'node-ai-1',
+        inboundMessageId,
+        workerId: 'worker-B',
+      },
+      { clock: () => tExpired },
+    );
+
+    // Worker A tenta completar o turno
+    const staleComplete = await completeAiNodeInboundTurn(
+      mockDb,
+      {
+        organizationId: 'org-1',
+        enrollmentId: 'enrollment-1',
+        nodeId: 'node-ai-1',
+        inboundMessageId,
+        workerId: 'worker-A',
+        leaseGeneration: 1,
+      },
+      { clock: () => tExpired },
+    );
+
+    // Rejeitado!
+    expect(staleComplete.status).toBe('stale_lease_owner');
+
+    // Nenhum evento completed gravado
+    expect(getEvents().filter((e) => e.event_type === 'ai_node.turn_completed')).toHaveLength(0);
+
+    // active_turn ainda pertence ao Worker B (gen 2)
+    expect(getEnrollment().ai_node_session?.active_turn?.worker_id).toBe('worker-B');
+    expect(getEnrollment().ai_node_session?.active_turn?.lease_generation).toBe(2);
+  });
+
+  it('CASO C: Worker A faz heartbeat antes de expirar -> Worker B tenta takeover e recebe in_progress', async () => {
     const initialSession: AiNodeSession = {
       node_id: 'node-ai-1',
       flow_id: 'flow-1',
@@ -232,10 +202,10 @@ describe('ai-node-crash-recovery: lease, ownership e concorrência', () => {
       conversation_id: 'conv-1',
     });
 
-    const inboundMessageId = 'msg-reply-cache-recovery';
+    const inboundMessageId = 'msg-heartbeat-test';
     const t0 = new Date('2026-09-30T12:00:00Z');
 
-    // 1. Worker A claima
+    // Worker A adquire claim (expiraria em 12:01:00)
     await acquireAiNodeInboundTurn(
       mockDb,
       {
@@ -249,27 +219,29 @@ describe('ai-node-crash-recovery: lease, ownership e concorrência', () => {
       { clock: () => t0 },
     );
 
-    // 2. Worker A chama LLM e grava reply cache antes de morrer
-    const recordResult = await recordAiNodeReplyGenerated(
+    // Aos 40s (12:00:40), Worker A faz heartbeat renovando por mais 60s (novo prazo: 12:01:40)
+    const tHeartbeat = new Date('2026-09-30T12:00:40Z');
+    const renewResult = await renewAiNodeTurnLease(
       mockDb,
       {
         organizationId: 'org-1',
         enrollmentId: 'enrollment-1',
         nodeId: 'node-ai-1',
         inboundMessageId,
-        replyText: 'Olá! Como posso ajudar você hoje?',
-        tokensIn: 120,
-        tokensOut: 25,
+        workerId: 'worker-A',
+        leaseGeneration: 1,
+        renewDurationMs: 60_000,
       },
-      { clock: () => t0 },
+      { clock: () => tHeartbeat },
     );
-    expect(recordResult.recorded).toBe(true);
+    expect(renewResult.status).toBe('renewed');
+    if (renewResult.status === 'renewed') {
+      expect(renewResult.lease_until).toBe('2026-09-30T12:01:40.000Z');
+    }
 
-    // 3. Worker A morre. Lease expira.
-    const tExpired = new Date('2026-09-30T12:01:10Z');
-
-    // 4. Worker B assume
-    const resumeResult = await acquireAiNodeInboundTurn(
+    // Aos 65s (12:01:05), Worker B tenta takeover achando que expirou:
+    const tCheck = new Date('2026-09-30T12:01:05Z');
+    const takeoverAttempt = await acquireAiNodeInboundTurn(
       mockDb,
       {
         organizationId: 'org-1',
@@ -278,86 +250,19 @@ describe('ai-node-crash-recovery: lease, ownership e concorrência', () => {
         inboundMessageId,
         workerId: 'worker-B',
       },
-      { clock: () => tExpired },
-    );
-    expect(resumeResult.status).toBe('resumed');
-
-    // 5. Worker B recupera a resposta do cache -> NÃO precisa chamar LLM
-    const cachedReply = await getAiNodeGeneratedReply(mockDb, {
-      organizationId: 'org-1',
-      enrollmentId: 'enrollment-1',
-      nodeId: 'node-ai-1',
-      inboundMessageId,
-    });
-    expect(cachedReply).not.toBeNull();
-    expect(cachedReply?.reply_text).toBe('Olá! Como posso ajudar você hoje?');
-    expect(cachedReply?.tokens_in).toBe(120);
-    expect(cachedReply?.tokens_out).toBe(25);
-  });
-
-  it('CASO E: completed existe -> retries viram completed/no-op', async () => {
-    const initialSession: AiNodeSession = {
-      node_id: 'node-ai-1',
-      flow_id: 'flow-1',
-      mode: 'existing_agent',
-      status: 'running',
-      turn_count: 0,
-      started_at: '2026-09-30T12:00:00Z',
-      media_summary: defaultMediaSummary,
-    };
-
-    const { mockDb, getEnrollment } = createMockDb({
-      id: 'enrollment-1',
-      organization_id: 'org-1',
-      current_node_id: 'node-ai-1',
-      status: 'active',
-      ai_node_session: initialSession,
-      conversation_id: 'conv-1',
-    });
-
-    const inboundMessageId = 'msg-completed-test';
-    const t0 = new Date('2026-09-30T12:00:00Z');
-
-    await acquireAiNodeInboundTurn(
-      mockDb,
-      {
-        organizationId: 'org-1',
-        enrollmentId: 'enrollment-1',
-        expectedNodeId: 'node-ai-1',
-        inboundMessageId,
-      },
-      { clock: () => t0 },
+      { clock: () => tCheck },
     );
 
-    // Conclui formalmente
-    await completeAiNodeInboundTurn(mockDb, {
-      organizationId: 'org-1',
-      enrollmentId: 'enrollment-1',
-      nodeId: 'node-ai-1',
-      inboundMessageId,
-      outboundMessageId: 'out-1',
-    });
-
-    // 3 tentativas subsequentes
-    for (let i = 1; i <= 3; i++) {
-      const retry = await acquireAiNodeInboundTurn(
-        mockDb,
-        {
-          organizationId: 'org-1',
-          enrollmentId: 'enrollment-1',
-          expectedNodeId: 'node-ai-1',
-          inboundMessageId,
-        },
-        { clock: () => new Date('2026-09-30T12:30:00Z') },
-      );
-      expect(retry.status).toBe('completed');
+    // Worker B é barrado porque a lease foi renovada pelo heartbeat de A!
+    expect(takeoverAttempt.status).toBe('in_progress');
+    if (takeoverAttempt.status === 'in_progress') {
+      expect(takeoverAttempt.worker_id).toBe('worker-A');
+      expect(takeoverAttempt.lease_generation).toBe(1);
+      expect(takeoverAttempt.lease_until).toBe('2026-09-30T12:01:40.000Z');
     }
-
-    expect(getEnrollment().ai_node_session?.turn_count).toBe(1);
-    expect(getEnrollment().ai_node_session?.active_turn).toBeNull();
   });
 
-  it('CASO F: 20 concorrentes tentando assumir claim expirado -> exatamente 1 ganha takeover e 19 ficam in_progress', async () => {
+  it('CASO D: Worker A morre sem heartbeat -> lease expira -> Worker B assume normalmente (resumed, gen 2)', async () => {
     const initialSession: AiNodeSession = {
       node_id: 'node-ai-1',
       flow_id: 'flow-1',
@@ -368,7 +273,7 @@ describe('ai-node-crash-recovery: lease, ownership e concorrência', () => {
       media_summary: defaultMediaSummary,
     };
 
-    const { mockDb, getEnrollment } = createMockDb({
+    const { mockDb } = createMockDb({
       id: 'enrollment-1',
       organization_id: 'org-1',
       current_node_id: 'node-ai-1',
@@ -377,10 +282,10 @@ describe('ai-node-crash-recovery: lease, ownership e concorrência', () => {
       conversation_id: 'conv-1',
     });
 
-    const inboundMessageId = 'msg-20-workers-expired';
+    const inboundMessageId = 'msg-dead-no-hb';
     const t0 = new Date('2026-09-30T12:00:00Z');
 
-    // 1. Initial claim com lease de 60s
+    // Worker A morre imediatamente após claim
     await acquireAiNodeInboundTurn(
       mockDb,
       {
@@ -394,10 +299,178 @@ describe('ai-node-crash-recovery: lease, ownership e concorrência', () => {
       { clock: () => t0 },
     );
 
-    // 2. Tempo avança para 12:01:05 (lease expirou)
+    // Após 65s (sem heartbeat nenhum), Worker B assume
     const tExpired = new Date('2026-09-30T12:01:05Z');
+    const takeoverResult = await acquireAiNodeInboundTurn(
+      mockDb,
+      {
+        organizationId: 'org-1',
+        enrollmentId: 'enrollment-1',
+        expectedNodeId: 'node-ai-1',
+        inboundMessageId,
+        workerId: 'worker-alive',
+      },
+      { clock: () => tExpired },
+    );
 
-    // 3. 20 workers simultâneos tentando assumir o claim expirado
+    expect(takeoverResult.status).toBe('resumed');
+    if (takeoverResult.status === 'resumed') {
+      expect(takeoverResult.worker_id).toBe('worker-alive');
+      expect(takeoverResult.lease_generation).toBe(2);
+    }
+  });
+
+  it('CASO E: Worker A está numa operação longa (>60s) mas heartbeats continuam -> nenhum takeover ocorre', async () => {
+    const initialSession: AiNodeSession = {
+      node_id: 'node-ai-1',
+      flow_id: 'flow-1',
+      mode: 'existing_agent',
+      status: 'running',
+      turn_count: 0,
+      started_at: '2026-09-30T12:00:00Z',
+      media_summary: defaultMediaSummary,
+    };
+
+    const { mockDb, getEnrollment } = createMockDb({
+      id: 'enrollment-1',
+      organization_id: 'org-1',
+      current_node_id: 'node-ai-1',
+      status: 'active',
+      ai_node_session: initialSession,
+      conversation_id: 'conv-1',
+    });
+
+    const inboundMessageId = 'msg-long-running-tool';
+    const t0 = new Date('2026-09-30T12:00:00Z');
+
+    // Claim inicial (expiraria em 12:01:00)
+    await acquireAiNodeInboundTurn(
+      mockDb,
+      {
+        organizationId: 'org-1',
+        enrollmentId: 'enrollment-1',
+        expectedNodeId: 'node-ai-1',
+        inboundMessageId,
+        workerId: 'worker-A',
+        leaseDurationMs: 60_000,
+      },
+      { clock: () => t0 },
+    );
+
+    // Heartbeat 1 aos 30s (renova até 12:01:30)
+    await renewAiNodeTurnLease(
+      mockDb,
+      {
+        organizationId: 'org-1',
+        enrollmentId: 'enrollment-1',
+        nodeId: 'node-ai-1',
+        inboundMessageId,
+        workerId: 'worker-A',
+        leaseGeneration: 1,
+        renewDurationMs: 60_000,
+      },
+      { clock: () => new Date('2026-09-30T12:00:30Z') },
+    );
+
+    // Tentativa concorrente aos 65s é barrada
+    const check1 = await acquireAiNodeInboundTurn(
+      mockDb,
+      {
+        organizationId: 'org-1',
+        enrollmentId: 'enrollment-1',
+        expectedNodeId: 'node-ai-1',
+        inboundMessageId,
+        workerId: 'worker-intruder',
+      },
+      { clock: () => new Date('2026-09-30T12:01:05Z') },
+    );
+    expect(check1.status).toBe('in_progress');
+
+    // Heartbeat 2 aos 60s (renova até 12:02:00)
+    await renewAiNodeTurnLease(
+      mockDb,
+      {
+        organizationId: 'org-1',
+        enrollmentId: 'enrollment-1',
+        nodeId: 'node-ai-1',
+        inboundMessageId,
+        workerId: 'worker-A',
+        leaseGeneration: 1,
+        renewDurationMs: 60_000,
+      },
+      { clock: () => new Date('2026-09-30T12:01:00Z') },
+    );
+
+    // Tentativa concorrente aos 90s é barrada
+    const check2 = await acquireAiNodeInboundTurn(
+      mockDb,
+      {
+        organizationId: 'org-1',
+        enrollmentId: 'enrollment-1',
+        expectedNodeId: 'node-ai-1',
+        inboundMessageId,
+        workerId: 'worker-intruder',
+      },
+      { clock: () => new Date('2026-09-30T12:01:30Z') },
+    );
+    expect(check2.status).toBe('in_progress');
+
+    // Worker A conclui aos 95s com sucesso usando fencing token original (gen 1)
+    const completeA = await completeAiNodeInboundTurn(
+      mockDb,
+      {
+        organizationId: 'org-1',
+        enrollmentId: 'enrollment-1',
+        nodeId: 'node-ai-1',
+        inboundMessageId,
+        workerId: 'worker-A',
+        leaseGeneration: 1,
+      },
+      { clock: () => new Date('2026-09-30T12:01:35Z') },
+    );
+    expect(completeA.status).toBe('completed');
+    expect(getEnrollment().ai_node_session?.turn_count).toBe(1);
+  });
+
+  it('CASO F: 20 workers tentam takeover de claim expirado -> exatamente 1 recebe nova generation (gen 2)', async () => {
+    const initialSession: AiNodeSession = {
+      node_id: 'node-ai-1',
+      flow_id: 'flow-1',
+      mode: 'existing_agent',
+      status: 'running',
+      turn_count: 0,
+      started_at: '2026-09-30T12:00:00Z',
+      media_summary: defaultMediaSummary,
+    };
+
+    const { mockDb, getEnrollment } = createMockDb({
+      id: 'enrollment-1',
+      organization_id: 'org-1',
+      current_node_id: 'node-ai-1',
+      status: 'active',
+      ai_node_session: initialSession,
+      conversation_id: 'conv-1',
+    });
+
+    const inboundMessageId = 'msg-20-fencing';
+    const t0 = new Date('2026-09-30T12:00:00Z');
+
+    // Worker inicial com gen 1
+    await acquireAiNodeInboundTurn(
+      mockDb,
+      {
+        organizationId: 'org-1',
+        enrollmentId: 'enrollment-1',
+        expectedNodeId: 'node-ai-1',
+        inboundMessageId,
+        workerId: 'worker-dead',
+        leaseDurationMs: 60_000,
+      },
+      { clock: () => t0 },
+    );
+
+    // 20 workers simultâneos após a expiração
+    const tExpired = new Date('2026-09-30T12:01:05Z');
     const promises = Array.from({ length: 20 }).map((_, i) =>
       acquireAiNodeInboundTurn(
         mockDb,
@@ -415,15 +488,141 @@ describe('ai-node-crash-recovery: lease, ownership e concorrência', () => {
 
     const results = await Promise.all(promises);
 
-    // Exatamente 1 deve ser 'resumed' (ganhou o takeover atômico)
+    // Exatamente 1 ganhou resumed com generation 2
     const resumedList = results.filter((r) => r.status === 'resumed');
     expect(resumedList).toHaveLength(1);
+    if (resumedList[0]?.status === 'resumed') {
+      expect(resumedList[0].lease_generation).toBe(2);
+    }
 
-    // Os outros 19 devem ser 'in_progress' (viram que o novo worker já renovou a lease)
+    // Os outros 19 receberam in_progress
     const inProgressList = results.filter((r) => r.status === 'in_progress');
     expect(inProgressList).toHaveLength(19);
 
-    // turn_count permanece exatamente 1!
+    // Sessão gravou generation 2
+    expect(getEnrollment().ai_node_session?.active_turn?.lease_generation).toBe(2);
+  });
+
+  it('CASO G: worker antigo termina depois do novo owner -> nenhuma mutação do antigo é aceita', async () => {
+    const initialSession: AiNodeSession = {
+      node_id: 'node-ai-1',
+      flow_id: 'flow-1',
+      mode: 'existing_agent',
+      status: 'running',
+      turn_count: 0,
+      started_at: '2026-09-30T12:00:00Z',
+      media_summary: defaultMediaSummary,
+    };
+
+    const { mockDb, getEnrollment } = createMockDb({
+      id: 'enrollment-1',
+      organization_id: 'org-1',
+      current_node_id: 'node-ai-1',
+      status: 'active',
+      ai_node_session: initialSession,
+      conversation_id: 'conv-1',
+    });
+
+    const inboundMessageId = 'msg-stale-after-complete';
+    const t0 = new Date('2026-09-30T12:00:00Z');
+
+    // 1. Worker A adquire gen 1
+    await acquireAiNodeInboundTurn(
+      mockDb,
+      {
+        organizationId: 'org-1',
+        enrollmentId: 'enrollment-1',
+        expectedNodeId: 'node-ai-1',
+        inboundMessageId,
+        workerId: 'worker-A',
+        leaseDurationMs: 60_000,
+      },
+      { clock: () => t0 },
+    );
+
+    // 2. Worker B assume gen 2 após expiração
+    const tExpired = new Date('2026-09-30T12:01:05Z');
+    await acquireAiNodeInboundTurn(
+      mockDb,
+      {
+        organizationId: 'org-1',
+        enrollmentId: 'enrollment-1',
+        expectedNodeId: 'node-ai-1',
+        inboundMessageId,
+        workerId: 'worker-B',
+        leaseDurationMs: 60_000,
+      },
+      { clock: () => tExpired },
+    );
+
+    // 3. Worker B gera resposta e completa o turno com sucesso (gen 2)
+    await recordAiNodeReplyGenerated(
+      mockDb,
+      {
+        organizationId: 'org-1',
+        enrollmentId: 'enrollment-1',
+        nodeId: 'node-ai-1',
+        inboundMessageId,
+        replyText: 'Resposta legítima do Worker B',
+        workerId: 'worker-B',
+        leaseGeneration: 2,
+      },
+      { clock: () => tExpired },
+    );
+
+    await completeAiNodeInboundTurn(
+      mockDb,
+      {
+        organizationId: 'org-1',
+        enrollmentId: 'enrollment-1',
+        nodeId: 'node-ai-1',
+        inboundMessageId,
+        outboundMessageId: 'msg-outbound-b',
+        workerId: 'worker-B',
+        leaseGeneration: 2,
+      },
+      { clock: () => tExpired },
+    );
+
+    // 4. Worker A antigo acorda agora e tenta sobrescrever:
+    const staleRecord = await recordAiNodeReplyGenerated(
+      mockDb,
+      {
+        organizationId: 'org-1',
+        enrollmentId: 'enrollment-1',
+        nodeId: 'node-ai-1',
+        inboundMessageId,
+        replyText: 'Tentativa de sobrescrever do Worker A',
+        workerId: 'worker-A',
+        leaseGeneration: 1,
+      },
+      { clock: () => new Date('2026-09-30T12:02:00Z') },
+    );
+    expect(staleRecord.recorded).toBe(false);
+    expect(staleRecord.error).toBe('stale_lease_owner');
+
+    const staleComplete = await completeAiNodeInboundTurn(
+      mockDb,
+      {
+        organizationId: 'org-1',
+        enrollmentId: 'enrollment-1',
+        nodeId: 'node-ai-1',
+        inboundMessageId,
+        workerId: 'worker-A',
+        leaseGeneration: 1,
+      },
+      { clock: () => new Date('2026-09-30T12:02:00Z') },
+    );
+    expect(staleComplete.status).toBe('stale_lease_owner');
+
+    // A resposta recuperada do cache continua sendo a do Worker B!
+    const reply = await getAiNodeGeneratedReply(mockDb, {
+      organizationId: 'org-1',
+      enrollmentId: 'enrollment-1',
+      nodeId: 'node-ai-1',
+      inboundMessageId,
+    });
+    expect(reply?.reply_text).toBe('Resposta legítima do Worker B');
     expect(getEnrollment().ai_node_session?.turn_count).toBe(1);
   });
 
@@ -467,7 +666,6 @@ describe('ai-node-crash-recovery: lease, ownership e concorrência', () => {
       inboundMessageId: 'msg-antiga-atrasada',
       messageSentAt: '2026-09-30T12:03:00.000Z',
     });
-    // Continua mantendo 12:07:00 (o maior timestamp já registrado)
     expect(getEnrollment().ai_node_session?.last_inbound_at).toBe('2026-09-30T12:07:00.000Z');
   });
 

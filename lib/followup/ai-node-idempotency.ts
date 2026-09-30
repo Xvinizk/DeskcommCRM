@@ -36,11 +36,12 @@ export type AcquireAiNodeTurnResult =
       session: AiNodeSession;
       lease_until: string;
       worker_id: string;
+      lease_generation: number;
     }
   | {
       /**
        * Takeover de claim expirado (crash do worker anterior após lease timeout).
-       * Este worker assumiu atomicamente a titularidade da execução.
+       * Este worker assumiu atomicamente a titularidade da execução com nova generation.
        * O retry DEVE retomar a execução SEM incrementar turn_count.
        */
       status: 'resumed';
@@ -54,6 +55,7 @@ export type AcquireAiNodeTurnResult =
       session: AiNodeSession;
       lease_until: string;
       worker_id: string;
+      lease_generation: number;
     }
   | {
       /**
@@ -67,6 +69,7 @@ export type AcquireAiNodeTurnResult =
       inbound_message_id: string;
       worker_id?: string;
       lease_until?: string;
+      lease_generation?: number;
     }
   | {
       /**
@@ -149,17 +152,19 @@ export function buildAiNodeTurnIdempotencyKey(params: {
 }
 
 /**
- * Adquire o claim de execução para um turno inbound no Node IA com lease e isolamento.
+ * Adquire o claim de execução para um turno inbound no Node IA com lease, isolamento
+ * e fencing token monotônico (lease_generation).
  *
  * Estados possíveis:
- * 1. 'acquired'   -> Claim inédito adquirido por este worker. Pode processar.
+ * 1. 'acquired'   -> Claim inédito adquirido por este worker (lease_generation: 1). Pode processar.
  * 2. 'in_progress'-> Claim ativo pertencente a outro worker (ou em voo). Não processar.
- * 3. 'resumed'    -> Claim expirou (worker crashou) e este worker assumiu takeover atômico. Pode retomar.
+ * 3. 'resumed'    -> Claim expirou e este worker assumiu takeover atômico (lease_generation: n+1). Pode retomar.
  * 4. 'completed'  -> Turno já foi completamente concluído anteriormente. No-op seguro.
  *
  * Garante:
  * - Mutex CAS via SELECT ... FOR UPDATE no enrollment.
- * - Takeover atômico transacional: 20 workers simultâneos sobre claim expirado resultam em exatamente 1 resumed.
+ * - Takeover atômico transacional com incremento de lease_generation.
+ * - Workers antigos que expiraram são fenced out (stale_lease_owner) e não conseguem mais gravar.
  * - Monotonicidade estrita de last_inbound_at.
  * - turn_count NÃO é duplicado em takeover/resumed.
  */
@@ -277,9 +282,10 @@ export async function acquireAiNodeInboundTurn(
             : claimRows[0].payload)
         : null;
 
-      const activeLeaseUntilStr = session.active_turn?.lease_until ?? claimPayload?.lease_until;
-      const activeWorkerId = session.active_turn?.worker_id ?? claimPayload?.worker_id;
-      const attempts = session.active_turn?.attempts ?? claimPayload?.attempts ?? 1;
+      const activeLeaseUntilStr = session.active_turn?.lease_until ?? (claimPayload?.lease_until as string | undefined);
+      const activeWorkerId = session.active_turn?.worker_id ?? (claimPayload?.worker_id as string | undefined);
+      const attempts = session.active_turn?.attempts ?? (claimPayload?.attempts as number | undefined) ?? 1;
+      const currentGen = session.active_turn?.lease_generation ?? (claimPayload?.lease_generation as number | undefined) ?? 1;
 
       const leaseUntilMs = activeLeaseUntilStr ? new Date(activeLeaseUntilStr).getTime() : 0;
       const nowMs = now.getTime();
@@ -295,12 +301,14 @@ export async function acquireAiNodeInboundTurn(
           inbound_message_id: input.inboundMessageId,
           worker_id: activeWorkerId,
           lease_until: activeLeaseUntilStr,
+          lease_generation: currentGen,
         };
       }
 
-      // CASO C: Claim existe mas a LEASE EXPIROU (worker anterior crashou ou abandonou)
-      // Executa TAKEOVER ATÔMICO com renovação de lease e incremento de attempts.
+      // CASO C: Claim existe mas a LEASE EXPIROU (worker anterior crashou ou demorou demais sem heartbeat)
+      // Executa TAKEOVER ATÔMICO com renovação de lease, incremento de attempts e NOVO FENCING TOKEN (lease_generation + 1).
       // turn_count NÃO é incrementado novamente!
+      const newGeneration = currentGen + 1;
       const updatedSession: AiNodeSession = {
         ...session,
         active_turn: {
@@ -309,6 +317,7 @@ export async function acquireAiNodeInboundTurn(
           claimed_at: nowIso,
           lease_until: leaseUntilIso,
           attempts: attempts + 1,
+          lease_generation: newGeneration,
         },
       };
 
@@ -327,18 +336,19 @@ export async function acquireAiNodeInboundTurn(
         [
           JSON.stringify({
             inbound_message_id: input.inboundMessageId,
-            received_at: claimPayload?.received_at ?? nowIso,
+            received_at: (claimPayload?.received_at as string | undefined) ?? nowIso,
             worker_id: workerId,
             claimed_at: nowIso,
             lease_until: leaseUntilIso,
             attempts: attempts + 1,
+            lease_generation: newGeneration,
           }),
           enrollment.id,
           claimKey,
         ],
       );
 
-      // Registra evento de auditoria de takeover
+      // Registra evento de auditoria de takeover com fencing token
       await client.query(
         `INSERT INTO followup_enrollment_events (
            organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
@@ -354,6 +364,8 @@ export async function acquireAiNodeInboundTurn(
             new_worker_id: workerId,
             previous_lease_until: activeLeaseUntilStr,
             new_lease_until: leaseUntilIso,
+            previous_generation: currentGen,
+            new_generation: newGeneration,
             takeover_at: nowIso,
             attempts: attempts + 1,
           }),
@@ -375,10 +387,12 @@ export async function acquireAiNodeInboundTurn(
         session: updatedSession,
         lease_until: leaseUntilIso,
         worker_id: workerId,
+        lease_generation: newGeneration,
       };
     }
 
-    // 4. CASO A: Mensagem inédita → Adquirir claim inicial
+    // 4. CASO A: Mensagem inédita → Adquirir claim inicial (generation = 1)
+    const initialGeneration = 1;
     const inboundEventInsert = await client.query<{ id: string }>(
       `INSERT INTO followup_enrollment_events (
          organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
@@ -397,6 +411,7 @@ export async function acquireAiNodeInboundTurn(
           claimed_at: nowIso,
           lease_until: leaseUntilIso,
           attempts: 1,
+          lease_generation: initialGeneration,
         }),
         claimKey,
         nowIso,
@@ -414,6 +429,7 @@ export async function acquireAiNodeInboundTurn(
         inbound_message_id: input.inboundMessageId,
         worker_id: workerId,
         lease_until: leaseUntilIso,
+        lease_generation: initialGeneration,
       };
     }
 
@@ -465,6 +481,7 @@ export async function acquireAiNodeInboundTurn(
         claimed_at: nowIso,
         lease_until: leaseUntilIso,
         attempts: 1,
+        lease_generation: initialGeneration,
       },
     };
 
@@ -491,6 +508,7 @@ export async function acquireAiNodeInboundTurn(
           last_inbound_at: lastInboundAt,
           worker_id: workerId,
           lease_until: leaseUntilIso,
+          lease_generation: initialGeneration,
           media_summary: updatedSession.media_summary,
         }),
         null,
@@ -512,6 +530,7 @@ export async function acquireAiNodeInboundTurn(
       session: updatedSession,
       lease_until: leaseUntilIso,
       worker_id: workerId,
+      lease_generation: initialGeneration,
     };
   } catch (err) {
     try {
@@ -525,22 +544,224 @@ export async function acquireAiNodeInboundTurn(
   }
 }
 
+export interface RenewAiNodeTurnLeaseInput {
+  organizationId: string;
+  enrollmentId: string;
+  nodeId: string;
+  inboundMessageId: string;
+  workerId: string;
+  leaseGeneration: number;
+  renewDurationMs?: number;
+}
+
+export type RenewAiNodeTurnLeaseResult =
+  | {
+      status: 'renewed';
+      lease_until: string;
+      lease_generation: number;
+      worker_id: string;
+    }
+  | {
+      status: 'stale_lease_owner';
+      current_worker_id?: string;
+      current_generation?: number;
+      reason: string;
+    }
+  | {
+      status: 'turn_completed' | 'session_not_running' | 'node_changed' | 'not_found';
+    };
+
 /**
- * Conclui formalmente o turno do Node IA.
- * Deve ser chamado ao final do turno (após resposta/outbound ou handoff).
- * Uma vez concluído, retries subsequentes recebem 'completed' (no-op seguro).
+ * Renova a lease de execução ativa do worker (heartbeat durante operações longas como MCP/Tools/LLM).
+ * Exige matching exato do worker_id e lease_generation (fencing token).
+ * Se o worker já perdeu a titularidade por takeover, falha com 'stale_lease_owner'.
  */
-export async function completeAiNodeInboundTurn(
+export async function renewAiNodeTurnLease(
+  db: DbPoolLike,
+  input: RenewAiNodeTurnLeaseInput,
+  deps: { clock?: () => Date } = {},
+): Promise<RenewAiNodeTurnLeaseResult> {
+  const clock = deps.clock ?? (() => new Date());
+  const now = clock();
+  const nowIso = now.toISOString();
+  const renewDurationMs = input.renewDurationMs ?? 60_000;
+  const newLeaseUntilIso = new Date(now.getTime() + renewDurationMs).toISOString();
+
+  const client = typeof db.connect === 'function' ? await db.connect() : db;
+  const release = 'release' in client && typeof client.release === 'function' ? () => client.release() : () => {};
+
+  try {
+    await client.query('BEGIN');
+
+    const { rows } = await client.query<{
+      id: string;
+      current_node_id: string;
+      status: string;
+      ai_node_session: AiNodeSession | null;
+    }>(
+      `SELECT id, current_node_id, status, ai_node_session
+       FROM followup_enrollments
+       WHERE organization_id = $1 AND id = $2
+       FOR UPDATE`,
+      [input.organizationId, input.enrollmentId],
+    );
+
+    const enrollment = rows[0];
+    if (!enrollment) {
+      await client.query('ROLLBACK');
+      return { status: 'not_found' };
+    }
+    if (enrollment.current_node_id !== input.nodeId) {
+      await client.query('ROLLBACK');
+      return { status: 'node_changed' };
+    }
+
+    const session = enrollment.ai_node_session;
+    if (!session || session.status !== 'running') {
+      await client.query('ROLLBACK');
+      return { status: 'session_not_running' };
+    }
+
+    const completedKey = buildAiNodeTurnCompletedKey({
+      organizationId: input.organizationId,
+      enrollmentId: enrollment.id,
+      nodeId: input.nodeId,
+      inboundMessageId: input.inboundMessageId,
+    });
+
+    const { rows: completedRows } = await client.query<{ id: string }>(
+      `SELECT id FROM followup_enrollment_events WHERE enrollment_id = $1 AND idempotency_key = $2 LIMIT 1`,
+      [enrollment.id, completedKey],
+    );
+
+    if (completedRows.length > 0) {
+      await client.query('ROLLBACK');
+      return { status: 'turn_completed' };
+    }
+
+    const activeTurn = session.active_turn;
+    const isOwnerValid =
+      activeTurn &&
+      activeTurn.inbound_message_id === input.inboundMessageId &&
+      activeTurn.worker_id === input.workerId &&
+      activeTurn.lease_generation === input.leaseGeneration;
+
+    if (!isOwnerValid) {
+      await client.query('ROLLBACK');
+      return {
+        status: 'stale_lease_owner',
+        current_worker_id: activeTurn?.worker_id,
+        current_generation: activeTurn?.lease_generation,
+        reason: 'Worker is no longer the active lease owner or generation mismatched (takeover occurred)',
+      };
+    }
+
+    const updatedSession: AiNodeSession = {
+      ...session,
+      active_turn: {
+        ...activeTurn,
+        lease_until: newLeaseUntilIso,
+      },
+    };
+
+    await client.query(
+      `UPDATE followup_enrollments SET ai_node_session = $1, updated_at = $2 WHERE organization_id = $3 AND id = $4`,
+      [JSON.stringify(updatedSession), nowIso, input.organizationId, enrollment.id],
+    );
+
+    const claimKey = buildAiNodeTurnClaimKey({
+      organizationId: input.organizationId,
+      enrollmentId: enrollment.id,
+      nodeId: input.nodeId,
+      inboundMessageId: input.inboundMessageId,
+    });
+
+    await client.query(
+      `UPDATE followup_enrollment_events SET payload = jsonb_set(payload, '{lease_until}', $1::jsonb)
+       WHERE enrollment_id = $2 AND idempotency_key = $3`,
+      [JSON.stringify(newLeaseUntilIso), enrollment.id, claimKey],
+    );
+
+    await client.query('COMMIT');
+    return {
+      status: 'renewed',
+      lease_until: newLeaseUntilIso,
+      lease_generation: input.leaseGeneration,
+      worker_id: input.workerId,
+    };
+  } catch (err) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {}
+    throw err;
+  } finally {
+    release();
+  }
+}
+
+/**
+ * Valida de forma não-bloqueante se o worker ainda é o proprietário legítimo da lease
+ * com o fencing token atual antes de acionar tools caras (MCP) ou LLM.
+ */
+export async function validateAiNodeTurnOwnership(
   db: DbPoolLike,
   input: {
     organizationId: string;
     enrollmentId: string;
     nodeId: string;
     inboundMessageId: string;
-    outboundMessageId?: string | null;
+    workerId: string;
+    leaseGeneration: number;
   },
+): Promise<{ is_valid: boolean; reason?: string }> {
+  const { rows } = await db.query<{ ai_node_session: AiNodeSession | null }>(
+    `SELECT ai_node_session FROM followup_enrollments WHERE organization_id = $1 AND id = $2`,
+    [input.organizationId, input.enrollmentId],
+  );
+  const activeTurn = rows[0]?.ai_node_session?.active_turn;
+  if (!activeTurn) {
+    return { is_valid: false, reason: 'no_active_turn' };
+  }
+  if (
+    activeTurn.inbound_message_id !== input.inboundMessageId ||
+    activeTurn.worker_id !== input.workerId ||
+    activeTurn.lease_generation !== input.leaseGeneration
+  ) {
+    return { is_valid: false, reason: 'stale_lease_owner' };
+  }
+  return { is_valid: true };
+}
+
+export interface CompleteAiNodeInboundTurnInput {
+  organizationId: string;
+  enrollmentId: string;
+  nodeId: string;
+  inboundMessageId: string;
+  outboundMessageId?: string | null;
+  /** Fencing token do worker: se fornecido, valida se o worker ainda detém a lease atual */
+  workerId?: string;
+  leaseGeneration?: number;
+}
+
+export type CompleteAiNodeTurnResult =
+  | {
+      status: 'completed';
+      event_id?: string;
+    }
+  | {
+      status: 'stale_lease_owner';
+      reason: string;
+    };
+
+/**
+ * Conclui formalmente o turno do Node IA com validação de fencing token.
+ * Um worker que perdeu a titularidade por takeover NÃO PODE marcar completed.
+ */
+export async function completeAiNodeInboundTurn(
+  db: DbPoolLike,
+  input: CompleteAiNodeInboundTurnInput,
   deps: { clock?: () => Date } = {},
-): Promise<{ status: 'completed'; event_id?: string }> {
+): Promise<CompleteAiNodeTurnResult> {
   const clock = deps.clock ?? (() => new Date());
   const nowIso = clock().toISOString();
   const completedKey = buildAiNodeTurnCompletedKey(input);
@@ -550,6 +771,32 @@ export async function completeAiNodeInboundTurn(
 
   try {
     await client.query('BEGIN');
+
+    // Fencing check: se workerId ou leaseGeneration forem fornecidos, validar ownership
+    const { rows: enrRows } = await client.query<{
+      id: string;
+      ai_node_session: AiNodeSession | null;
+    }>(
+      `SELECT id, ai_node_session FROM followup_enrollments WHERE id = $1 FOR UPDATE`,
+      [input.enrollmentId],
+    );
+
+    const activeTurn = enrRows[0]?.ai_node_session?.active_turn;
+    if (input.workerId !== undefined || input.leaseGeneration !== undefined) {
+      const isOwnerValid =
+        activeTurn &&
+        activeTurn.inbound_message_id === input.inboundMessageId &&
+        (input.workerId === undefined || activeTurn.worker_id === input.workerId) &&
+        (input.leaseGeneration === undefined || activeTurn.lease_generation === input.leaseGeneration);
+
+      if (!isOwnerValid) {
+        await client.query('ROLLBACK');
+        return {
+          status: 'stale_lease_owner',
+          reason: 'Worker is no longer active lease owner (lease expired or takeover occurred)',
+        };
+      }
+    }
 
     const { rows } = await client.query<{ id: string }>(
       `INSERT INTO followup_enrollment_events (
@@ -566,6 +813,8 @@ export async function completeAiNodeInboundTurn(
         JSON.stringify({
           inbound_message_id: input.inboundMessageId,
           outbound_message_id: input.outboundMessageId ?? null,
+          worker_id: input.workerId ?? activeTurn?.worker_id ?? null,
+          lease_generation: input.leaseGeneration ?? activeTurn?.lease_generation ?? null,
           completed_at: nowIso,
         }),
         completedKey,
@@ -573,15 +822,7 @@ export async function completeAiNodeInboundTurn(
       ],
     );
 
-    // Limpa active_turn na sessão do enrollment se ainda existir
-    const { rows: enrRows } = await client.query<{
-      id: string;
-      ai_node_session: AiNodeSession | null;
-    }>(
-      `SELECT id, ai_node_session FROM followup_enrollments WHERE id = $1 FOR UPDATE`,
-      [input.enrollmentId],
-    );
-
+    // Limpa active_turn na sessão do enrollment se ainda houver
     if (enrRows[0]?.ai_node_session?.active_turn) {
       const cleanSession: AiNodeSession = {
         ...enrRows[0].ai_node_session,
@@ -607,51 +848,93 @@ export async function completeAiNodeInboundTurn(
   }
 }
 
+export interface RecordAiNodeReplyGeneratedInput {
+  organizationId: string;
+  enrollmentId: string;
+  nodeId: string;
+  inboundMessageId: string;
+  replyText: string;
+  workerId?: string;
+  leaseGeneration?: number;
+  tokensIn?: number;
+  tokensOut?: number;
+}
+
 /**
- * Registra resposta de LLM gerada para evitar custo duplicado de modelo
- * em caso de crash pós-LLM e pré-outbound. (Preparado para Fase 3).
+ * Registra resposta de LLM gerada com validação de fencing token.
+ * Se o worker já perdeu a titularidade da lease (takeover), falha com stale_lease_owner
+ * e NÃO grava a resposta no cache.
  */
 export async function recordAiNodeReplyGenerated(
   db: DbPoolLike,
-  input: {
-    organizationId: string;
-    enrollmentId: string;
-    nodeId: string;
-    inboundMessageId: string;
-    replyText: string;
-    tokensIn?: number;
-    tokensOut?: number;
-  },
+  input: RecordAiNodeReplyGeneratedInput,
   deps: { clock?: () => Date } = {},
-): Promise<{ recorded: boolean }> {
+): Promise<{ recorded: boolean; error?: string }> {
   const clock = deps.clock ?? (() => new Date());
   const nowIso = clock().toISOString();
   const replyKey = buildAiNodeReplyKey(input);
 
-  const { rows } = await db.query<{ id: string }>(
-    `INSERT INTO followup_enrollment_events (
-       organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-     ON CONFLICT (enrollment_id, idempotency_key) DO NOTHING
-     RETURNING id`,
-    [
-      input.organizationId,
-      input.enrollmentId,
-      input.nodeId,
-      'ai_node.reply_generated',
-      JSON.stringify({
-        inbound_message_id: input.inboundMessageId,
-        reply_text: input.replyText,
-        tokens_in: input.tokensIn ?? 0,
-        tokens_out: input.tokensOut ?? 0,
-        generated_at: nowIso,
-      }),
-      replyKey,
-      nowIso,
-    ],
-  );
+  const client = typeof db.connect === 'function' ? await db.connect() : db;
+  const release = 'release' in client && typeof client.release === 'function' ? () => client.release() : () => {};
 
-  return { recorded: rows.length > 0 };
+  try {
+    await client.query('BEGIN');
+
+    // Fencing check: se workerId ou leaseGeneration forem fornecidos, validar ownership
+    if (input.workerId !== undefined || input.leaseGeneration !== undefined) {
+      const { rows: enrRows } = await client.query<{ ai_node_session: AiNodeSession | null }>(
+        `SELECT ai_node_session FROM followup_enrollments WHERE organization_id = $1 AND id = $2 FOR UPDATE`,
+        [input.organizationId, input.enrollmentId],
+      );
+
+      const activeTurn = enrRows[0]?.ai_node_session?.active_turn;
+      const isOwnerValid =
+        activeTurn &&
+        activeTurn.inbound_message_id === input.inboundMessageId &&
+        (input.workerId === undefined || activeTurn.worker_id === input.workerId) &&
+        (input.leaseGeneration === undefined || activeTurn.lease_generation === input.leaseGeneration);
+
+      if (!isOwnerValid) {
+        await client.query('ROLLBACK');
+        return { recorded: false, error: 'stale_lease_owner' };
+      }
+    }
+
+    const { rows } = await client.query<{ id: string }>(
+      `INSERT INTO followup_enrollment_events (
+         organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (enrollment_id, idempotency_key) DO NOTHING
+       RETURNING id`,
+      [
+        input.organizationId,
+        input.enrollmentId,
+        input.nodeId,
+        'ai_node.reply_generated',
+        JSON.stringify({
+          inbound_message_id: input.inboundMessageId,
+          worker_id: input.workerId ?? null,
+          lease_generation: input.leaseGeneration ?? null,
+          reply_text: input.replyText,
+          tokens_in: input.tokensIn ?? 0,
+          tokens_out: input.tokensOut ?? 0,
+          generated_at: nowIso,
+        }),
+        replyKey,
+        nowIso,
+      ],
+    );
+
+    await client.query('COMMIT');
+    return { recorded: rows.length > 0 };
+  } catch (err) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {}
+    throw err;
+  } finally {
+    release();
+  }
 }
 
 /**
@@ -698,6 +981,7 @@ export async function getAiNodeGeneratedReply(
 /**
  * Avalia se o turno já possui resposta gerada e se o outbound já foi aceito
  * pelo sendWithLedger, viabilizando recuperação idempotente total (Caso E).
+ * Suporta fencing token para rejeitar stale workers.
  */
 export async function resolveAiNodeOutboundRecovery(
   db: DbPoolLike,
@@ -706,6 +990,8 @@ export async function resolveAiNodeOutboundRecovery(
     enrollmentId: string;
     nodeId: string;
     inboundMessageId: string;
+    workerId?: string;
+    leaseGeneration?: number;
   },
   sendLedgerChecker?: () => Promise<{ status: 'accepted' | 'sent' | 'queued' | 'none' }>,
 ): Promise<{
@@ -713,7 +999,23 @@ export async function resolveAiNodeOutboundRecovery(
   shouldSendOutbound: boolean;
   cachedReply: string | null;
   completed: boolean;
+  stale?: boolean;
 }> {
+  // Fencing check: se workerId e leaseGeneration foram passados, verificar ownership
+  if (input.workerId && input.leaseGeneration) {
+    const ownership = await validateAiNodeTurnOwnership(db, {
+      organizationId: input.organizationId,
+      enrollmentId: input.enrollmentId,
+      nodeId: input.nodeId,
+      inboundMessageId: input.inboundMessageId,
+      workerId: input.workerId,
+      leaseGeneration: input.leaseGeneration,
+    });
+    if (!ownership.is_valid) {
+      return { shouldCallLlm: false, shouldSendOutbound: false, cachedReply: null, completed: false, stale: true };
+    }
+  }
+
   const cached = await getAiNodeGeneratedReply(db, input);
   if (!cached) {
     return { shouldCallLlm: true, shouldSendOutbound: true, cachedReply: null, completed: false };

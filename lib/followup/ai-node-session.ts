@@ -67,6 +67,7 @@ export const aiNodeSessionSchema = z.object({
     claimed_at: z.string(),
     lease_until: z.string(),
     attempts: z.number().int().positive().default(1),
+    lease_generation: z.number().int().positive().default(1),
   }).optional().nullable(),
   /** Motivo de encerramento do nó (quando concluído) */
   completion_reason: z.string().optional().nullable(),
