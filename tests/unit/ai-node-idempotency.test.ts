@@ -364,7 +364,27 @@ describe('ai-node-idempotency', () => {
     expect(res1.status).toBe('acquired');
     expect(getEnrollment().ai_node_session?.turn_count).toBe(1);
 
-    // Mensagem 2 (diferente)
+    // Mensagem 2 em rajada rápida enquanto Mensagem 1 ainda está em processamento (active_turn com lease válida)
+    const res2Concorrente = await acquireAiNodeInboundTurn(mockDb, {
+      organizationId: 'org-1',
+      enrollmentId: 'enrollment-1',
+      expectedNodeId: 'node-ai-main',
+      inboundMessageId: 'msg-2',
+    });
+    // Proteção contra rajada: não abre LLM concorrente nem sobrescreve active_turn
+    expect(res2Concorrente.status).toBe('in_progress');
+    expect((res2Concorrente as { active_inbound_message_id?: string }).active_inbound_message_id).toBe('msg-1');
+    expect(getEnrollment().ai_node_session?.turn_count).toBe(1);
+
+    // Mensagem 1 conclui seu turno
+    await completeAiNodeInboundTurn(mockDb, {
+      organizationId: 'org-1',
+      enrollmentId: 'enrollment-1',
+      nodeId: 'node-ai-main',
+      inboundMessageId: 'msg-1',
+    });
+
+    // Agora Mensagem 2 pode ser processada sequencialmente
     const res2 = await acquireAiNodeInboundTurn(mockDb, {
       organizationId: 'org-1',
       enrollmentId: 'enrollment-1',

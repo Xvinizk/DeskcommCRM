@@ -63,10 +63,11 @@ export type AcquireAiNodeTurnResult =
        * NÃO processar nem chamar LLM!
        */
       status: 'in_progress';
-      is_retry: true;
+      is_retry: boolean;
       enrollment_id: string;
       node_id: string;
       inbound_message_id: string;
+      active_inbound_message_id?: string;
       worker_id?: string;
       lease_until?: string;
       lease_generation?: number;
@@ -219,7 +220,7 @@ export async function acquireAiNodeInboundTurn(
     }
 
     const session = enrollment.ai_node_session;
-    if (!session || session.status !== 'running' || session.node_id !== input.expectedNodeId) {
+    if (!session || session.status !== 'running' || (session.node_id && session.node_id !== input.expectedNodeId)) {
       await client.query('ROLLBACK');
       return {
         status: 'session_not_running',
@@ -389,6 +390,33 @@ export async function acquireAiNodeInboundTurn(
         worker_id: workerId,
         lease_generation: newGeneration,
       };
+    }
+
+    // 3.1. CASO CONCORRENTE: Se outra mensagem diferente possui turno ATIVO e com lease válida,
+    // não permitir que esta nova mensagem sobrescreva o active_turn nem abra LLM concorrente.
+    // Serialização segura: uma conversa/enrollment só possui um turno conversacional de Node IA ativo por vez.
+    if (
+      session.active_turn &&
+      session.active_turn.inbound_message_id !== input.inboundMessageId
+    ) {
+      const activeLeaseUntilStr = session.active_turn.lease_until;
+      const leaseUntilMs = activeLeaseUntilStr ? new Date(activeLeaseUntilStr).getTime() : 0;
+      const nowMs = now.getTime();
+
+      if (activeLeaseUntilStr && nowMs < leaseUntilMs) {
+        await client.query('ROLLBACK');
+        return {
+          status: 'in_progress',
+          is_retry: false,
+          enrollment_id: enrollment.id,
+          node_id: input.expectedNodeId,
+          inbound_message_id: input.inboundMessageId,
+          active_inbound_message_id: session.active_turn.inbound_message_id,
+          worker_id: session.active_turn.worker_id,
+          lease_until: activeLeaseUntilStr,
+          lease_generation: session.active_turn.lease_generation,
+        };
+      }
     }
 
     // 4. CASO A: Mensagem inédita → Adquirir claim inicial (generation = 1)
@@ -775,13 +803,18 @@ export async function completeAiNodeInboundTurn(
     // Fencing check: se workerId ou leaseGeneration forem fornecidos, validar ownership
     const { rows: enrRows } = await client.query<{
       id: string;
-      ai_node_session: AiNodeSession | null;
+      ai_node_session: AiNodeSession | string | null;
     }>(
       `SELECT id, ai_node_session FROM followup_enrollments WHERE id = $1 FOR UPDATE`,
       [input.enrollmentId],
     );
 
-    const activeTurn = enrRows[0]?.ai_node_session?.active_turn;
+    const rawSession = enrRows[0]?.ai_node_session;
+    const sessionObj: AiNodeSession | null = rawSession
+      ? (typeof rawSession === 'string' ? JSON.parse(rawSession) : rawSession)
+      : null;
+
+    const activeTurn = sessionObj?.active_turn;
     if (input.workerId !== undefined || input.leaseGeneration !== undefined) {
       const isOwnerValid =
         activeTurn &&
@@ -823,9 +856,9 @@ export async function completeAiNodeInboundTurn(
     );
 
     // Limpa active_turn na sessão do enrollment se ainda houver
-    if (enrRows[0]?.ai_node_session?.active_turn) {
+    if (sessionObj?.active_turn) {
       const cleanSession: AiNodeSession = {
-        ...enrRows[0].ai_node_session,
+        ...sessionObj,
         active_turn: null,
       };
       await client.query(
@@ -848,12 +881,37 @@ export async function completeAiNodeInboundTurn(
   }
 }
 
+export interface AiNodeStructuredReply {
+  reply: string;
+  reply_text: string;
+  node_status: 'continue' | 'completed' | 'handoff';
+  outcome: string | null;
+  extracted_data: Record<string, unknown>;
+  agent_id?: string | null;
+  agent_version_id?: string | null;
+  provider?: string | null;
+  model?: string | null;
+  tokens_in?: number;
+  tokens_out?: number;
+  generated_at?: string;
+}
+
 export interface RecordAiNodeReplyGeneratedInput {
   organizationId: string;
   enrollmentId: string;
   nodeId: string;
   inboundMessageId: string;
-  replyText: string;
+  replyText?: string;
+  structuredOutput?: {
+    reply: string;
+    node_status: 'continue' | 'completed' | 'handoff';
+    outcome: string | null;
+    extracted_data: Record<string, unknown>;
+  };
+  agentId?: string | null;
+  agentVersionId?: string | null;
+  provider?: string | null;
+  model?: string | null;
   workerId?: string;
   leaseGeneration?: number;
   tokensIn?: number;
@@ -861,7 +919,98 @@ export interface RecordAiNodeReplyGeneratedInput {
 }
 
 /**
- * Registra resposta de LLM gerada com validação de fencing token.
+ * Constrói a chave canônica para confirmação de envio WhatsApp (outbound aceito).
+ */
+export function buildAiNodeReplySentKey(params: {
+  organizationId: string;
+  enrollmentId: string;
+  nodeId: string;
+  inboundMessageId: string;
+}): string {
+  return `ai_node_sent:${params.organizationId}:${params.enrollmentId}:${params.nodeId}:${params.inboundMessageId}`;
+}
+
+/**
+ * Registra envio de resposta para o WhatsApp com idempotência.
+ */
+export async function recordAiNodeReplySent(
+  db: DbPoolLike,
+  input: {
+    organizationId: string;
+    enrollmentId: string;
+    nodeId: string;
+    inboundMessageId: string;
+    crmMessageId?: string | null;
+    idempotencyKey?: string;
+    workerId?: string;
+    leaseGeneration?: number;
+  },
+  deps: { clock?: () => Date } = {},
+): Promise<{ recorded: boolean }> {
+  const clock = deps.clock ?? (() => new Date());
+  const nowIso = clock().toISOString();
+  const sentKey = buildAiNodeReplySentKey(input);
+
+  const client = typeof db.connect === 'function' ? await db.connect() : db;
+  const release = 'release' in client && typeof client.release === 'function' ? () => client.release() : () => {};
+
+  try {
+    const { rows } = await client.query<{ id: string }>(
+      `INSERT INTO followup_enrollment_events (
+         organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (enrollment_id, idempotency_key) DO NOTHING
+       RETURNING id`,
+      [
+        input.organizationId,
+        input.enrollmentId,
+        input.nodeId,
+        'ai_node.reply_sent',
+        JSON.stringify({
+          inbound_message_id: input.inboundMessageId,
+          crm_message_id: input.crmMessageId ?? null,
+          worker_id: input.workerId ?? null,
+          lease_generation: input.leaseGeneration ?? null,
+          sent_at: nowIso,
+        }),
+        sentKey,
+        nowIso,
+      ],
+    );
+    return { recorded: rows.length > 0 };
+  } finally {
+    release();
+  }
+}
+
+/**
+ * Checa se o envio da resposta para este inbound já foi registrado.
+ */
+export async function isAiNodeReplyAlreadySent(
+  db: DbPoolLike,
+  input: {
+    organizationId: string;
+    enrollmentId: string;
+    nodeId: string;
+    inboundMessageId: string;
+  },
+): Promise<{ alreadySent: boolean; crmMessageId?: string | null }> {
+  const sentKey = buildAiNodeReplySentKey(input);
+  const { rows } = await db.query<{ payload: Record<string, unknown> | string | null }>(
+    `SELECT payload FROM followup_enrollment_events
+     WHERE enrollment_id = $1 AND idempotency_key = $2
+     LIMIT 1`,
+    [input.enrollmentId, sentKey],
+  );
+  if (!rows[0]?.payload) return { alreadySent: false };
+  const p = (typeof rows[0].payload === 'string'
+    ? JSON.parse(rows[0].payload)
+    : rows[0].payload) as { crm_message_id?: string | null };
+  return { alreadySent: true, crmMessageId: p.crm_message_id ?? null };
+}
+
+/**
+ * Registra resposta de LLM gerada (Structured Output completo) com validação de fencing token.
  * Se o worker já perdeu a titularidade da lease (takeover), falha com stale_lease_owner
  * e NÃO grava a resposta no cache.
  */
@@ -900,6 +1049,11 @@ export async function recordAiNodeReplyGenerated(
       }
     }
 
+    const reply = input.structuredOutput?.reply ?? input.replyText ?? '';
+    const nodeStatus = input.structuredOutput?.node_status ?? 'continue';
+    const outcome = input.structuredOutput?.outcome ?? null;
+    const extractedData = input.structuredOutput?.extracted_data ?? {};
+
     const { rows } = await client.query<{ id: string }>(
       `INSERT INTO followup_enrollment_events (
          organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
@@ -915,7 +1069,15 @@ export async function recordAiNodeReplyGenerated(
           inbound_message_id: input.inboundMessageId,
           worker_id: input.workerId ?? null,
           lease_generation: input.leaseGeneration ?? null,
-          reply_text: input.replyText,
+          reply_text: reply,
+          reply,
+          node_status: nodeStatus,
+          outcome,
+          extracted_data: extractedData,
+          agent_id: input.agentId ?? null,
+          agent_version_id: input.agentVersionId ?? null,
+          provider: input.provider ?? null,
+          model: input.model ?? null,
           tokens_in: input.tokensIn ?? 0,
           tokens_out: input.tokensOut ?? 0,
           generated_at: nowIso,
@@ -938,7 +1100,7 @@ export async function recordAiNodeReplyGenerated(
 }
 
 /**
- * Recupera resposta gerada previamente por LLM no reply cache.
+ * Recupera resposta gerada previamente por LLM no reply cache (formato estruturado completo).
  */
 export async function getAiNodeGeneratedReply(
   db: DbPoolLike,
@@ -948,12 +1110,7 @@ export async function getAiNodeGeneratedReply(
     nodeId: string;
     inboundMessageId: string;
   },
-): Promise<{
-  reply_text: string;
-  tokens_in?: number;
-  tokens_out?: number;
-  generated_at?: string;
-} | null> {
+): Promise<AiNodeStructuredReply | null> {
   const replyKey = buildAiNodeReplyKey(input);
   const { rows } = await db.query<{ payload: Record<string, unknown> | string | null }>(
     `SELECT payload FROM followup_enrollment_events
@@ -965,13 +1122,30 @@ export async function getAiNodeGeneratedReply(
   const p = (typeof rows[0].payload === 'string'
     ? JSON.parse(rows[0].payload)
     : rows[0].payload) as {
-    reply_text: string;
+    reply_text?: string;
+    reply?: string;
+    node_status?: 'continue' | 'completed' | 'handoff';
+    outcome?: string | null;
+    extracted_data?: Record<string, unknown>;
+    agent_id?: string | null;
+    agent_version_id?: string | null;
+    provider?: string | null;
+    model?: string | null;
     tokens_in?: number;
     tokens_out?: number;
     generated_at?: string;
   };
+  const reply = p.reply ?? p.reply_text ?? '';
   return {
-    reply_text: p.reply_text,
+    reply,
+    reply_text: p.reply_text ?? reply,
+    node_status: p.node_status ?? 'continue',
+    outcome: p.outcome ?? null,
+    extracted_data: p.extracted_data ?? {},
+    agent_id: p.agent_id ?? null,
+    agent_version_id: p.agent_version_id ?? null,
+    provider: p.provider ?? null,
+    model: p.model ?? null,
     tokens_in: p.tokens_in,
     tokens_out: p.tokens_out,
     generated_at: p.generated_at,

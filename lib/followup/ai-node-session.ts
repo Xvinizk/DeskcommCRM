@@ -69,6 +69,8 @@ export const aiNodeSessionSchema = z.object({
     attempts: z.number().int().positive().default(1),
     lease_generation: z.number().int().positive().default(1),
   }).optional().nullable(),
+  /** Dados estruturados extraídos pela IA durante a execução do nó */
+  extracted_data: z.record(z.string(), z.unknown()).optional().nullable(),
   /** Motivo de encerramento do nó (quando concluído) */
   completion_reason: z.string().optional().nullable(),
 });

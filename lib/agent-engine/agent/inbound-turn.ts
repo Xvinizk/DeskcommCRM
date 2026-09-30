@@ -132,7 +132,7 @@ import { avisarJanelaFechada, resolverAvisoDeJanela } from '../pacing/aviso-de-j
 import { resolveConversationTurn, type TurnAgentResolution } from './resolve-turn-agent';
 import { resolveTurnAuthority } from './turn-authority';
 import { acquireAiNodeInboundTurn } from '@/lib/followup/ai-node-idempotency';
-import { executeAiNodeTurn } from '@/lib/followup/ai-node-executor';
+import { executeAiNodeLifecycle } from '@/lib/followup/ai-node-lifecycle';
 import {
   hasOpenCaseForContact,
   getCaseAwaitingLead,
@@ -4403,7 +4403,7 @@ export function createInboundTurnHandler(deps: InboundTurnDeps) {
           inboundMessageId: payload.inbound_message_id,
         });
 
-        const turnExecResult = await executeAiNodeTurn(
+        const lifecycleResult = await executeAiNodeLifecycle(
           pool,
           {
             organizationId: job.organization_id,
@@ -4425,13 +4425,15 @@ export function createInboundTurnHandler(deps: InboundTurnDeps) {
           },
         );
 
-        deps.log.info('execução do Node IA finalizada (Fase 3)', {
+        deps.log.info('ciclo de vida do Node IA finalizado (Fase 4)', {
           job_id: job.id,
           enrollment_id: authorityResult.enrollment_id,
           node_id: authorityResult.node_id,
-          exec_status: turnExecResult.status,
-          deterministic_match: turnExecResult.deterministic_match,
-          reply_cached: turnExecResult.cached,
+          lifecycle_status: lifecycleResult.status,
+          outbound_status: lifecycleResult.outboundStatus,
+          llm_status: lifecycleResult.llmStatus,
+          transition_status: lifecycleResult.transitionStatus,
+          next_node_id: lifecycleResult.nextNodeId,
         });
       }
 

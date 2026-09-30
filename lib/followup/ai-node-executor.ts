@@ -25,10 +25,9 @@ import {
   runModelCall,
   type RunModelCallInput,
 } from '@/lib/agent-engine/edge/llm/run-model-call';
-import {
+import type {
   getLeadContext,
-  type LeadContextKnobs,
-  type LeadContextResult,
+  LeadContextResult,
 } from '@/lib/agent-engine/edge/crm/get-lead-context';
 import type { CrmEdgeConfig } from '@/lib/agent-engine/edge/crm/mcp-client';
 import type { LlmEdgeConfig } from '@/lib/agent-engine/edge/llm/credentials';
@@ -53,6 +52,11 @@ import {
   type AiNodeDeterministicConditions,
 } from './graph-schema';
 import { filterAiNodeSafeTools } from './ai-node-tools';
+import {
+  parseAiNodeStructuredOutput,
+  buildAiNodeStructuredOutputDirective,
+  type AiNodeStructuredOutput,
+} from './ai-node-structured-output';
 
 export const DEFAULT_PLATFORM_COMPLIANCE =
   'Diretriz de Compliance da Plataforma: Seja sempre cortês, profissional e respeite a privacidade dos dados do cliente (LGPD). Nunca invente fatos não confirmados pelo sistema.';
@@ -82,6 +86,7 @@ export interface ExecuteAiNodeTurnResult {
     | 'stale_lease_owner'
     | 'error';
   reply?: string;
+  structuredOutput?: AiNodeStructuredOutput;
   agent_id?: string;
   agent_version_id?: string;
   provider?: string;
@@ -107,6 +112,7 @@ export interface ExecuteAiNodeTurnDeps {
   llmCfg?: LlmEdgeConfig;
   registry?: ProviderRegistry;
   platformCompliance?: string;
+  structuredOutputRequired?: boolean;
 }
 
 /**
@@ -260,6 +266,7 @@ export function composeAiNodeSystemPrompt(params: {
   customPrompt?: string;
   completionCondition?: string;
   systemFacts?: string;
+  structuredOutputDirective?: string;
 }): string {
   const parts: string[] = [];
 
@@ -302,6 +309,12 @@ export function composeAiNodeSystemPrompt(params: {
   const facts = (params.systemFacts ?? '').trim();
   if (facts) {
     parts.push(`## Fatos do Sistema\n${facts}`);
+  }
+
+  // Camada 7: Diretriz de formato estruturado (JSON)
+  const structured = (params.structuredOutputDirective ?? '').trim();
+  if (structured) {
+    parts.push(`## Formato Obrigatório de Saída\n${structured}`);
   }
 
   return parts.join('\n\n');
@@ -452,12 +465,22 @@ export async function executeAiNodeTurn(
   });
 
   if (cachedReply) {
+    const replyStr = cachedReply.reply ?? cachedReply.reply_text;
+    const structured: AiNodeStructuredOutput = {
+      reply: replyStr,
+      node_status: cachedReply.node_status ?? 'continue',
+      outcome: cachedReply.outcome ?? null,
+      extracted_data: cachedReply.extracted_data ?? {},
+    };
     return {
       status: 'generated',
-      reply: cachedReply.reply_text,
+      reply: replyStr,
+      structuredOutput: structured,
       cached: true,
       agent_id: session.agent_id ?? undefined,
       agent_version_id: session.agent_version_id ?? undefined,
+      provider: cachedReply.provider ?? undefined,
+      model: cachedReply.model ?? undefined,
     };
   }
 
@@ -619,6 +642,7 @@ export async function executeAiNodeTurn(
     customPrompt: nodeConfig.custom_prompt,
     completionCondition: nodeConfig.completion_condition,
     systemFacts,
+    structuredOutputDirective: buildAiNodeStructuredOutputDirective(),
   });
 
   // 8. HISTÓRICO DA CONVERSA
@@ -777,13 +801,39 @@ export async function executeAiNodeTurn(
     };
   }
 
+  // 10.1. Parser e validação do Structured Output
+  let structuredOutput: AiNodeStructuredOutput;
+  const parsedStructured = parseAiNodeStructuredOutput(generatedText);
+  if (parsedStructured.ok) {
+    structuredOutput = parsedStructured.data;
+  } else {
+    if (deps.structuredOutputRequired) {
+      return {
+        status: 'error',
+        reason: `structured_output_validation_failed: ${parsedStructured.error}`,
+      };
+    }
+    // Fallback de compatibilidade retroativa para chamadores da Fase 3
+    structuredOutput = {
+      reply: generatedText,
+      node_status: 'continue',
+      outcome: null,
+      extracted_data: {},
+    };
+  }
+
   // 11. RECORD REPLY GENERATED: Gravar no reply cache com fencing token
   const recordRes = await recordReply(db, {
     organizationId: input.organizationId,
     enrollmentId: input.enrollmentId,
     nodeId: input.nodeId,
     inboundMessageId: input.inboundMessageId,
-    replyText: generatedText,
+    replyText: structuredOutput.reply,
+    structuredOutput,
+    agentId: agentConfig?.agentId,
+    agentVersionId: agentConfig?.versionId,
+    provider: modelResult.provider,
+    model: modelResult.model,
     workerId: input.workerId,
     leaseGeneration: input.leaseGeneration,
     tokensIn: modelResult.usage.inputTokens,
@@ -797,10 +847,11 @@ export async function executeAiNodeTurn(
     };
   }
 
-  // 12. RETORNO DE SUCESSO (ZERO envio WhatsApp nesta Fase 3)
+  // 12. RETORNO DE SUCESSO
   return {
     status: 'generated',
-    reply: generatedText,
+    reply: structuredOutput.reply,
+    structuredOutput,
     agent_id: agentConfig?.agentId,
     agent_version_id: agentConfig?.versionId,
     provider: modelResult.provider,
