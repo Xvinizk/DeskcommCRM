@@ -9,10 +9,6 @@ import {
 } from '@/lib/followup/ai-node-idempotency';
 import type { AiNodeSession } from '@/lib/followup/ai-node-session';
 
-/**
- * Cria um mock de banco simulando o comportamento transacional do PostgreSQL,
- * incluindo lock CAS e constraint UNIQUE em (enrollment_id, idempotency_key).
- */
 export function createMockDb(initialEnrollment: {
   id: string;
   organization_id: string;
@@ -28,76 +24,155 @@ export function createMockDb(initialEnrollment: {
     node_id: string;
     event_type: string;
     payload: unknown;
-    idempotency_key: string;
+    idempotency_key: string | null;
+    created_at?: string;
   }> = [];
 
-  const mockDb: DbPoolLike = {
-    async query<T = unknown>(sql: string, params: unknown[] = []): Promise<{ rows: T[] }> {
-      const normalizedSql = sql.trim().replace(/\s+/g, ' ');
+  let lockChain = Promise.resolve();
 
-      if (normalizedSql.startsWith('BEGIN') || normalizedSql.startsWith('COMMIT') || normalizedSql.startsWith('ROLLBACK')) {
-        return { rows: [] };
-      }
+  function createClient() {
+    let acquiredLock = false;
+    let releaseFn: () => void = () => {};
 
-      if (normalizedSql.includes('FROM followup_enrollments') && normalizedSql.includes('FOR UPDATE')) {
-        const [orgId, enrollmentId] = params;
-        if (enrollment.organization_id === orgId && enrollment.id === enrollmentId) {
-          return {
-            rows: [
-              {
-                id: enrollment.id,
-                current_node_id: enrollment.current_node_id,
-                status: enrollment.status,
-                ai_node_session: enrollment.ai_node_session,
-                conversation_id: enrollment.conversation_id,
-              } as T,
-            ],
-          };
+    return {
+      async query<T = unknown>(sql: string, params: unknown[] = []): Promise<{ rows: T[] }> {
+        const normalizedSql = sql.trim().replace(/\s+/g, ' ');
+
+        if (normalizedSql.includes('FOR UPDATE') && !acquiredLock) {
+          let resolver: () => void;
+          const currentLock = new Promise<void>((r) => {
+            resolver = r;
+          });
+          const prevLock = lockChain;
+          lockChain = prevLock.then(() => currentLock);
+          await prevLock;
+          acquiredLock = true;
+          releaseFn = resolver!;
         }
-        return { rows: [] };
-      }
 
-      if (normalizedSql.includes('FROM followup_enrollment_events') && normalizedSql.includes('SELECT id')) {
-        const [enrollmentId, idemKey] = params;
-        const found = events.find((e) => e.enrollment_id === enrollmentId && e.idempotency_key === idemKey);
-        return { rows: found ? [{ id: 'event-uuid' } as T] : [] };
-      }
-
-      if (normalizedSql.includes('INSERT INTO followup_enrollment_events')) {
-        const [orgId, enrollmentId, nodeId, eventType, payloadStr, idemKey] = params;
-        const key = idemKey as string;
-
-        const existingIdx = events.findIndex((e) => e.enrollment_id === enrollmentId && e.idempotency_key === key);
-        if (existingIdx >= 0) {
-          if (normalizedSql.includes('DO UPDATE')) {
-            events[existingIdx]!.payload = JSON.parse(payloadStr as string);
-            return { rows: [{ id: 'event-uuid-' + existingIdx } as T] };
+        if (normalizedSql.startsWith('COMMIT') || normalizedSql.startsWith('ROLLBACK')) {
+          if (acquiredLock) {
+            acquiredLock = false;
+            releaseFn();
           }
-          // ON CONFLICT DO NOTHING
           return { rows: [] };
         }
 
-        const newEvent = {
-          organization_id: orgId as string,
-          enrollment_id: enrollmentId as string,
-          node_id: nodeId as string,
-          event_type: eventType as string,
-          payload: JSON.parse(payloadStr as string),
-          idempotency_key: key,
-        };
-        events.push(newEvent);
-        return { rows: [{ id: 'event-uuid-' + events.length } as T] };
-      }
-
-      if (normalizedSql.includes('UPDATE followup_enrollments SET ai_node_session')) {
-        const [sessionJson, _updatedAt, orgId, enrollmentId] = params;
-        if (enrollment.organization_id === orgId && enrollment.id === enrollmentId) {
-          enrollment.ai_node_session = JSON.parse(sessionJson as string);
+        if (normalizedSql.includes('FROM followup_enrollments') && (normalizedSql.includes('WHERE id = $1') || normalizedSql.includes('WHERE organization_id = $1 AND id = $2'))) {
+          const orgId = params.length === 2 ? (params[0] as string) : enrollment.organization_id;
+          const enrollmentId = params.length === 2 ? (params[1] as string) : (params[0] as string);
+          if (enrollment.organization_id === orgId && enrollment.id === enrollmentId) {
+            return {
+              rows: [
+                {
+                  id: enrollment.id,
+                  current_node_id: enrollment.current_node_id,
+                  status: enrollment.status,
+                  ai_node_session: enrollment.ai_node_session,
+                  conversation_id: enrollment.conversation_id,
+                } as T,
+              ],
+            };
+          }
+          return { rows: [] };
         }
-        return { rows: [] };
-      }
 
-      return { rows: [] };
+        if (normalizedSql.includes('FROM followup_enrollment_events') && normalizedSql.includes('SELECT id')) {
+          const [enrollmentId, idemKey] = params;
+          const found = events.find((e) => e.enrollment_id === enrollmentId && e.idempotency_key === idemKey);
+          return {
+            rows: found
+              ? [
+                  {
+                    id: 'event-uuid',
+                    payload: found.payload,
+                    created_at: found.created_at ?? new Date().toISOString(),
+                  } as T,
+                ]
+              : [],
+          };
+        }
+
+        if (normalizedSql.includes('FROM followup_enrollment_events') && normalizedSql.includes('SELECT payload')) {
+          const [enrollmentId, idemKey] = params;
+          const found = events.find((e) => e.enrollment_id === enrollmentId && e.idempotency_key === idemKey);
+          return {
+            rows: found ? [{ payload: found.payload } as T] : [],
+          };
+        }
+
+        if (normalizedSql.includes('UPDATE followup_enrollment_events SET payload')) {
+          const [payloadStr, enrollmentId, idemKey] = params;
+          const existingIdx = events.findIndex(
+            (e) => e.enrollment_id === enrollmentId && e.idempotency_key === idemKey,
+          );
+          if (existingIdx >= 0) {
+            events[existingIdx]!.payload = JSON.parse(payloadStr as string);
+          }
+          return { rows: [] };
+        }
+
+        if (normalizedSql.includes('INSERT INTO followup_enrollment_events')) {
+          const [orgId, enrollmentId, nodeId, eventType, payloadStr, idemKey, createdAt] = params;
+          const key = idemKey as string | null;
+
+          if (key) {
+            const existingIdx = events.findIndex((e) => e.enrollment_id === enrollmentId && e.idempotency_key === key);
+            if (existingIdx >= 0) {
+              if (normalizedSql.includes('DO UPDATE')) {
+                events[existingIdx]!.payload = JSON.parse(payloadStr as string);
+                return { rows: [{ id: 'event-uuid-' + existingIdx } as T] };
+              }
+              // ON CONFLICT DO NOTHING
+              return { rows: [] };
+            }
+          }
+
+          const newEvent = {
+            organization_id: orgId as string,
+            enrollment_id: enrollmentId as string,
+            node_id: nodeId as string,
+            event_type: eventType as string,
+            payload: JSON.parse(payloadStr as string),
+            idempotency_key: key,
+            created_at: (createdAt as string) ?? new Date().toISOString(),
+          };
+          events.push(newEvent);
+          return { rows: [{ id: 'event-uuid-' + events.length } as T] };
+        }
+
+        if (normalizedSql.includes('UPDATE followup_enrollments SET ai_node_session')) {
+          const [sessionJson, _updatedAt, orgId, enrollmentId] = params;
+          if (enrollment.organization_id === orgId && enrollment.id === enrollmentId) {
+            enrollment.ai_node_session = JSON.parse(sessionJson as string);
+          } else if (params.length === 3 && enrollment.id === params[2]) {
+            enrollment.ai_node_session = JSON.parse(sessionJson as string);
+          }
+          return { rows: [] };
+        }
+
+        return { rows: [] };
+      },
+      release() {
+        if (acquiredLock) {
+          acquiredLock = false;
+          releaseFn();
+        }
+      },
+    };
+  }
+
+  const mockDb: DbPoolLike = {
+    async connect() {
+      return createClient();
+    },
+    async query<T = unknown>(sql: string, params: unknown[] = []): Promise<{ rows: T[] }> {
+      const client = createClient();
+      try {
+        return await client.query<T>(sql, params);
+      } finally {
+        client.release();
+      }
     },
   };
 
@@ -134,7 +209,7 @@ describe('ai-node-idempotency', () => {
     })).toBe(claimKey);
   });
 
-  it('mesmo inbound_message_id em crash/retry retoma (resumed) sem duplicar turn_count', async () => {
+  it('lifecycle de claim com lease: acquired -> in_progress (dentro da lease) -> resumed (takeover pós-expiração) -> completed', async () => {
     const initialSession: AiNodeSession = {
       node_id: 'node-ai-main',
       flow_id: 'flow-123',
@@ -167,34 +242,50 @@ describe('ai-node-idempotency', () => {
       expectedNodeId: 'node-ai-main',
       inboundMessageId: fixedMessageId,
       messageSentAt: '2026-09-30T10:05:00Z',
+      leaseDurationMs: 60_000,
     };
 
-    // 1ª execução: claim inédito
-    const result1 = await acquireAiNodeInboundTurn(mockDb, input);
+    // 1ª execução em t0 = 10:05:00 (claim inédito)
+    let currentTime = new Date('2026-09-30T10:05:00Z');
+    const result1 = await acquireAiNodeInboundTurn(mockDb, input, { clock: () => currentTime });
     expect(result1.status).toBe('acquired');
     if (result1.status === 'acquired') {
       expect(result1.is_retry).toBe(false);
       expect(result1.turn_count).toBe(1);
       expect(result1.session.turn_count).toBe(1);
       expect(result1.session.last_inbound_at).toBe('2026-09-30T10:05:00.000Z');
+      expect(result1.lease_until).toBe('2026-09-30T10:06:00.000Z');
     }
 
     expect(getEnrollment().ai_node_session?.turn_count).toBe(1);
     expect(getEvents().filter((e) => e.event_type === 'ai_node.inbound_received')).toHaveLength(1);
 
-    // 2ª a 5ª execuções enquanto NÃO concluído (retries pós-crash):
-    // Deve retornar 'resumed' e permitir a continuação sem re-incrementar turn_count!
-    for (let i = 2; i <= 5; i++) {
-      const retryResult = await acquireAiNodeInboundTurn(mockDb, input);
-      expect(retryResult.status).toBe('resumed');
-      if (retryResult.status === 'resumed') {
-        expect(retryResult.is_retry).toBe(true);
-        expect(retryResult.turn_count).toBe(1);
-        expect(retryResult.inbound_message_id).toBe(fixedMessageId);
-      }
+    // 2ª execução em t0 + 10s = 10:05:10 (dentro da lease de 60s, worker anterior ainda trabalhando):
+    // Deve retornar 'in_progress' para impedir que worker concorrente chame LLM!
+    currentTime = new Date('2026-09-30T10:05:10Z');
+    const retryInProgress = await acquireAiNodeInboundTurn(mockDb, input, { clock: () => currentTime });
+    expect(retryInProgress.status).toBe('in_progress');
+    if (retryInProgress.status === 'in_progress') {
+      expect(retryInProgress.is_retry).toBe(true);
+      expect(retryInProgress.lease_until).toBe('2026-09-30T10:06:00.000Z');
     }
 
     // turn_count permanece exatamente 1!
+    expect(getEnrollment().ai_node_session?.turn_count).toBe(1);
+
+    // 3ª execução em t0 + 70s = 10:06:10 (lease expirou, worker anterior crashou):
+    // Deve realizar TAKEOVER ATÔMICO com status 'resumed' SEM incrementar turn_count!
+    currentTime = new Date('2026-09-30T10:06:10Z');
+    const retryResumed = await acquireAiNodeInboundTurn(mockDb, { ...input, workerId: 'worker-takeover' }, { clock: () => currentTime });
+    expect(retryResumed.status).toBe('resumed');
+    if (retryResumed.status === 'resumed') {
+      expect(retryResumed.is_retry).toBe(true);
+      expect(retryResumed.turn_count).toBe(1);
+      expect(retryResumed.worker_id).toBe('worker-takeover');
+      expect(retryResumed.lease_until).toBe('2026-09-30T10:07:10.000Z');
+    }
+
+    // turn_count permanece 1!
     expect(getEnrollment().ai_node_session?.turn_count).toBe(1);
 
     // Agora o turno conclui formalmente (resposta enviada no WhatsApp):
@@ -207,7 +298,8 @@ describe('ai-node-idempotency', () => {
     });
 
     // Tentativas após a conclusão devem retornar 'completed' (no-op seguro):
-    const postCompleteResult = await acquireAiNodeInboundTurn(mockDb, input);
+    currentTime = new Date('2026-09-30T10:10:00Z');
+    const postCompleteResult = await acquireAiNodeInboundTurn(mockDb, input, { clock: () => currentTime });
     expect(postCompleteResult.status).toBe('completed');
     if (postCompleteResult.status === 'completed') {
       expect(postCompleteResult.is_retry).toBe(true);

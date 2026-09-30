@@ -4385,6 +4385,7 @@ export function createInboundTurnHandler(deps: InboundTurnDeps) {
         expectedNodeId: authorityResult.node_id,
         inboundMessageId: payload.inbound_message_id,
         conversationId: payload.conversation_id,
+        workerId: job.locked_by ?? undefined,
       });
 
       deps.log.info('inbound consumido pelo Node IA (Fase 2: ownership e idempotência)', {

@@ -60,8 +60,18 @@ export const aiNodeSessionSchema = z.object({
     documents_count: 0,
     last_media_ids: [],
   }),
+  /** Turno ativo em processamento com lease de execução para isolamento de worker */
+  active_turn: z.object({
+    inbound_message_id: z.string(),
+    worker_id: z.string(),
+    claimed_at: z.string(),
+    lease_until: z.string(),
+    attempts: z.number().int().positive().default(1),
+  }).optional().nullable(),
   /** Motivo de encerramento do nó (quando concluído) */
   completion_reason: z.string().optional().nullable(),
 });
 
+export type AiNodeActiveTurn = NonNullable<z.infer<typeof aiNodeSessionSchema>['active_turn']>;
 export type AiNodeSession = z.infer<typeof aiNodeSessionSchema>;
+
