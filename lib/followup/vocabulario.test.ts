@@ -30,6 +30,8 @@ import {
   RESERVED_BRANCH_IDS,
   actionConfigSchema,
   aiClassifyConfigSchema,
+  aiNodeModeSchema,
+  aiNodeVersionStrategySchema,
   conditionConfigSchema,
   endConfigSchema,
   waitConfigSchema,
@@ -103,6 +105,8 @@ const MODOS_DE_ESPERA_NO_SCHEMA = discriminantes(waitConfigSchema, "mode");
 const MODOS_DA_ACAO_NO_SCHEMA = discriminantes(actionConfigSchema, "mode");
 const GATILHOS_NO_SCHEMA = discriminantes(triggerConfigSchema, "kind");
 const RAMIFICACAO_NO_SCHEMA = valoresDoEnum(zod(conditionConfigSchema).shape.branching);
+const MODOS_NODE_IA_NO_SCHEMA = valoresDoEnum(aiNodeModeSchema);
+const ESTRATEGIAS_VERSAO_NODE_IA_NO_SCHEMA = valoresDoEnum(aiNodeVersionStrategySchema);
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
 // ─── derivação: uniões de tipo puro em node-handlers.ts ──────────────────
@@ -195,6 +199,8 @@ describe("o instrumento está vivo", () => {
       GATILHOS_NO_SCHEMA,
       SITUACOES_NO_TIPO,
       DESFECHOS_NO_TIPO,
+      MODOS_NODE_IA_NO_SCHEMA,
+      ESTRATEGIAS_VERSAO_NODE_IA_NO_SCHEMA,
     };
     for (const [nome, valores] of Object.entries(derivacoes)) {
       expect(valores.length, `${nome} veio vazio — extrator quebrado, não vocabulário completo`).toBeGreaterThan(0);
@@ -269,9 +275,22 @@ describe("vocabulário NOVO não entra escondido", () => {
    * pergunta é outra — existe algum `z.enum` no grafo que nenhum mapa do
    * dicionário cobre? — e ela não depende de eu lembrar da lista.
    */
+  /**
+   * Valores técnicos de wire/persistência do Nó IA (Flow Builder v2 - Fase 1).
+   * Identificadores de modo de execução (`existing_agent`, `custom_prompt`,
+   * `existing_with_supplementary`) e estratégia de versão (`published`, `pinned`)
+   * salvos na AST do grafo. A UI os renderiza com cards explicativos e textos
+   * ricos via i18n (`AiNodeForm.tsx`), não por mapeamento de string simples.
+   */
+  const ENUMS_TECNICOS_NODE_IA: Array<Record<string, unknown>> = [
+    Object.fromEntries(MODOS_NODE_IA_NO_SCHEMA.map((m) => [m, true])),
+    Object.fromEntries(ESTRATEGIAS_VERSAO_NODE_IA_NO_SCHEMA.map((s) => [s, true])),
+  ];
+
   const TODOS_OS_MAPAS: Array<Record<string, unknown>> = [
     ...mapasExportados().map(([, mapa]) => mapa),
     Object.fromEntries(OPERADORES_NO_SCHEMA.map((op) => [op, true])),
+    ...ENUMS_TECNICOS_NODE_IA,
   ];
 
 

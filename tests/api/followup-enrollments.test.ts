@@ -452,7 +452,9 @@ describe("POST /api/v1/ai/followups/enrollments", () => {
       [],
       [{ id: CONV_ID, organization_id: ORG_ID, contact_id: CONTACT_ID, channel_session_id: SESSION_ID }],
       async (_fn, args) => {
-        passedSession = (args as { p_session?: unknown })?.p_session;
+        if (_fn === "fn_service_begin") {
+          passedSession = (args as { p_session?: unknown })?.p_session;
+        }
         return {
           data: {
             organization_id: ORG_ID,
