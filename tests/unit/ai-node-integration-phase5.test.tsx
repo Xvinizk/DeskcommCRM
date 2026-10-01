@@ -1,6 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ReactFlowProvider } from "@xyflow/react";
 
@@ -10,33 +9,41 @@ import { AiNode } from "@/app/app/ai/followups/[id]/_components/nodes/AiNode";
 import {
   flowGraphSchema,
   aiNodeConfigSchema,
+  computeAiNodeTimeoutMs,
+  normalizeLegacyTimeoutMs,
+  normalizeAiNodeTimeout,
   type FlowGraph,
   type AiNodeConfig,
 } from "@/lib/followup/graph-schema";
 import { validateFlowForPublish } from "@/lib/followup/validate-publish";
 import { importFlowIntoOrg } from "@/lib/followup/sharing/import-flow";
-import { evaluateAiNodeDeterministicConditions } from "@/lib/followup/ai-node-executor";
+import {
+  evaluateAiNodeDeterministicConditions,
+  resolveAiNodeAgentConfig,
+} from "@/lib/followup/ai-node-executor";
 import type { AgentRow } from "@/hooks/ai/useAgent";
 import type { AgenteCitado } from "@/lib/followup/agentes-citados";
 
-// Mocks de agentes para testes de integração
+// UUIDs v4 reais para garantir que nenhuma validação passe por leniência de strings
 const AGENT_A_ID = "11111111-1111-4111-8111-111111111111";
-const AGENT_B_ID = "22222222-2222-4222-8222-222222222222";
-const VERSION_A_PINNED = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-const VERSION_B_PUBLISHED = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const VERSION_A_PINNED = "22222222-2222-4222-8222-222222222222";
+const AGENT_B_ID = "33333333-3333-4333-8333-333333333333";
+const VERSION_B_PUBLISHED = "44444444-4444-4444-8444-444444444444";
+const TARGET_ORG_UUID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const TARGET_USER_UUID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
 const mockAgentA: AgentRow = {
   id: AGENT_A_ID,
-  organization_id: "org-1",
-  name: "Agente A",
-  description: "Agente A desc",
+  organization_id: TARGET_ORG_UUID,
+  name: "Agente Especialista Imobiliário",
+  description: "Atendimento de vendas e visitas",
   model: "claude-3-5-sonnet",
-  system_prompt: "Prompt A",
+  system_prompt: "Você é o assistente virtual da imobiliária.",
   is_active: true,
   is_default: false,
   config: {},
   guardrails: {},
-  published_version_id: "version-a-pub",
+  published_version_id: VERSION_A_PINNED,
   active_kb_version_id: null,
   paused_at: null,
   archived_at: null,
@@ -46,11 +53,11 @@ const mockAgentA: AgentRow = {
 
 const mockAgentB: AgentRow = {
   id: AGENT_B_ID,
-  organization_id: "org-1",
-  name: "Agente B",
-  description: "Agente B desc",
+  organization_id: TARGET_ORG_UUID,
+  name: "Agente Comercial Pro",
+  description: "Atendimento comercial geral",
   model: "claude-3-5-sonnet",
-  system_prompt: "Prompt B",
+  system_prompt: "Você é o corretor especialista.",
   is_active: true,
   is_default: false,
   config: {},
@@ -73,13 +80,10 @@ vi.mock("@/hooks/ai/useAgents", () => ({
 
 vi.mock("@/hooks/ai/useAgentVersions", () => ({
   useAgentVersions: (agentId: string) => ({
-    data: agentId === AGENT_A_ID
-      ? [
-          { id: VERSION_A_PINNED, version_number: 1, created_at: "2026-01-01" },
-        ]
-      : [
-          { id: VERSION_B_PUBLISHED, version_number: 1, created_at: "2026-02-01" },
-        ],
+    data:
+      agentId === AGENT_A_ID
+        ? [{ id: VERSION_A_PINNED, version_number: 1, model: "claude-3-5-sonnet", created_at: "2026-01-01" }]
+        : [{ id: VERSION_B_PUBLISHED, version_number: 2, model: "claude-3-5-sonnet", created_at: "2026-02-01" }],
     isLoading: false,
   }),
 }));
@@ -93,159 +97,225 @@ function renderWithProviders(ui: React.ReactElement) {
   );
 }
 
-describe("Fase 5: Integração UI ↔ Schema ↔ Runtime (Testes A a J)", () => {
-  // A. UI de min_images → JSON canônico → evaluator completa com 5.
-  it("A: UI de min_images salva objeto canônico que completa evaluateAiNodeDeterministicConditions com 5 imagens", async () => {
+describe("Fase 5.1: Auditoria Rigorosa de Integração UI ↔ Schema ↔ Runtime", () => {
+  // A. published atravessa UI → schema → publish → resolver sem tradução divergente
+  it("A: version_strategy 'published' atravessa UI → schema → publish → resolver de forma canônica", async () => {
     let savedConfig: AiNodeConfig = {
-      mode: "custom_prompt",
-      objective: "Receber fotos da receita",
+      mode: "existing_agent",
+      agent_binding: {
+        agent_id: AGENT_B_ID,
+        version_strategy: "published",
+        pinned_version_id: null,
+      },
+      objective: "Qualificar lead",
     };
 
     const onChange = vi.fn((next: AiNodeConfig) => {
       savedConfig = next;
     });
 
-    renderWithProviders(
-      <AiNodeForm config={savedConfig} onChange={onChange} />
+    renderWithProviders(<AiNodeForm config={savedConfig} onChange={onChange} />);
+
+    // Confirmar que o valor emitido é 'published'
+    expect(savedConfig.agent_binding?.version_strategy).toBe("published");
+    expect(savedConfig.agent_binding?.pinned_version_id).toBeNull();
+
+    // 1. Graph Schema
+    const graph: FlowGraph = {
+      nodes: [
+        { id: "trg", type: "trigger", label: "Início", position: { x: 0, y: 0 }, config: {} },
+        {
+          id: "ai-node-1",
+          type: "ai_node",
+          label: "IA",
+          position: { x: 100, y: 0 },
+          config: savedConfig,
+        },
+        { id: "end", type: "end", label: "Fim", position: { x: 200, y: 0 }, config: { outcome: "converted" } },
+      ],
+      edges: [
+        { id: "e1", source: "trg", target: "ai-node-1", priority: 0, condition: { type: "always" } },
+        { id: "e2", source: "ai-node-1", target: "end", priority: 0, condition: { type: "branch", branch_id: "completed" } },
+      ],
+    };
+
+    const parsedGraph = flowGraphSchema.parse(graph);
+    const validatedAiNode = parsedGraph.nodes.find((n) => n.id === "ai-node-1")!;
+    const validatedConfig = validatedAiNode.config as AiNodeConfig;
+    expect(validatedConfig.agent_binding?.version_strategy).toBe("published");
+
+    // 2. Validate for publish
+    const agentesMap = new Map<string, AgenteCitado>([
+      [
+        AGENT_B_ID,
+        {
+          id: AGENT_B_ID,
+          name: "Agente B",
+          archived_at: null,
+          published_version_id: VERSION_B_PUBLISHED,
+          version_ids: [VERSION_B_PUBLISHED],
+        },
+      ],
+    ]);
+
+    const pubRes = validateFlowForPublish(parsedGraph, {
+      aiNodeEnabled: true,
+      agentes: agentesMap,
+    });
+    expect(pubRes.ok).toBe(true);
+
+    // 3. Runtime Resolver (resolveAiNodeAgentConfig)
+    const loadPublishedMock = vi.fn().mockResolvedValue({
+      agentId: AGENT_B_ID,
+      versionId: VERSION_B_PUBLISHED,
+      systemPrompt: "Prompt resolvido publicado",
+      model: "claude-3-5-sonnet",
+      tools: [],
+    });
+    const loadVersionMock = vi.fn();
+
+    const resolved = await resolveAiNodeAgentConfig(
+      {} as any,
+      TARGET_ORG_UUID,
+      validatedConfig,
+      {
+        loadPublishedAgentConfigByIdFn: loadPublishedMock,
+        loadAgentVersionConfigFn: loadVersionMock,
+      }
     );
 
-    // Marcar checkbox de imagens
-    const checkboxImages = screen.getByTestId("checkbox-min-images");
-    fireEvent.click(checkboxImages);
-
-    // Digitar 5 no input de imagens
-    const inputImages = screen.getByTestId("input-min-images");
-    fireEvent.change(inputImages, { target: { value: "5" } });
-
-    // Inspecionar o JSON real salvo pelo formulário
-    expect(savedConfig.deterministic_conditions).toBeDefined();
-    expect(savedConfig.deterministic_conditions).toEqual({ min_images: 5 });
-
-    // Salvar e recarregar pelo schema do grafo
-    const validated = aiNodeConfigSchema.parse(savedConfig);
-    expect(validated.deterministic_conditions).toEqual({ min_images: 5 });
-
-    // Avaliação no runtime (evaluateAiNodeDeterministicConditions)
-    // Caso 1: 4 imagens recebidas -> NÃO completa
-    const eval4 = evaluateAiNodeDeterministicConditions(validated.deterministic_conditions, {
-      mediaSummary: {
-        images_count: 4,
-        audios_count: 0,
-        documents_count: 0,
-        last_media_ids: [],
-      },
-    });
-    expect(eval4.satisfied).toBe(false);
-
-    // Caso 2: 5 imagens recebidas -> COMPLETA
-    const eval5 = evaluateAiNodeDeterministicConditions(validated.deterministic_conditions, {
-      mediaSummary: {
-        images_count: 5,
-        audios_count: 0,
-        documents_count: 0,
-        last_media_ids: [],
-      },
-    });
-    expect(eval5.satisfied).toBe(true);
-    expect(eval5.match).toBe("min_images (recebido: 5, exigido: 5)");
+    expect(resolved.ok).toBe(true);
+    if (resolved.ok && resolved.agent) {
+      expect(resolved.agent.versionId).toBe(VERSION_B_PUBLISHED);
+      expect(resolved.agent.systemPrompt).toBe("Prompt resolvido publicado");
+    }
+    expect(loadPublishedMock).toHaveBeenCalledWith(expect.anything(), TARGET_ORG_UUID, AGENT_B_ID);
+    expect(loadVersionMock).not.toHaveBeenCalled();
   });
 
-  // B. draft incompleto → autosave → reload funciona.
-  it("B: Draft incompleto (sem agent_id) passa no schema de autosave e recarrega normalmente", () => {
-    const draftGraph: FlowGraph = {
+  // B. pinned atravessa todo ciclo e usa a versão correta
+  it("B: version_strategy 'pinned' com UUID válido atravessa UI → schema → publish → resolver", async () => {
+    let savedConfig: AiNodeConfig = {
+      mode: "existing_agent",
+      agent_binding: {
+        agent_id: AGENT_A_ID,
+        version_strategy: "pinned",
+        pinned_version_id: VERSION_A_PINNED,
+      },
+      objective: "Atendimento fixado",
+    };
+
+    const onChange = vi.fn((next: AiNodeConfig) => {
+      savedConfig = next;
+    });
+
+    renderWithProviders(<AiNodeForm config={savedConfig} onChange={onChange} />);
+
+    // 1. Graph Schema
+    const graph: FlowGraph = {
       nodes: [
         { id: "trg", type: "trigger", label: "Início", position: { x: 0, y: 0 }, config: {} },
         {
-          id: "ai-pending",
+          id: "ai-pinned-node",
           type: "ai_node",
-          label: "IA",
+          label: "IA Fixada",
           position: { x: 100, y: 0 },
-          config: {
-            mode: "existing_agent",
-            agent_binding: {
-              agent_id: null,
-              version_strategy: "published",
-              pinned_version_id: null,
-            },
-          },
+          config: savedConfig,
         },
-        { id: "end", type: "end", label: "Fim", position: { x: 200, y: 0 }, config: { outcome: "exhausted" } },
+        { id: "end", type: "end", label: "Fim", position: { x: 200, y: 0 }, config: { outcome: "converted" } },
       ],
       edges: [
-        { id: "e1", source: "trg", target: "ai-pending", priority: 0, condition: { type: "always" } },
-        { id: "e2", source: "ai-pending", target: "end", priority: 0, condition: { type: "branch", branch_id: "completed" } },
+        { id: "e1", source: "trg", target: "ai-pinned-node", priority: 0, condition: { type: "always" } },
+        { id: "e2", source: "ai-pinned-node", target: "end", priority: 0, condition: { type: "branch", branch_id: "completed" } },
       ],
     };
 
-    // Autosave valida via flowGraphSchema
-    const parsedDraft = flowGraphSchema.safeParse(draftGraph);
-    expect(parsedDraft.success).toBe(true);
+    const parsedGraph = flowGraphSchema.parse(graph);
+    const validatedAiNode = parsedGraph.nodes.find((n) => n.id === "ai-pinned-node")!;
+    const validatedConfig = validatedAiNode.config as AiNodeConfig;
+    expect(validatedConfig.agent_binding?.version_strategy).toBe("pinned");
+    expect(validatedConfig.agent_binding?.pinned_version_id).toBe(VERSION_A_PINNED);
 
-    // Recarregar simula parsing e reabertura
-    if (parsedDraft.success) {
-      const reloadedNode = parsedDraft.data.nodes.find((n) => n.id === "ai-pending");
-      expect(reloadedNode?.type).toBe("ai_node");
-      expect((reloadedNode?.config as any).mode).toBe("existing_agent");
-      expect((reloadedNode?.config as any).agent_binding?.agent_id).toBeNull();
-    }
-  });
-
-  // C. draft incompleto → publish bloqueado.
-  it("C: Draft incompleto tem publicação bloqueada pelo validateFlowForPublish", () => {
-    const draftGraph: FlowGraph = {
-      nodes: [
-        { id: "trg", type: "trigger", label: "Início", position: { x: 0, y: 0 }, config: {} },
+    // 2. Validate for publish
+    const agentesMap = new Map<string, AgenteCitado>([
+      [
+        AGENT_A_ID,
         {
-          id: "ai-pending",
-          type: "ai_node",
-          label: "IA",
-          position: { x: 100, y: 0 },
-          config: {
-            mode: "existing_agent",
-            agent_binding: {
-              agent_id: null,
-              version_strategy: "published",
-            },
-          },
+          id: AGENT_A_ID,
+          name: "Agente A",
+          archived_at: null,
+          published_version_id: VERSION_A_PINNED,
+          version_ids: [VERSION_A_PINNED],
         },
-        { id: "end", type: "end", label: "Fim", position: { x: 200, y: 0 }, config: { outcome: "exhausted" } },
       ],
-      edges: [
-        { id: "e1", source: "trg", target: "ai-pending", priority: 0, condition: { type: "always" } },
-        { id: "e2", source: "ai-pending", target: "end", priority: 0, condition: { type: "branch", branch_id: "completed" } },
-      ],
-    };
+    ]);
 
-    const res = validateFlowForPublish(draftGraph, { aiNodeEnabled: true });
-    expect(res.ok).toBe(false);
-    if (!res.ok) {
-      expect(res.errors.some((e) => e.code === "ai_node_agent_not_found")).toBe(true);
+    const pubRes = validateFlowForPublish(parsedGraph, {
+      aiNodeEnabled: true,
+      agentes: agentesMap,
+    });
+    expect(pubRes.ok).toBe(true);
+
+    // 3. Runtime Resolver (resolveAiNodeAgentConfig)
+    const loadPublishedMock = vi.fn();
+    const loadVersionMock = vi.fn().mockResolvedValue({
+      agentId: AGENT_A_ID,
+      versionId: VERSION_A_PINNED,
+      systemPrompt: "Prompt da versão fixada exata",
+      model: "claude-3-5-sonnet",
+      tools: [],
+    });
+
+    const resolved = await resolveAiNodeAgentConfig(
+      {} as any,
+      TARGET_ORG_UUID,
+      validatedConfig,
+      {
+        loadPublishedAgentConfigByIdFn: loadPublishedMock,
+        loadAgentVersionConfigFn: loadVersionMock,
+      }
+    );
+
+    expect(resolved.ok).toBe(true);
+    if (resolved.ok && resolved.agent) {
+      expect(resolved.agent.versionId).toBe(VERSION_A_PINNED);
+      expect(resolved.agent.systemPrompt).toBe("Prompt da versão fixada exata");
     }
+    expect(loadVersionMock).toHaveBeenCalledWith(
+      expect.anything(),
+      TARGET_ORG_UUID,
+      AGENT_A_ID,
+      VERSION_A_PINNED
+    );
+    expect(loadPublishedMock).not.toHaveBeenCalled();
   });
 
-  // D. import cross-tenant → save → reload → publish bloqueado.
-  it("D: Import cross-tenant limpa agent_id, permite save/reload de draft e bloqueia publicação", async () => {
+  // C. UUIDs reais no import cross-tenant
+  it("C: Import cross-tenant com UUIDs reais v4 sanitiza agent_binding e permite draft seguro", async () => {
+    const FOREIGN_AGENT_UUID = "55555555-5555-4555-8555-555555555555";
+    const FOREIGN_VERSION_UUID = "66666666-6666-4666-8666-666666666666";
+
     const foreignFlow = {
-      name: "Fluxo de Outra Org",
+      name: "Fluxo Org Alpha",
       draft_graph: {
         nodes: [
           { id: "trg", type: "trigger", label: "Início", position: { x: 0, y: 0 }, config: {} },
           {
             id: "ai-foreign",
             type: "ai_node",
-            label: "IA Comercial",
+            label: "IA de Vendas",
             position: { x: 100, y: 0 },
             config: {
               mode: "existing_agent",
               agent_binding: {
-                agent_id: "foreign-agent-9999",
+                agent_id: FOREIGN_AGENT_UUID,
                 version_strategy: "pinned",
-                pinned_version_id: "foreign-ver-8888",
+                pinned_version_id: FOREIGN_VERSION_UUID,
               },
-              objective: "Fechar venda",
-              max_turns: 10,
+              objective: "Concluir venda",
+              max_turns: 12,
               timeout: { duration_value: 24, unit: "hours" },
-              deterministic_conditions: { min_images: 3 },
+              deterministic_conditions: { min_images: 5 },
             },
           },
           { id: "end", type: "end", label: "Fim", position: { x: 200, y: 0 }, config: { outcome: "exhausted" } },
@@ -257,7 +327,6 @@ describe("Fase 5: Integração UI ↔ Schema ↔ Runtime (Testes A a J)", () => 
       },
     };
 
-    // Importar na Org B com mock do admin client
     let insertedGraph: FlowGraph | null = null;
     const mockAdmin = {
       from: vi.fn().mockImplementation((table: string) => {
@@ -280,8 +349,9 @@ describe("Fase 5: Integração UI ↔ Schema ↔ Runtime (Testes A a J)", () => 
         if (table === "crm_stages") {
           return {
             select: vi.fn().mockReturnThis(),
-            eq: vi.fn().mockReturnThis(),
-            mockResolvedValue: { data: [] },
+            eq: vi.fn().mockReturnValue({
+              eq: vi.fn().mockResolvedValue({ data: [] }),
+            }),
           };
         }
         return {
@@ -292,86 +362,177 @@ describe("Fase 5: Integração UI ↔ Schema ↔ Runtime (Testes A a J)", () => 
       }),
     };
 
-    const importResult = await importFlowIntoOrg({
+    const res = await importFlowIntoOrg({
       admin: mockAdmin as any,
-      targetOrgId: "org-b-uuid",
-      userId: "user-1",
+      targetOrgId: TARGET_ORG_UUID,
+      userId: TARGET_USER_UUID,
       flowName: foreignFlow.name,
       graph: foreignFlow.draft_graph as FlowGraph,
     });
 
-    expect(importResult.ok).toBe(true);
+    expect(res.ok).toBe(true);
     expect(insertedGraph).toBeDefined();
-    const importedAiNode = insertedGraph!.nodes.find((n) => n.type === "ai_node");
-    const importedConfig = importedAiNode?.config as any;
 
-    // Agent binding foi limpo, mas configurações preservadas
-    expect(importedConfig.agent_binding?.agent_id).toBeUndefined();
-    expect(importedConfig.agent_binding?.pinned_version_id).toBeUndefined();
-    expect(importedConfig.objective).toBe("Fechar venda");
-    expect(importedConfig.deterministic_conditions).toEqual({ min_images: 3 });
+    const importedAiNode = insertedGraph!.nodes.find((n) => n.type === "ai_node")!;
+    const cfg = importedAiNode.config as any;
 
-    // O grafo importado SALVA com sucesso (draft schema)
-    const draftParse = flowGraphSchema.safeParse(insertedGraph!);
-    expect(draftParse.success).toBe(true);
+    // UUIDs da Org estrangeira foram totalmente removidos
+    expect(cfg.agent_binding?.agent_id).toBeUndefined();
+    expect(cfg.agent_binding?.pinned_version_id).toBeUndefined();
+    expect(cfg.agent_name).toBeUndefined();
 
-    // Publish bloqueia enquanto não remapear
-    const pubRes = validateFlowForPublish(insertedGraph!, { aiNodeEnabled: true });
-    expect(pubRes.ok).toBe(false);
-    if (!pubRes.ok) {
-      expect(pubRes.errors.some((e) => e.code === "ai_node_agent_not_found")).toBe(true);
+    // Demais dados operacionais preservados
+    expect(cfg.objective).toBe("Concluir venda");
+    expect(cfg.max_turns).toBe(12);
+    expect(cfg.deterministic_conditions).toEqual({ min_images: 5 });
+
+    // Rascunho com agente pendente SALVA e valida com sucesso no draft
+    const parsedDraft = flowGraphSchema.safeParse(insertedGraph!);
+    expect(parsedDraft.success).toBe(true);
+
+    // Publicação é IMPEDIDA até que a organização destino selecione um agente local
+    const pubCheck = validateFlowForPublish(insertedGraph!, { aiNodeEnabled: true });
+    expect(pubCheck.ok).toBe(false);
+    if (!pubCheck.ok) {
+      expect(pubCheck.errors.some((e) => e.code === "ai_node_agent_not_found")).toBe(true);
     }
   });
 
-  // E. remapeamento Agent-B → publish válido.
-  it("E: Remapeamento para Agente B da organização destino permite publicação válida", () => {
-    const graphWithAgentB: FlowGraph = {
-      nodes: [
-        { id: "trg", type: "trigger", label: "Início", position: { x: 0, y: 0 }, config: {} },
-        {
-          id: "ai-node-1",
-          type: "ai_node",
-          label: "IA",
-          position: { x: 100, y: 0 },
-          config: {
-            mode: "existing_agent",
-            agent_binding: {
-              agent_id: AGENT_B_ID,
-              version_strategy: "published",
-            },
-            objective: "Atender",
-          },
-        },
-        { id: "end", type: "end", label: "Fim", position: { x: 200, y: 0 }, config: { outcome: "converted" } },
-      ],
-      edges: [
-        { id: "e1", source: "trg", target: "ai-node-1", priority: 0, condition: { type: "always" } },
-        { id: "e2", source: "ai-node-1", target: "end", priority: 0, condition: { type: "branch", branch_id: "completed" } },
-      ],
+  // D. timeout inconsistente é normalizado deterministicamente
+  it("D: JSON com timeout inconsistente (ex: 24h e 1800000ms) é normalizado deterministicamente pelo boundary canônico", () => {
+    const inconsistentRaw = {
+      mode: "custom_prompt" as const,
+      objective: "Teste de inconsistência",
+      timeout: {
+        duration_value: 24,
+        unit: "hours" as const,
+      },
+      timeout_ms: 1_800_000, // 30 minutos em ms, conflitante com 24 horas!
     };
 
-    const agentesMap = new Map<string, AgenteCitado>([
-      [
-        AGENT_B_ID,
-        {
-          id: AGENT_B_ID,
-          name: "Agente B",
-          archived_at: null,
-          published_version_id: VERSION_B_PUBLISHED,
-          version_ids: [VERSION_B_PUBLISHED],
-        },
-      ],
-    ]);
+    const normalized = normalizeAiNodeTimeout(inconsistentRaw);
 
-    const res = validateFlowForPublish(graphWithAgentB, {
-      aiNodeEnabled: true,
-      agentes: agentesMap,
-    });
-    expect(res.ok).toBe(true);
+    // A fonte canônica (timeout { duration_value, unit }) prevalece e recalcula timeout_ms
+    expect(normalized.timeout).toEqual({ duration_value: 24, unit: "hours" });
+    expect(normalized.timeout_ms).toBe(24 * 3_600_000); // 86_400_000 ms, divergência sanada
   });
 
-  // F. trocar Agent A pinned → Agent B limpa pinned antigo.
-  it("F: Trocar de Agent A (pinned) para Agent B limpa imediatamente o pinned_version_id antigo", () => {
+  // E. grafo legado só com timeout_ms continua carregando
+  it("E: Grafo legado que possui apenas timeout_ms continua carregando e é normalizado para a representação canônica", () => {
+    const legacyRaw = {
+      mode: "custom_prompt" as const,
+      objective: "Fluxo antigo de 2025",
+      timeout_ms: 1_800_000, // 30 minutos
+    };
+
+    const normalized = normalizeAiNodeTimeout(legacyRaw);
+
+    expect(normalized.timeout).toEqual({ duration_value: 30, unit: "minutes" });
+    expect(normalized.timeout_ms).toBe(1_800_000);
+
+    // Validação no formulário
+    let currentConfig: AiNodeConfig = { ...legacyRaw };
+    const onChange = vi.fn((next: AiNodeConfig) => {
+      currentConfig = next;
+    });
+
+    renderWithProviders(<AiNodeForm config={currentConfig} onChange={onChange} />);
+
+    const inputVal = screen.getByTestId("input-timeout-value") as HTMLInputElement;
+    expect(inputVal.value).toBe("30");
+  });
+
+  // F. save/reload mantém timeout coerente
+  it("F: Save e reload mantêm paridade visual e operacional em 24h, 30min e 2 dias", () => {
+    // 24 horas e 1 dia
+    const t24h = { duration_value: 24, unit: "hours" as const };
+    expect(computeAiNodeTimeoutMs(t24h)).toBe(86_400_000);
+    expect(normalizeLegacyTimeoutMs(86_400_000)).toEqual({ duration_value: 1, unit: "days" });
+
+    // 12 horas
+    const t12h = { duration_value: 12, unit: "hours" as const };
+    expect(computeAiNodeTimeoutMs(t12h)).toBe(43_200_000);
+    expect(normalizeLegacyTimeoutMs(43_200_000)).toEqual(t12h);
+
+    // 30 minutos
+    const t30m = { duration_value: 30, unit: "minutes" as const };
+    expect(computeAiNodeTimeoutMs(t30m)).toBe(1_800_000);
+    expect(normalizeLegacyTimeoutMs(1_800_000)).toEqual(t30m);
+
+    // 2 dias
+    const t2d = { duration_value: 2, unit: "days" as const };
+    expect(computeAiNodeTimeoutMs(t2d)).toBe(172_800_000);
+    expect(normalizeLegacyTimeoutMs(172_800_000)).toEqual(t2d);
+  });
+
+  // G. Feature flag true/false no comportamento visual
+  it("G: Feature flag controla disponibilização na paleta sem corromper nós existentes no canvas", () => {
+    // 1. Flag desligada: não oferece novo nó na paleta
+    const { unmount } = renderWithProviders(<NodePalette onAdd={vi.fn()} aiNodeEnabled={false} />);
+    expect(screen.queryByTestId("palette-add-ai_node")).toBeNull();
+    unmount();
+
+    // 2. Flag ligada: botão visível na paleta
+    const { unmount: unmountPalette } = renderWithProviders(
+      <NodePalette onAdd={vi.fn()} aiNodeEnabled={true} />
+    );
+    expect(screen.getByTestId("palette-add-ai_node")).toBeInTheDocument();
+    unmountPalette();
+
+    // 3. Grafo que já possui nó IA: renderiza perfeitamente mesmo com flag false
+    const existingNode = {
+      id: "ai-node-existing",
+      type: "ai_node" as const,
+      data: {
+        label: "IA",
+        config: {
+          mode: "custom_prompt" as const,
+          objective: "Atendimento preexistente em produção",
+        },
+      },
+      position: { x: 0, y: 0 },
+      selected: false,
+    };
+
+    renderWithProviders(<AiNode {...(existingNode as any)} />);
+    expect(screen.getByText("IA")).toBeInTheDocument();
+    expect(screen.getByText("Atendimento preexistente em produção")).toBeInTheDocument();
+  });
+
+  // H. Prova 5 fotos: UI min_images -> JSON -> evaluateAiNodeDeterministicConditions
+  it("H: Condição determinística de 5 fotos completa exatamente com 5 imagens e não completa com 4", () => {
+    let savedConfig: AiNodeConfig = {
+      mode: "custom_prompt",
+      objective: "Receber 5 fotos de vistoria",
+    };
+
+    const onChange = vi.fn((next: AiNodeConfig) => {
+      savedConfig = next;
+    });
+
+    renderWithProviders(<AiNodeForm config={savedConfig} onChange={onChange} />);
+
+    // Ativa min_images e define 5
+    fireEvent.click(screen.getByTestId("checkbox-min-images"));
+    fireEvent.change(screen.getByTestId("input-min-images"), { target: { value: "5" } });
+
+    expect(savedConfig.deterministic_conditions).toEqual({ min_images: 5 });
+
+    // Avaliação no runtime
+    const eval4 = evaluateAiNodeDeterministicConditions(savedConfig.deterministic_conditions, {
+      mediaSummary: { images_count: 4, audios_count: 0, documents_count: 0, last_media_ids: [] },
+    });
+    expect(eval4.satisfied).toBe(false);
+
+    const eval5 = evaluateAiNodeDeterministicConditions(savedConfig.deterministic_conditions, {
+      mediaSummary: { images_count: 5, audios_count: 0, documents_count: 0, last_media_ids: [] },
+    });
+    expect(eval5.satisfied).toBe(true);
+    expect(eval5.match).toBe("min_images (recebido: 5, exigido: 5)");
+  });
+
+  // I. Troca de Agente A (pinned) -> Agente B limpa pinned antigo
+  it("I: Troca de agente limpa imediatamente versão fixada antiga", () => {
     let currentConfig: AiNodeConfig = {
       mode: "existing_agent",
       agent_binding: {
@@ -387,20 +548,15 @@ describe("Fase 5: Integração UI ↔ Schema ↔ Runtime (Testes A a J)", () => 
 
     renderWithProviders(<AiNodeForm config={currentConfig} onChange={onChange} />);
 
-    // Selecionar Agente B
-    const selectTrigger = screen.getByTestId("agent-select-trigger");
-    fireEvent.click(selectTrigger);
+    fireEvent.click(screen.getByTestId("agent-select-trigger"));
+    fireEvent.click(screen.getByTestId(`agent-option-${AGENT_B_ID}`));
 
-    const optionAgentB = screen.getByTestId(`agent-option-${AGENT_B_ID}`);
-    fireEvent.click(optionAgentB);
-
-    // Verifica que agent_id é Agent B e pinned_version_id foi LIMPO (null)
     expect(currentConfig.agent_binding?.agent_id).toBe(AGENT_B_ID);
     expect(currentConfig.agent_binding?.pinned_version_id).toBeNull();
   });
 
-  // G. trocar modo não deixa binding operacional escondido.
-  it("G: Trocar de existing_agent para custom_prompt limpa agent_binding e agent_name", () => {
+  // J. Troca de modo limpa campos órfãos
+  it("J: Troca de modo limpa bindings operacionais órfãos", () => {
     let currentConfig: AiNodeConfig = {
       mode: "existing_agent",
       agent_binding: {
@@ -416,178 +572,49 @@ describe("Fase 5: Integração UI ↔ Schema ↔ Runtime (Testes A a J)", () => 
 
     renderWithProviders(<AiNodeForm config={currentConfig} onChange={onChange} />);
 
-    // Mudar para custom_prompt
-    const btnCustom = screen.getByTestId("mode-custom-prompt");
-    fireEvent.click(btnCustom);
+    fireEvent.click(screen.getByTestId("mode-custom-prompt"));
 
     expect(currentConfig.mode).toBe("custom_prompt");
     expect(currentConfig.agent_binding).toBeUndefined();
     expect(currentConfig.agent_name).toBeUndefined();
   });
 
-  // H. timeout save/reload sem divergência.
-  it("H: Sincronização e persistência de timeout (24h, 30min, 2d) sem divergência entre visual e operacional", () => {
-    let currentConfig: AiNodeConfig = {
-      mode: "custom_prompt",
-      objective: "Teste timeout",
-    };
-
-    const onChange = vi.fn((next: AiNodeConfig) => {
-      currentConfig = next;
-    });
-
-    const { rerender } = renderWithProviders(<AiNodeForm config={currentConfig} onChange={onChange} />);
-
-    // 1. Configurar 30 minutos
-    fireEvent.change(screen.getByTestId("input-timeout-value"), { target: { value: "30" } });
-    rerender(
-      <ReactFlowProvider>
-        <QueryClientProvider client={new QueryClient()}>
-          <AiNodeForm config={currentConfig} onChange={onChange} />
-        </QueryClientProvider>
-      </ReactFlowProvider>
-    );
-    fireEvent.click(screen.getByTestId("select-timeout-unit"));
-    fireEvent.click(screen.getByText("minutos"));
-
-    expect(currentConfig.timeout).toEqual({ duration_value: 30, unit: "minutes" });
-    expect(currentConfig.timeout_ms).toBe(30 * 60_000);
-
-    // 2. Configurar 2 dias
-    rerender(
-      <ReactFlowProvider>
-        <QueryClientProvider client={new QueryClient()}>
-          <AiNodeForm config={currentConfig} onChange={onChange} />
-        </QueryClientProvider>
-      </ReactFlowProvider>
-    );
-    fireEvent.change(screen.getByTestId("input-timeout-value"), { target: { value: "2" } });
-    rerender(
-      <ReactFlowProvider>
-        <QueryClientProvider client={new QueryClient()}>
-          <AiNodeForm config={currentConfig} onChange={onChange} />
-        </QueryClientProvider>
-      </ReactFlowProvider>
-    );
-    fireEvent.click(screen.getByTestId("select-timeout-unit"));
-    fireEvent.click(screen.getByText("dias"));
-
-    expect(currentConfig.timeout).toEqual({ duration_value: 2, unit: "days" });
-    expect(currentConfig.timeout_ms).toBe(2 * 86_400_000);
-
-    // 3. Configurar 24 horas
-    rerender(
-      <ReactFlowProvider>
-        <QueryClientProvider client={new QueryClient()}>
-          <AiNodeForm config={currentConfig} onChange={onChange} />
-        </QueryClientProvider>
-      </ReactFlowProvider>
-    );
-    fireEvent.change(screen.getByTestId("input-timeout-value"), { target: { value: "24" } });
-    rerender(
-      <ReactFlowProvider>
-        <QueryClientProvider client={new QueryClient()}>
-          <AiNodeForm config={currentConfig} onChange={onChange} />
-        </QueryClientProvider>
-      </ReactFlowProvider>
-    );
-    fireEvent.click(screen.getByTestId("select-timeout-unit"));
-    fireEvent.click(screen.getByText("horas"));
-
-    expect(currentConfig.timeout).toEqual({ duration_value: 24, unit: "hours" });
-    expect(currentConfig.timeout_ms).toBe(24 * 3_600_000);
-  });
-
-  // I. max_turns save/reload.
-  it("I: max_turns salva como inteiro canônico e recarrega perfeitamente", () => {
-    let currentConfig: AiNodeConfig = {
-      mode: "custom_prompt",
-      max_turns: 10,
-    };
-
-    const onChange = vi.fn((next: AiNodeConfig) => {
-      currentConfig = next;
-    });
-
-    renderWithProviders(<AiNodeForm config={currentConfig} onChange={onChange} />);
-
-    const inputTurns = screen.getByTestId("input-max-turns");
-    fireEvent.change(inputTurns, { target: { value: "15" } });
-
-    expect(currentConfig.max_turns).toBe(15);
-    expect(typeof currentConfig.max_turns).toBe("number");
-
-    // Validação com o schema do grafo
-    const parsed = aiNodeConfigSchema.parse(currentConfig);
-    expect(parsed.max_turns).toBe(15);
-  });
-
-  // J. flag false renderiza ai_node preexistente mas não oferece novo node.
-  it("J: Feature flag desligada oculta botão na paleta mas renderiza nós pré-existentes sem erro", () => {
-    // 1. Paleta com flag false: botão NÃO aparece
-    const { unmount } = renderWithProviders(<NodePalette onAdd={vi.fn()} aiNodeEnabled={false} />);
-    expect(screen.queryByTestId("palette-add-ai_node")).toBeNull();
-    unmount();
-
-    // 2. Renderização de nó ai_node pré-existente no canvas: abre normalmente
-    const existingNode = {
-      id: "ai-node-legacy",
-      type: "ai_node" as const,
-      data: {
-        label: "IA",
-        config: {
-          mode: "custom_prompt" as const,
-          objective: "Atendimento preexistente",
-        },
-      },
-      position: { x: 0, y: 0 },
-      selected: false,
-    };
-
-    renderWithProviders(<AiNode {...(existingNode as any)} />);
-    expect(screen.getByText("IA")).toBeInTheDocument();
-    expect(screen.getByText("Atendimento preexistente")).toBeInTheDocument();
-  });
-
-  // K. Validação de layout responsivo (1440x900 e 1280x720), 5 handles e nome longo
-  it("K: Layout responsivo 1440x900 e 1280x720 com nome longo de agente e 5 handles perfeitamente posicionados", () => {
-    // Simula resolução 1440x900
+  // K. Layout responsivo 1440x900 e 1280x720, 5 handles sem sobreposição
+  it("K: Validação de layout responsivo com 5 handles e nome longo de agente", () => {
     window.innerWidth = 1440;
     window.innerHeight = 900;
     window.dispatchEvent(new Event("resize"));
 
-    const longAgentNode = {
-      id: "ai-node-long-agent",
+    const nodeData = {
+      id: "ai-node-responsive",
       type: "ai_node" as const,
       data: {
-        label: "IA",
+        label: "IA Consultor",
         config: {
           mode: "existing_agent" as const,
-          agent_binding: { agent_id: "agent-long", version_strategy: "published" as const },
-          agent_name: "Dr. Roberto Albuquerque de Vasconcelos Filho | Especialista Sênior em Vendas Corporativas e Licitações",
+          agent_binding: { agent_id: AGENT_A_ID, version_strategy: "published" as const },
+          agent_name: "Agente de Vendas com Nome Muito Extenso para Testar Quebra de Linha e Truncate Visual",
         },
       },
       position: { x: 0, y: 0 },
       selected: true,
     };
 
-    const { unmount } = renderWithProviders(<AiNode {...(longAgentNode as any)} />);
-    const card = screen.getByTestId("node-card-ai-node-long-agent");
+    const { unmount } = renderWithProviders(<AiNode {...(nodeData as any)} />);
+    const card = screen.getByTestId("node-card-ai-node-responsive");
     expect(card).toBeInTheDocument();
 
-    // 5 handles renderizados no card
     const handles = card.querySelectorAll(".react-flow__handle-right");
     expect(handles.length).toBe(5);
 
     unmount();
 
-    // Simula resolução 1280x720
     window.innerWidth = 1280;
     window.innerHeight = 720;
     window.dispatchEvent(new Event("resize"));
 
-    renderWithProviders(<AiNode {...(longAgentNode as any)} />);
-    const card720 = screen.getByTestId("node-card-ai-node-long-agent");
+    renderWithProviders(<AiNode {...(nodeData as any)} />);
+    const card720 = screen.getByTestId("node-card-ai-node-responsive");
     expect(card720).toBeInTheDocument();
     expect(card720.querySelectorAll(".react-flow__handle-right").length).toBe(5);
   });

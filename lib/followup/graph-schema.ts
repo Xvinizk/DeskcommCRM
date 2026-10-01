@@ -453,6 +453,70 @@ export const aiNodeTimeoutSchema = z.strictObject({
 });
 export type AiNodeTimeout = z.infer<typeof aiNodeTimeoutSchema>;
 
+/**
+ * Converte a representação canônica visual de timeout em milissegundos operacionais.
+ * Fonte única da verdade: timeout { duration_value, unit }.
+ */
+export function computeAiNodeTimeoutMs(timeout: {
+  duration_value: number;
+  unit: 'minutes' | 'hours' | 'days';
+}): number {
+  const val = Math.max(1, timeout.duration_value);
+  if (timeout.unit === 'minutes') return Math.max(60_000, val * 60_000);
+  if (timeout.unit === 'days') return Math.max(60_000, val * 86_400_000);
+  return Math.max(60_000, val * 3_600_000);
+}
+
+/**
+ * Normaliza grafos legados que possuam apenas timeout_ms para a representação canônica visual.
+ */
+export function normalizeLegacyTimeoutMs(timeoutMs: number): {
+  duration_value: number;
+  unit: 'minutes' | 'hours' | 'days';
+} {
+  const safeMs = Math.max(60_000, timeoutMs);
+  if (safeMs % 86_400_000 === 0) {
+    return { duration_value: Math.max(1, safeMs / 86_400_000), unit: 'days' };
+  }
+  if (safeMs % 3_600_000 === 0) {
+    return { duration_value: Math.max(1, safeMs / 3_600_000), unit: 'hours' };
+  }
+  return { duration_value: Math.max(1, Math.round(safeMs / 60_000)), unit: 'minutes' };
+}
+
+/**
+ * Normaliza a configuração de timeout de um nó IA garantindo:
+ * 1. Se timeout estiver presente: é a fonte canônica; timeout_ms é derivado determinísticamente (inconsistências em timeout_ms são sanadas).
+ * 2. Se apenas timeout_ms estiver presente (grafo legado): timeout é derivado determinísticamente.
+ * 3. Se nenhum estiver presente: default canônico de 24 horas (86_400_000 ms).
+ */
+export function normalizeAiNodeTimeout<T extends { timeout?: AiNodeTimeout; timeout_ms?: number }>(
+  config: T,
+): T & { timeout: AiNodeTimeout; timeout_ms: number } {
+  let timeout: AiNodeTimeout;
+  let timeout_ms: number;
+
+  if (config.timeout) {
+    timeout = {
+      duration_value: config.timeout.duration_value,
+      unit: config.timeout.unit,
+    };
+    timeout_ms = computeAiNodeTimeoutMs(timeout);
+  } else if (typeof config.timeout_ms === 'number') {
+    timeout = normalizeLegacyTimeoutMs(config.timeout_ms);
+    timeout_ms = config.timeout_ms;
+  } else {
+    timeout = { duration_value: 24, unit: 'hours' };
+    timeout_ms = 86_400_000;
+  }
+
+  return {
+    ...config,
+    timeout,
+    timeout_ms,
+  };
+}
+
 export const aiNodeDeterministicConditionsSchema = z.union([
   z.strictObject({
     min_images: z.number().int().min(1).max(50).optional(),

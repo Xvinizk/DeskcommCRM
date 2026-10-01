@@ -36,6 +36,10 @@ import type {
   AiNodeMode,
   AiNodeVersionStrategy,
 } from "@/lib/followup/graph-schema";
+import {
+  computeAiNodeTimeoutMs,
+  normalizeLegacyTimeoutMs,
+} from "@/lib/followup/graph-schema";
 
 interface Props {
   config: ConfigOf<"ai_node">;
@@ -71,12 +75,6 @@ export function AiNodeForm({ config, onChange }: Props) {
   const isAgentMode =
     mode === "existing_agent" || mode === "existing_with_supplementary";
 
-  // Helpers de conversão e cálculo determinístico de timeout_ms
-  const computeTimeoutMs = (durationValue: number, unit: "minutes" | "hours" | "days"): number => {
-    if (unit === "minutes") return Math.max(60_000, durationValue * 60_000);
-    if (unit === "days") return Math.max(60_000, durationValue * 86_400_000);
-    return Math.max(60_000, durationValue * 3_600_000);
-  };
 
   // Helpers de mutação com limpeza de campos undefined
   const updateConfig = (patch: Partial<ConfigOf<"ai_node">>) => {
@@ -191,16 +189,9 @@ export function AiNodeForm({ config, onChange }: Props) {
   let initialTimeoutUnit = config.timeout?.unit ?? "hours";
 
   if (!config.timeout && typeof config.timeout_ms === "number") {
-    if (config.timeout_ms % 86_400_000 === 0) {
-      initialTimeoutValue = config.timeout_ms / 86_400_000;
-      initialTimeoutUnit = "days";
-    } else if (config.timeout_ms % 3_600_000 === 0) {
-      initialTimeoutValue = config.timeout_ms / 3_600_000;
-      initialTimeoutUnit = "hours";
-    } else {
-      initialTimeoutValue = Math.max(1, Math.round(config.timeout_ms / 60_000));
-      initialTimeoutUnit = "minutes";
-    }
+    const legacy = normalizeLegacyTimeoutMs(config.timeout_ms);
+    initialTimeoutValue = legacy.duration_value;
+    initialTimeoutUnit = legacy.unit;
   }
 
   const timeoutValue = initialTimeoutValue;
@@ -208,12 +199,13 @@ export function AiNodeForm({ config, onChange }: Props) {
 
   const handleTimeoutChange = (newVal: number, newUnit: "minutes" | "hours" | "days") => {
     const duration = Math.max(1, newVal);
+    const canonicalTimeout = {
+      duration_value: duration,
+      unit: newUnit,
+    };
     updateConfig({
-      timeout: {
-        duration_value: duration,
-        unit: newUnit,
-      },
-      timeout_ms: computeTimeoutMs(duration, newUnit),
+      timeout: canonicalTimeout,
+      timeout_ms: computeAiNodeTimeoutMs(canonicalTimeout),
     });
   };
 

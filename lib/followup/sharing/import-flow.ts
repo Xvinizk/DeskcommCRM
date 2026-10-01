@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { FlowGraph, FlowNode, FlowEdge } from "@/lib/followup/graph-schema";
+import { normalizeAiNodeTimeout } from "@/lib/followup/graph-schema";
 import { duplicateFlowMedia } from "./media-duplication";
 import { logger } from "@/lib/logger";
 
@@ -159,7 +160,7 @@ export async function importFlowIntoOrg({
         // As tags operam isoladas estritamente no escopo da organização de destino
       }
 
-      // Compatibilizar nós de IA (ai_node) — isolamento cross-tenant estrito
+      // Compatibilizar nós de IA (ai_node) — isolamento cross-tenant estrito e normalização canônica
       if (node.type === "ai_node") {
         if (nodeConfig.agent_binding) {
           const binding = { ...(nodeConfig.agent_binding as Record<string, unknown>) };
@@ -171,6 +172,9 @@ export async function importFlowIntoOrg({
             `O nó IA «${node.label}» requer a seleção de um agente da sua organização antes de publicar.`,
           );
         }
+        const normalized = normalizeAiNodeTimeout(nodeConfig as any);
+        nodeConfig.timeout = normalized.timeout;
+        nodeConfig.timeout_ms = normalized.timeout_ms;
       }
 
       newNodes.push({

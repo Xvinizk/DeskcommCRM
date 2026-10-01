@@ -60,6 +60,16 @@ export function sanitizeFlowForSnapshot(params: {
       delete nodeCfg.stage_id;
     }
 
+    if (node.type === "ai_node") {
+      if (nodeCfg.agent_binding) {
+        const binding = { ...(nodeCfg.agent_binding as Record<string, unknown>) };
+        delete binding.agent_id;
+        delete binding.pinned_version_id;
+        nodeCfg.agent_binding = binding;
+      }
+      delete nodeCfg.agent_name;
+    }
+
     // Detectar mídias para acompanhamento no snapshot
     if (node.type === "message_image") {
       imageCount++;
