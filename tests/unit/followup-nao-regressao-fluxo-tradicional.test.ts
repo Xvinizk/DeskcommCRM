@@ -5,7 +5,10 @@ import {
   type FollowupJobRequest,
   type TickDeps,
 } from "@/lib/followup/engine";
-import { completeTurnForEnrollment } from "@/lib/followup/turn-bridge";
+import {
+  completeTurnForEnrollment,
+  type TurnBridgeAdminClient,
+} from "@/lib/followup/turn-bridge";
 import type { FlowGraph } from "@/lib/followup/graph-schema";
 import type { EnrollmentEventRef, EnrollmentRow, LeadFacts } from "@/lib/followup/node-handlers";
 
@@ -62,7 +65,7 @@ class MockHarness {
     return row;
   }
 
-  getDeps(): TickDeps {
+  getDeps(): TickDeps & { db: TurnBridgeAdminClient } {
     return {
       clock: this.clock,
       enqueueJob: async (job: FollowupJobRequest) => {

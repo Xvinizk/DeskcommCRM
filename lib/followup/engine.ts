@@ -777,7 +777,13 @@ async function processEnrollment(
   let currentEnrollment = initialEnrollment;
   let currentInboundBody = inboundBodyOverride;
 
-  while (currentEnrollment.steps_taken <= MAX_STEPS) {
+  while (true) {
+    if (currentEnrollment.steps_taken > MAX_STEPS) {
+      await markDead(db, clock, currentEnrollment, "max_steps");
+      summary.dead++;
+      return;
+    }
+
     try { await db.assertServiceBoundary?.(currentEnrollment); await db.assertAgenda?.(currentEnrollment); }
     catch (error) {
       if(error instanceof AgendaDeferredError){
@@ -814,12 +820,6 @@ async function processEnrollment(
         });
       }
       await db.updateEnrollment(currentEnrollment.id, currentEnrollment.organization_id, { status: "cancelled", cancel_reason: "Atendimento encerrado ou substituído", claimed_until: null, completed_at: clock().toISOString() });
-      return;
-    }
-
-    if (currentEnrollment.steps_taken > MAX_STEPS) {
-      await markDead(db, clock, currentEnrollment, "max_steps");
-      summary.dead++;
       return;
     }
 
