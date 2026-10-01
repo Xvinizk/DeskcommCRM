@@ -15,14 +15,35 @@ import {
   type TickDeps,
   type EnrollmentPatch,
 } from '@/lib/followup/engine';
-import type { EnrollmentRow } from '@/lib/followup/node-handlers';
+import type { EnrollmentRow, EnrollmentStatus, EnrollmentOutcome } from '@/lib/followup/node-handlers';
+
+interface MockEnrollmentData {
+  id: string;
+  organization_id: string;
+  current_node_id: string;
+  contact_id: string;
+  conversation_id: string | null;
+  pointer_id?: string;
+  version_id: string;
+  status: EnrollmentStatus;
+  steps_taken: number;
+  outcome: EnrollmentOutcome | null;
+  cancel_reason?: string | null;
+  completed_at: string | null;
+  started_at?: string;
+  updated_at?: string;
+  ai_node_session: AiNodeSession;
+  graph: FlowGraph;
+  next_eval_at?: string;
+  claimed_until?: string | null;
+}
 
 interface MockDbState {
-  enrollments: Map<string, any>;
+  enrollments: Map<string, MockEnrollmentData>;
   events: Array<Record<string, unknown>>;
   sendLedger: Map<string, Record<string, unknown>>;
-  contacts: Map<string, any>;
-  conversations: Map<string, any>;
+  contacts: Map<string, Record<string, unknown>>;
+  conversations: Map<string, Record<string, unknown>>;
 }
 
 const STAGE_QUALIFICADO_UUID = '11111111-1111-4111-8111-111111111111';
@@ -219,6 +240,16 @@ function createMiniFlowMockDb(initial: {
         return { rows: [] };
       }
 
+      // SELECT em followup_enrollments
+      if (cleanSql.includes('FROM FOLLOWUP_ENROLLMENTS') && cleanSql.startsWith('SELECT')) {
+        const idToFind = String(params[1] ?? params[0] ?? initial.enrollmentId);
+        const enr = state.enrollments.get(idToFind);
+        if (enr) {
+          return { rows: [{ current_node_id: enr.current_node_id, status: enr.status, steps_taken: enr.steps_taken }] };
+        }
+        return { rows: [] };
+      }
+
       // UPDATE followup_enrollments
       if (cleanSql.includes('UPDATE FOLLOWUP_ENROLLMENTS')) {
         const enr = state.enrollments.get(initial.enrollmentId);
@@ -227,10 +258,13 @@ function createMiniFlowMockDb(initial: {
             enr.current_node_id = params[0] as string;
             enr.steps_taken = (Number(enr.steps_taken) || 0) + 1;
             enr.ai_node_session = typeof params[1] === 'string' ? JSON.parse(params[1]) : params[1];
+            enr.next_eval_at = params[2] as string;
+            enr.status = 'active';
+            enr.claimed_until = null;
             enr.updated_at = params[2] as string;
           } else if (cleanSql.includes("SET STATUS = 'COMPLETED'")) {
             enr.status = 'completed';
-            enr.outcome = params[0] as string;
+            enr.outcome = params[0] as EnrollmentOutcome;
             enr.completed_at = params[1] as string;
             enr.ai_node_session = typeof params[2] === 'string' ? JSON.parse(params[2]) : params[2];
           } else if (cleanSql.includes("SET STATUS = 'PAUSED_HANDOFF'")) {
@@ -356,7 +390,7 @@ describe('Fase 4.1: Auditoria do Ciclo de Transição e Continuação Automátic
 
     // advanceEnrollmentFn conecta o motor canônico
     const advanceEnrollmentSpy = vi.fn(async (enrollmentId: string, _organizationId: string, nextNodeId: string) => {
-      const enr = mockDb.state.enrollments.get(enrollmentId);
+      const enr = mockDb.state.enrollments.get(enrollmentId)!;
       const enrollmentRow: EnrollmentRow = {
         id: enr.id,
         organization_id: enr.organization_id,
@@ -508,7 +542,7 @@ describe('Fase 4.1: Auditoria do Ciclo de Transição e Continuação Automátic
     };
 
     const advanceEnrollmentSpy = vi.fn(async (enrollmentId: string, _orgId: string, nextNodeId: string) => {
-      const enr = mockDb.state.enrollments.get(enrollmentId);
+      const enr = mockDb.state.enrollments.get(enrollmentId)!;
       const enrollmentRow: EnrollmentRow = {
         id: enr.id,
         organization_id: enr.organization_id,
@@ -627,7 +661,7 @@ describe('Fase 4.1: Auditoria do Ciclo de Transição e Continuação Automátic
     };
 
     const advanceEnrollmentSpy = vi.fn(async (enrollmentId: string, _orgId: string, nextNodeId: string) => {
-      const enr = mockDb.state.enrollments.get(enrollmentId);
+      const enr = mockDb.state.enrollments.get(enrollmentId)!;
       const enrollmentRow: EnrollmentRow = {
         id: enr.id,
         organization_id: enr.organization_id,
@@ -755,7 +789,7 @@ describe('Fase 4.1: Auditoria do Ciclo de Transição e Continuação Automátic
     };
 
     const advanceEnrollmentSpy = vi.fn(async (enrollmentId: string, _orgId: string, nextNodeId: string) => {
-      const enr = mockDb.state.enrollments.get(enrollmentId);
+      const enr = mockDb.state.enrollments.get(enrollmentId)!;
       const enrollmentRow: EnrollmentRow = {
         id: enr.id,
         organization_id: enr.organization_id,
@@ -1009,10 +1043,11 @@ describe('Fase 4.1: Auditoria do Ciclo de Transição e Continuação Automátic
     expect(firstResult.transitionStatus).toBe('transition_fresh');
     expect(advanceEnrollmentSpy).toHaveBeenCalledTimes(1);
 
-    // Simula crash do worker: o job é re-tentado com a MESMA mensagem inbound
+    // O avanço completou o fluxo com sucesso (status = 'completed')
+    mockDb.state.enrollments.get(enrId)!.status = 'completed';
     advanceEnrollmentSpy.mockClear();
 
-    // 2ª Execução (Retry da mensagem):
+    // 2ª Execução (Retry da mensagem com fluxo já completado):
     const retryResult = await executeAiNodeLifecycle(mockDb as unknown as DbPoolLike, input, deps);
 
     expect(retryResult.status).toBe('completed');
@@ -1026,3 +1061,770 @@ describe('Fase 4.1: Auditoria do Ciclo de Transição e Continuação Automátic
     expect(exitEvents).toHaveLength(1);
   });
 });
+
+describe('Fase 4.1+: Auditoria Final de Durabilidade e Proteção da Branch Handoff', () => {
+  const orgId = 'org-durability-41';
+  const enrId = 'enr-durability-41';
+  const contactId = 'contact-durability-41';
+  const convId = 'conv-durability-41';
+
+  function createDurabilityHarness(
+    graph: FlowGraph,
+    overrides: { inHandoff?: boolean; inboundMessageId?: string } = {},
+  ) {
+    const inboundMessageId = overrides.inboundMessageId ?? 'inbound-durability-1';
+    const mockDb = createMiniFlowMockDb({
+      enrollmentId: enrId,
+      organizationId: orgId,
+      nodeId: graph.nodes[0]!.id,
+      contactId,
+      conversationId: convId,
+      graph,
+      inboundMessageId,
+    });
+
+    const sideEffects = {
+      stagesMoved: [] as string[],
+      tagsApplied: [] as string[],
+      messagesEnqueued: [] as string[],
+      advanceCallCount: 0,
+    };
+
+    const engineAdminClient = createMockAdminClient({
+      loadFlowGraph: vi.fn().mockResolvedValue(graph),
+      updateLeadStage: vi.fn().mockImplementation(async (opts) => {
+        sideEffects.stagesMoved.push(opts.stage_id);
+      }),
+      updateLeadTags: vi.fn().mockImplementation(async (opts) => {
+        sideEffects.tagsApplied.push(...opts.tags);
+      }),
+      updateEnrollment: vi.fn().mockImplementation(async (id: string, _orgId: string, patch: EnrollmentPatch) => {
+        const enr = mockDb.state.enrollments.get(id);
+        if (enr) {
+          Object.assign(enr, patch);
+        }
+      }),
+      insertEnrollmentEvent: vi.fn().mockImplementation(async (evt: { event_type: string; node_id?: string; payload?: unknown; idempotency_key?: string }) => {
+        mockDb.state.events.push(evt as Record<string, unknown>);
+        return { inserted: true };
+      }),
+      loadEnrollmentEvents: vi.fn().mockImplementation(async (_enrId: string) => {
+        return mockDb.state.events.map((e, idx) => ({
+          id: (e.id as string) ?? `evt-${idx}`,
+          node_id: (e.node_id as string) ?? '',
+          event_type: (e.event_type as string) ?? '',
+          idempotency_key: (e.idempotency_key as string) ?? '',
+          payload: e.payload as Record<string, unknown>,
+          created_at: (e.created_at as string) ?? new Date().toISOString(),
+        }));
+      }),
+      isLeadInHandoff: vi.fn().mockImplementation(async () => overrides.inHandoff ?? false),
+    });
+
+    const engineTickDeps: TickDeps = {
+      db: engineAdminClient,
+      clock: () => new Date('2026-09-30T22:00:00.000Z'),
+      enqueueJob: vi.fn().mockImplementation(async (job) => {
+        sideEffects.messagesEnqueued.push(job.payload?.node_id ?? 'msg');
+      }),
+    };
+
+    const advanceEnrollmentAdapter = async (enrollmentId: string, advanceOrgId: string, nextNodeId: string) => {
+      sideEffects.advanceCallCount++;
+      const enr = mockDb.state.enrollments.get(enrollmentId)!;
+      const row: EnrollmentRow = {
+        id: enr.id,
+        organization_id: advanceOrgId,
+        pointer_id: 'ptr-1',
+        version_id: 'v1',
+        contact_id: enr.contact_id,
+        conversation_id: enr.conversation_id,
+        current_node_id: nextNodeId,
+        status: enr.status,
+        steps_taken: enr.steps_taken,
+        next_eval_at: new Date().toISOString(),
+        outcome: enr.outcome,
+        cancel_reason: null,
+        started_at: new Date().toISOString(),
+        completed_at: enr.completed_at,
+        updated_at: new Date().toISOString(),
+        claimed_until: null,
+        last_error: null,
+        attempts: 0,
+        max_attempts: 3,
+        service_boundary: null,
+      };
+      await avancarEnrollmentAtivo(engineTickDeps, row);
+    };
+
+    return {
+      mockDb,
+      engineAdminClient,
+      engineTickDeps,
+      advanceEnrollmentAdapter,
+      sideEffects,
+    };
+  }
+
+  // =========================================================================
+  // CENÁRIO A: Transition Commit -> Crash antes de advance -> Retry -> Exatamente 1x
+  // =========================================================================
+  it('A: transition commit -> crash antes de advance -> retry -> próximo node executa exatamente 1x', async () => {
+    const graph: FlowGraph = {
+      nodes: [
+        {
+          id: 'node-ai-1',
+          type: 'ai_node',
+          label: 'Atendimento IA',
+          position: { x: 0, y: 0 },
+          config: { mode: 'custom_prompt', custom_prompt: 'Atenda' },
+        },
+        {
+          id: 'node-stage-move-1',
+          type: 'stage_move',
+          label: 'Mover Etapa',
+          position: { x: 100, y: 0 },
+          config: { stage_id: STAGE_QUALIFICADO_UUID },
+        },
+        {
+          id: 'node-message-text-1',
+          type: 'message_text',
+          label: 'Mensagem Confirmação',
+          position: { x: 200, y: 0 },
+          config: { body: 'Etapa alterada com sucesso!' },
+        },
+      ],
+      edges: [
+        { id: 'e1', source: 'node-ai-1', target: 'node-stage-move-1', priority: 1, condition: { type: 'branch', branch_id: 'completed' } },
+        { id: 'e2', source: 'node-stage-move-1', target: 'node-message-text-1', priority: 1, condition: { type: 'always' } },
+      ],
+    };
+
+    const inboundId = 'inbound-durability-a';
+    const harness = createDurabilityHarness(graph, { inboundMessageId: inboundId });
+    let shouldCrashOnAdvance = true;
+
+    const advanceEnrollmentSpy = vi.fn(async (enrollmentId: string, advanceOrgId: string, nextNodeId: string) => {
+      if (shouldCrashOnAdvance) {
+        // Simula worker morrendo EXATAMENTE no início do callback antes de avancarEnrollmentAtivo
+        throw new Error('WORKER_CRASHED_BEFORE_ADVANCE');
+      }
+      await harness.advanceEnrollmentAdapter(enrollmentId, advanceOrgId, nextNodeId);
+    });
+
+    const input: ExecuteAiNodeLifecycleInput = {
+      organizationId: orgId,
+      enrollmentId: enrId,
+      nodeId: 'node-ai-1',
+      inboundMessageId: inboundId,
+      conversationId: convId,
+      contactId,
+      workerId: 'worker-1',
+      leaseGeneration: 1,
+      session: harness.mockDb.getEnrollment().ai_node_session,
+      inboundText: 'Concluir atendimento',
+    };
+
+    const deps: ExecuteAiNodeLifecycleDeps = {
+      advanceEnrollmentFn: advanceEnrollmentSpy,
+      sendOutboundHandler: vi.fn().mockResolvedValue({ id: 'crm-msg-a', status: 'sent' }),
+      validateOwnershipFn: vi.fn().mockResolvedValue({ is_valid: true }),
+      runModelCallFn: vi.fn().mockResolvedValue({
+        result: {
+          text: JSON.stringify({
+            reply: 'Finalizando por aqui!',
+            node_status: 'completed',
+            outcome: 'qualificado',
+            extracted_data: {},
+          }),
+        },
+        provider: 'anthropic',
+        model: 'claude-3-5-sonnet',
+        usage: { inputTokens: 50, outputTokens: 20 },
+      }),
+    };
+
+    // 1ª Tentativa: worker processa, comita transição no banco e MORRE antes de avançar
+    const firstResult = await executeAiNodeLifecycle(harness.mockDb as unknown as DbPoolLike, input, deps);
+    expect(firstResult.status).toBe('completed');
+    expect(firstResult.transitionStatus).toBe('transition_fresh');
+
+    // Estado após crash:
+    const enrAfterCrash = harness.mockDb.getEnrollment();
+    expect(enrAfterCrash.current_node_id).toBe('node-stage-move-1'); // Transição comitada!
+    expect(enrAfterCrash.status).toBe('active');
+    expect(harness.sideEffects.stagesMoved).toHaveLength(0); // Próximo nó NÃO executou
+    expect(harness.sideEffects.messagesEnqueued).toHaveLength(0);
+
+    // 2ª Tentativa (Retry da mesma inbound):
+    shouldCrashOnAdvance = false; // Worker recuperado retoma execução
+    const retryResult = await executeAiNodeLifecycle(harness.mockDb as unknown as DbPoolLike, input, deps);
+
+    expect(retryResult.status).toBe('completed');
+    expect(retryResult.transitionStatus).toBe('transition_already_applied');
+
+    // Efeitos colaterais esperados: EXATAMENTE UMA VEZ cada um (nem zero nem duas vezes)
+    expect(harness.sideEffects.stagesMoved).toEqual([STAGE_QUALIFICADO_UUID]);
+    expect(harness.sideEffects.messagesEnqueued).toEqual(['node-message-text-1']);
+  });
+
+  // =========================================================================
+  // CENÁRIO B: advance começa -> stage_move executa -> crash antes de message_text -> recuperação continua sem repetir stage_move
+  // =========================================================================
+  it('B: advance começa -> stage_move executa -> crash antes de message_text -> recuperação sem duplicar stage_move', async () => {
+    const graph: FlowGraph = {
+      nodes: [
+        {
+          id: 'node-ai-2',
+          type: 'ai_node',
+          label: 'Atendimento IA',
+          position: { x: 0, y: 0 },
+          config: { mode: 'custom_prompt', custom_prompt: 'Atenda' },
+        },
+        {
+          id: 'node-stage-move-2',
+          type: 'stage_move',
+          label: 'Mover Etapa',
+          position: { x: 100, y: 0 },
+          config: { stage_id: STAGE_QUALIFICADO_UUID },
+        },
+        {
+          id: 'node-message-text-2',
+          type: 'message_text',
+          label: 'Mensagem Confirmação',
+          position: { x: 200, y: 0 },
+          config: { body: 'Etapa alterada com sucesso!' },
+        },
+      ],
+      edges: [
+        { id: 'e1', source: 'node-ai-2', target: 'node-stage-move-2', priority: 1, condition: { type: 'branch', branch_id: 'completed' } },
+        { id: 'e2', source: 'node-stage-move-2', target: 'node-message-text-2', priority: 1, condition: { type: 'always' } },
+      ],
+    };
+
+    const inboundId = 'inbound-durability-b';
+    const harness = createDurabilityHarness(graph, { inboundMessageId: inboundId });
+
+    // Simula crash que ocorre logo após stage_move atualizar o banco para node-message-text-2
+    let crashAfterStageMove = true;
+    const advanceEnrollmentSpy = vi.fn(async (enrollmentId: string, advanceOrgId: string, nextNodeId: string) => {
+      const enr = harness.mockDb.state.enrollments.get(enrollmentId)!;
+      if (crashAfterStageMove && nextNodeId === 'node-stage-move-2') {
+        // stage_move executa
+        harness.sideEffects.stagesMoved.push(STAGE_QUALIFICADO_UUID);
+        // Atualiza banco para o próximo nó
+        enr.current_node_id = 'node-message-text-2';
+        enr.steps_taken = (Number(enr.steps_taken) || 0) + 1;
+        crashAfterStageMove = false;
+        // Crash ocorre antes de processar message_text
+        throw new Error('WORKER_CRASHED_AFTER_STAGE_MOVE');
+      }
+      await harness.advanceEnrollmentAdapter(enrollmentId, advanceOrgId, nextNodeId);
+    });
+
+    const input: ExecuteAiNodeLifecycleInput = {
+      organizationId: orgId,
+      enrollmentId: enrId,
+      nodeId: 'node-ai-2',
+      inboundMessageId: inboundId,
+      conversationId: convId,
+      contactId,
+      workerId: 'worker-1',
+      leaseGeneration: 1,
+      session: harness.mockDb.getEnrollment().ai_node_session,
+      inboundText: 'Concluir',
+    };
+
+    const deps: ExecuteAiNodeLifecycleDeps = {
+      advanceEnrollmentFn: advanceEnrollmentSpy,
+      sendOutboundHandler: vi.fn().mockResolvedValue({ id: 'crm-msg-b', status: 'sent' }),
+      validateOwnershipFn: vi.fn().mockResolvedValue({ is_valid: true }),
+      runModelCallFn: vi.fn().mockResolvedValue({
+        result: {
+          text: JSON.stringify({
+            reply: 'Finalizando!',
+            node_status: 'completed',
+            outcome: 'qualificado',
+            extracted_data: {},
+          }),
+        },
+        provider: 'anthropic',
+        model: 'claude-3-5-sonnet',
+        usage: { inputTokens: 50, outputTokens: 20 },
+      }),
+    };
+
+    // 1ª Tentativa: stage_move executa e worker cai antes de message_text
+    await executeAiNodeLifecycle(harness.mockDb as unknown as DbPoolLike, input, deps);
+
+    expect(harness.sideEffects.stagesMoved).toEqual([STAGE_QUALIFICADO_UUID]);
+    expect(harness.sideEffects.messagesEnqueued).toHaveLength(0);
+    expect(harness.mockDb.getEnrollment().current_node_id).toBe('node-message-text-2');
+
+    // 2ª Tentativa (Retry da mesma inbound):
+    await executeAiNodeLifecycle(harness.mockDb as unknown as DbPoolLike, input, deps);
+
+    // stage_move NÃO repetiu (permaneceu com 1 execução) e message_text executou
+    expect(harness.sideEffects.stagesMoved).toEqual([STAGE_QUALIFICADO_UUID]);
+    expect(harness.sideEffects.messagesEnqueued).toEqual(['node-message-text-2']);
+  });
+
+  // =========================================================================
+  // CENÁRIO C: advance termina completamente -> crash -> retry original -> nenhum efeito duplicado
+  // =========================================================================
+  it('C: advance termina completamente -> crash -> retry original -> zero efeitos duplicados', async () => {
+    const graph: FlowGraph = {
+      nodes: [
+        {
+          id: 'node-ai-3',
+          type: 'ai_node',
+          label: 'Atendimento IA',
+          position: { x: 0, y: 0 },
+          config: { mode: 'custom_prompt', custom_prompt: 'Atenda' },
+        },
+        {
+          id: 'node-stage-move-3',
+          type: 'stage_move',
+          label: 'Mover Etapa',
+          position: { x: 100, y: 0 },
+          config: { stage_id: STAGE_QUALIFICADO_UUID },
+        },
+        {
+          id: 'node-msg-end-3',
+          type: 'message_text',
+          label: 'Fim',
+          position: { x: 200, y: 0 },
+          config: { body: 'Fim' },
+        },
+      ],
+      edges: [
+        { id: 'e1', source: 'node-ai-3', target: 'node-stage-move-3', priority: 1, condition: { type: 'branch', branch_id: 'completed' } },
+        { id: 'e2', source: 'node-stage-move-3', target: 'node-msg-end-3', priority: 1, condition: { type: 'always' } },
+      ],
+    };
+
+    const inboundId = 'inbound-durability-c';
+    const harness = createDurabilityHarness(graph, { inboundMessageId: inboundId });
+
+    const advanceEnrollmentSpy = vi.fn(async (enrollmentId: string, advanceOrgId: string, nextNodeId: string) => {
+      await harness.advanceEnrollmentAdapter(enrollmentId, advanceOrgId, nextNodeId);
+      // Fluxo completado com sucesso
+      harness.mockDb.state.enrollments.get(enrollmentId)!.status = 'completed';
+    });
+
+    const input: ExecuteAiNodeLifecycleInput = {
+      organizationId: orgId,
+      enrollmentId: enrId,
+      nodeId: 'node-ai-3',
+      inboundMessageId: inboundId,
+      conversationId: convId,
+      contactId,
+      workerId: 'worker-1',
+      leaseGeneration: 1,
+      session: harness.mockDb.getEnrollment().ai_node_session,
+      inboundText: 'Concluir',
+    };
+
+    const deps: ExecuteAiNodeLifecycleDeps = {
+      advanceEnrollmentFn: advanceEnrollmentSpy,
+      sendOutboundHandler: vi.fn().mockResolvedValue({ id: 'crm-msg-c', status: 'sent' }),
+      validateOwnershipFn: vi.fn().mockResolvedValue({ is_valid: true }),
+      runModelCallFn: vi.fn().mockResolvedValue({
+        result: {
+          text: JSON.stringify({
+            reply: 'Finalizando!',
+            node_status: 'completed',
+            outcome: 'qualificado',
+            extracted_data: {},
+          }),
+        },
+        provider: 'anthropic',
+        model: 'claude-3-5-sonnet',
+        usage: { inputTokens: 50, outputTokens: 20 },
+      }),
+    };
+
+    // 1ª Execução: conclui tudo
+    await executeAiNodeLifecycle(harness.mockDb as unknown as DbPoolLike, input, deps);
+    expect(harness.sideEffects.stagesMoved).toEqual([STAGE_QUALIFICADO_UUID]);
+    expect(harness.mockDb.getEnrollment().status).toBe('completed');
+
+    // 2ª Execução (Simula crash tardio e retry do webhook original):
+    advanceEnrollmentSpy.mockClear();
+    const retryResult = await executeAiNodeLifecycle(harness.mockDb as unknown as DbPoolLike, input, deps);
+
+    expect(retryResult.transitionStatus).toBe('transition_already_applied');
+    // advanceEnrollmentFn NÃO é chamado novamente (zero duplicação)
+    expect(advanceEnrollmentSpy).not.toHaveBeenCalled();
+    expect(harness.sideEffects.stagesMoved).toEqual([STAGE_QUALIFICADO_UUID]);
+  });
+
+  // =========================================================================
+  // CENÁRIO D: 20 retries da mesma inbound -> uma única cadeia lógica de continuação
+  // =========================================================================
+  it('D: 20 retries da mesma inbound -> uma única cadeia lógica de continuação', async () => {
+    const graph: FlowGraph = {
+      nodes: [
+        {
+          id: 'node-ai-4',
+          type: 'ai_node',
+          label: 'Atendimento IA',
+          position: { x: 0, y: 0 },
+          config: { mode: 'custom_prompt', custom_prompt: 'Atenda' },
+        },
+        {
+          id: 'node-stage-move-4',
+          type: 'stage_move',
+          label: 'Mover Etapa',
+          position: { x: 100, y: 0 },
+          config: { stage_id: STAGE_QUALIFICADO_UUID },
+        },
+        {
+          id: 'node-msg-end-4',
+          type: 'message_text',
+          label: 'Fim',
+          position: { x: 200, y: 0 },
+          config: { body: 'Fim' },
+        },
+      ],
+      edges: [
+        { id: 'e1', source: 'node-ai-4', target: 'node-stage-move-4', priority: 1, condition: { type: 'branch', branch_id: 'completed' } },
+        { id: 'e2', source: 'node-stage-move-4', target: 'node-msg-end-4', priority: 1, condition: { type: 'always' } },
+      ],
+    };
+
+    const inboundId = 'inbound-durability-d-20x';
+    const harness = createDurabilityHarness(graph, { inboundMessageId: inboundId });
+
+    const advanceEnrollmentSpy = vi.fn(async (enrollmentId: string, advanceOrgId: string, nextNodeId: string) => {
+      await harness.advanceEnrollmentAdapter(enrollmentId, advanceOrgId, nextNodeId);
+      harness.mockDb.state.enrollments.get(enrollmentId)!.status = 'completed';
+    });
+
+    const input: ExecuteAiNodeLifecycleInput = {
+      organizationId: orgId,
+      enrollmentId: enrId,
+      nodeId: 'node-ai-4',
+      inboundMessageId: inboundId,
+      conversationId: convId,
+      contactId,
+      workerId: 'worker-1',
+      leaseGeneration: 1,
+      session: harness.mockDb.getEnrollment().ai_node_session,
+      inboundText: 'Mover agora',
+    };
+
+    const deps: ExecuteAiNodeLifecycleDeps = {
+      advanceEnrollmentFn: advanceEnrollmentSpy,
+      sendOutboundHandler: vi.fn().mockResolvedValue({ id: 'crm-msg-d', status: 'sent' }),
+      validateOwnershipFn: vi.fn().mockResolvedValue({ is_valid: true }),
+      runModelCallFn: vi.fn().mockResolvedValue({
+        result: {
+          text: JSON.stringify({
+            reply: 'Movendo!',
+            node_status: 'completed',
+            outcome: 'qualificado',
+            extracted_data: {},
+          }),
+        },
+        provider: 'anthropic',
+        model: 'claude-3-5-sonnet',
+        usage: { inputTokens: 50, outputTokens: 20 },
+      }),
+    };
+
+    // Executa 20 vezes consecutivas simulando retries agressivos de webhook
+    for (let i = 1; i <= 20; i++) {
+      const res = await executeAiNodeLifecycle(harness.mockDb as unknown as DbPoolLike, input, deps);
+      if (i === 1) {
+        expect(res.transitionStatus).toBe('transition_fresh');
+      } else {
+        expect(res.transitionStatus).toBe('transition_already_applied');
+      }
+    }
+
+    // O side effect foi executado EXATAMENTE UMA VEZ
+    expect(harness.sideEffects.stagesMoved).toEqual([STAGE_QUALIFICADO_UUID]);
+  });
+
+  // =========================================================================
+  // CENÁRIO E: deterministic_completed -> mesma garantia durável
+  // =========================================================================
+  it('E: deterministic_completed -> mesma garantia durável pós-crash', async () => {
+    const graph: FlowGraph = {
+      nodes: [
+        {
+          id: 'node-ai-det',
+          type: 'ai_node',
+          label: 'Atendimento IA Determinístico',
+          position: { x: 0, y: 0 },
+          config: {
+            mode: 'custom_prompt',
+            custom_prompt: 'Atenda',
+            deterministic_conditions: {
+              min_images: 1,
+            },
+          },
+        },
+        {
+          id: 'node-stage-det',
+          type: 'stage_move',
+          label: 'Mover Etapa',
+          position: { x: 100, y: 0 },
+          config: { stage_id: STAGE_QUALIFICADO_UUID },
+        },
+        {
+          id: 'node-msg-end-det',
+          type: 'message_text',
+          label: 'Fim',
+          position: { x: 200, y: 0 },
+          config: { body: 'Fim' },
+        },
+      ],
+      edges: [
+        { id: 'e1', source: 'node-ai-det', target: 'node-stage-det', priority: 1, condition: { type: 'branch', branch_id: 'completed' } },
+        { id: 'e2', source: 'node-stage-det', target: 'node-msg-end-det', priority: 1, condition: { type: 'always' } },
+      ],
+    };
+
+    const inboundId = 'inbound-det-crash';
+    const harness = createDurabilityHarness(graph, { inboundMessageId: inboundId });
+    harness.mockDb.getEnrollment().ai_node_session.media_summary = {
+      images_count: 1,
+      audios_count: 0,
+      documents_count: 0,
+      last_media_ids: ['img-1'],
+    };
+
+    let crashBeforeAdvance = true;
+    const advanceEnrollmentSpy = vi.fn(async (enrollmentId: string, advanceOrgId: string, nextNodeId: string) => {
+      if (crashBeforeAdvance) {
+        crashBeforeAdvance = false;
+        throw new Error('CRASH_DETERMINISTIC');
+      }
+      await harness.advanceEnrollmentAdapter(enrollmentId, advanceOrgId, nextNodeId);
+      harness.mockDb.state.enrollments.get(enrollmentId)!.status = 'completed';
+    });
+
+    const input: ExecuteAiNodeLifecycleInput = {
+      organizationId: orgId,
+      enrollmentId: enrId,
+      nodeId: 'node-ai-det',
+      inboundMessageId: inboundId,
+      conversationId: convId,
+      contactId,
+      workerId: 'worker-1',
+      leaseGeneration: 1,
+      session: harness.mockDb.getEnrollment().ai_node_session,
+    };
+
+    const runModelCallSpy = vi.fn();
+    const deps: ExecuteAiNodeLifecycleDeps = {
+      advanceEnrollmentFn: advanceEnrollmentSpy,
+      runModelCallFn: runModelCallSpy,
+      validateOwnershipFn: vi.fn().mockResolvedValue({ is_valid: true }),
+    };
+
+    // 1ª Execução com crash
+    const res1 = await executeAiNodeLifecycle(harness.mockDb as unknown as DbPoolLike, input, deps);
+    expect(res1.status).toBe('deterministic_completed');
+    expect(res1.transitionStatus).toBe('transition_fresh');
+    expect(harness.sideEffects.stagesMoved).toHaveLength(0);
+
+    // 2ª Execução com retry
+    const res2 = await executeAiNodeLifecycle(harness.mockDb as unknown as DbPoolLike, input, deps);
+    expect(res2.transitionStatus).toBe('transition_already_applied');
+    expect(harness.sideEffects.stagesMoved).toEqual([STAGE_QUALIFICADO_UUID]);
+    expect(runModelCallSpy).not.toHaveBeenCalled();
+  });
+
+  // =========================================================================
+  // CENÁRIO F: branch error -> mesma garantia durável pós-crash
+  // =========================================================================
+  it('F: branch error -> mesma garantia durável pós-crash', async () => {
+    const graph: FlowGraph = {
+      nodes: [
+        {
+          id: 'node-ai-err',
+          type: 'ai_node',
+          label: 'Atendimento IA',
+          position: { x: 0, y: 0 },
+          config: { mode: 'custom_prompt', custom_prompt: 'Atenda' },
+        },
+        {
+          id: 'node-stage-fallback',
+          type: 'stage_move',
+          label: 'Etapa Fallback',
+          position: { x: 100, y: 0 },
+          config: { stage_id: STAGE_AUTO_UUID },
+        },
+        {
+          id: 'node-msg-end-fallback',
+          type: 'message_text',
+          label: 'Fim',
+          position: { x: 200, y: 0 },
+          config: { body: 'Fim' },
+        },
+      ],
+      edges: [
+        { id: 'e1', source: 'node-ai-err', target: 'node-stage-fallback', priority: 1, condition: { type: 'branch', branch_id: 'error' } },
+        { id: 'e2', source: 'node-stage-fallback', target: 'node-msg-end-fallback', priority: 1, condition: { type: 'always' } },
+      ],
+    };
+
+    const inboundId = 'inbound-err-crash';
+    const harness = createDurabilityHarness(graph, { inboundMessageId: inboundId });
+    let crashBeforeAdvance = true;
+
+    const advanceEnrollmentSpy = vi.fn(async (enrollmentId: string, advanceOrgId: string, nextNodeId: string) => {
+      if (crashBeforeAdvance) {
+        crashBeforeAdvance = false;
+        throw new Error('CRASH_ON_ERROR_BRANCH');
+      }
+      await harness.advanceEnrollmentAdapter(enrollmentId, advanceOrgId, nextNodeId);
+      harness.mockDb.state.enrollments.get(enrollmentId)!.status = 'completed';
+    });
+
+    const input: ExecuteAiNodeLifecycleInput = {
+      organizationId: orgId,
+      enrollmentId: enrId,
+      nodeId: 'node-ai-err',
+      inboundMessageId: inboundId,
+      conversationId: convId,
+      contactId,
+      workerId: 'worker-1',
+      leaseGeneration: 1,
+      session: harness.mockDb.getEnrollment().ai_node_session,
+    };
+
+    const deps: ExecuteAiNodeLifecycleDeps = {
+      advanceEnrollmentFn: advanceEnrollmentSpy,
+      validateOwnershipFn: vi.fn().mockResolvedValue({ is_valid: true }),
+      runModelCallFn: vi.fn().mockRejectedValue(new Error('LLM_PROVIDER_DOWN')),
+    };
+
+    // 1ª Execução: dispara erro e crash no avanço
+    const res1 = await executeAiNodeLifecycle(harness.mockDb as unknown as DbPoolLike, input, deps);
+    expect(res1.status).toBe('error');
+    expect(res1.transitionStatus).toBe('transition_fresh');
+    expect(harness.sideEffects.stagesMoved).toHaveLength(0);
+
+    // 2ª Execução: retry recupera a continuação da branch error
+    const res2 = await executeAiNodeLifecycle(harness.mockDb as unknown as DbPoolLike, input, deps);
+    expect(res2.transitionStatus).toBe('transition_already_applied');
+    expect(harness.sideEffects.stagesMoved).toEqual([STAGE_AUTO_UUID]);
+  });
+
+  // =========================================================================
+  // CENÁRIO G & 9: branch handoff: tag e stage_move continuam, message_text bloqueada
+  // =========================================================================
+  it('G/9: semantic handoff -> performHumanHandoff executado, tag e stage aplicados, message_text pausado', async () => {
+    const graph: FlowGraph = {
+      nodes: [
+        {
+          id: 'node-ai-handoff',
+          type: 'ai_node',
+          label: 'Atendimento IA',
+          position: { x: 0, y: 0 },
+          config: { mode: 'custom_prompt', custom_prompt: 'Atenda' },
+        },
+        {
+          id: 'node-tag-precisa-humano',
+          type: 'tag',
+          label: 'Tag Precisa Humano',
+          position: { x: 100, y: 0 },
+          config: { action: 'add', tags: ['precisa_humano'] },
+        },
+        {
+          id: 'node-stage-atendimento-humano',
+          type: 'stage_move',
+          label: 'Etapa Atendimento Humano',
+          position: { x: 200, y: 0 },
+          config: { stage_id: STAGE_QUALIFICADO_UUID },
+        },
+        {
+          id: 'node-message-outbound-cliente',
+          type: 'message_text',
+          label: 'Mensagem Robô para Cliente',
+          position: { x: 300, y: 0 },
+          config: { body: 'Você ainda está aí?' },
+        },
+      ],
+      edges: [
+        { id: 'e1', source: 'node-ai-handoff', target: 'node-tag-precisa-humano', priority: 1, condition: { type: 'branch', branch_id: 'handoff' } },
+        { id: 'e2', source: 'node-tag-precisa-humano', target: 'node-stage-atendimento-humano', priority: 1, condition: { type: 'always' } },
+        { id: 'e3', source: 'node-stage-atendimento-humano', target: 'node-message-outbound-cliente', priority: 1, condition: { type: 'always' } },
+      ],
+    };
+
+    let humanHandoffTriggered = false;
+    const inboundId = 'inbound-handoff-durability';
+    const harness = createDurabilityHarness(graph, { inboundMessageId: inboundId });
+
+    // Quando performHumanHandoff for chamado, ativa a flag de atendimento humano
+    harness.engineAdminClient.isLeadInHandoff = vi.fn().mockImplementation(async () => humanHandoffTriggered);
+
+    const performHumanHandoffSpy = vi.fn(async () => {
+      humanHandoffTriggered = true;
+    });
+
+    const advanceEnrollmentSpy = vi.fn(async (enrollmentId: string, advanceOrgId: string, nextNodeId: string) => {
+      await harness.advanceEnrollmentAdapter(enrollmentId, advanceOrgId, nextNodeId);
+    });
+
+    const input: ExecuteAiNodeLifecycleInput = {
+      organizationId: orgId,
+      enrollmentId: enrId,
+      nodeId: 'node-ai-handoff',
+      inboundMessageId: inboundId,
+      conversationId: convId,
+      contactId,
+      workerId: 'worker-1',
+      leaseGeneration: 1,
+      session: harness.mockDb.getEnrollment().ai_node_session,
+      inboundText: 'Quero falar com uma pessoa',
+    };
+
+    const deps: ExecuteAiNodeLifecycleDeps = {
+      performHumanHandoffFn: performHumanHandoffSpy,
+      advanceEnrollmentFn: advanceEnrollmentSpy,
+      sendOutboundHandler: vi.fn().mockResolvedValue({ id: 'crm-msg-h', status: 'sent' }),
+      validateOwnershipFn: vi.fn().mockResolvedValue({ is_valid: true }),
+      runModelCallFn: vi.fn().mockResolvedValue({
+        result: {
+          text: JSON.stringify({
+            reply: 'Transferindo para a nossa equipe!',
+            node_status: 'handoff',
+            outcome: 'pedido_de_humano',
+            extracted_data: {},
+          }),
+        },
+        provider: 'anthropic',
+        model: 'claude-3-5-sonnet',
+        usage: { inputTokens: 50, outputTokens: 20 },
+      }),
+    };
+
+    const result = await executeAiNodeLifecycle(harness.mockDb as unknown as DbPoolLike, input, deps);
+
+    // 1. Status do lifecycle é handoff e chamou performHumanHandoff
+    expect(result.status).toBe('handoff');
+    expect(performHumanHandoffSpy).toHaveBeenCalledTimes(1);
+
+    // 2. Ações internas silenciosas EXECUTARAM normalmente:
+    expect(harness.sideEffects.tagsApplied).toEqual(['precisa_humano']);
+    expect(harness.sideEffects.stagesMoved).toEqual([STAGE_QUALIFICADO_UUID]);
+
+    // 3. Nó de mensagem que fala com o cliente NÃO foi enviado/enfileirado:
+    expect(harness.sideEffects.messagesEnqueued).toHaveLength(0);
+
+    // 4. Fluxo foi pausado coerentemente em paused_handoff
+    const finalEnr = harness.mockDb.getEnrollment();
+    expect(finalEnr.status).toBe('paused_handoff');
+
+    // 5. Evento outbound_paused_human_takeover foi registrado
+    const pausedEvent = harness.mockDb.state.events.find((e) => e.event_type === 'outbound_paused_human_takeover');
+    expect(pausedEvent).toBeDefined();
+  });
+});
+

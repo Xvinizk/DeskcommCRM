@@ -187,6 +187,7 @@ export interface AdminClient {
   }): Promise<void>;
   enqueueJob?(job: FollowupJobRequest): Promise<void>;
   loadEnrollmentById?(orgId: string, id: string): Promise<EnrollmentRow | null>;
+  isLeadInHandoff?(orgId: string, contactId: string, conversationId?: string | null): Promise<boolean>;
 }
 
 export interface TickDeps {
@@ -886,6 +887,35 @@ async function processEnrollment(
         wokeEarly = events.some((e) => e.node_id === node.id && e.idempotency_key === wakeKey);
       }
       if (isSendMessageNode(node)) {
+        if (db.isLeadInHandoff) {
+          const inHandoff = await db.isLeadInHandoff(
+            currentEnrollment.organization_id,
+            currentEnrollment.contact_id,
+            currentEnrollment.conversation_id,
+          );
+          if (inHandoff) {
+            logger.warn("followup: outbound para cliente pausado — lead em handoff humano", {
+              enrollment_id: currentEnrollment.id,
+              node_id: node.id,
+              contact_id: currentEnrollment.contact_id,
+            });
+            await db.insertEnrollmentEvent({
+              organization_id: currentEnrollment.organization_id,
+              enrollment_id: currentEnrollment.id,
+              node_id: node.id,
+              event_type: "outbound_paused_human_takeover",
+              payload: { reason: "lead_in_handoff" },
+              idempotency_key: `${node.id}:${currentEnrollment.steps_taken}:handoff_paused`,
+            });
+            await db.updateEnrollment(currentEnrollment.id, currentEnrollment.organization_id, {
+              status: "paused_handoff",
+              claimed_until: null,
+              next_eval_at: null,
+              updated_at: clock().toISOString(),
+            });
+            return;
+          }
+        }
         actionEnqueued = waitElapsed;
         // NÃO é `occupancyEventCount`: o dead-man mede ociosidade DESDE A ÚLTIMA
         // prova de vida do turno, e um adiamento de janela é prova de vida. Ver
@@ -1289,6 +1319,26 @@ export function createSupabaseAdminClient(admin: SupabaseClient): AdminClient {
         ...(sourceEventId ? { source_event_id: sourceEventId } : {}),
       });
       if (error && error.code !== "23505") throw new Error(error.message);
+    },
+    async isLeadInHandoff(orgId, contactId, _conversationId) {
+      const { data: contact } = await admin
+        .from("contacts")
+        .select("force_human")
+        .eq("organization_id", orgId)
+        .eq("id", contactId)
+        .maybeSingle();
+
+      if (contact?.force_human) return true;
+
+      const { data: convs } = await admin
+        .from("conversations")
+        .select("bot_silenced_until")
+        .eq("organization_id", orgId)
+        .eq("contact_id", contactId)
+        .gt("bot_silenced_until", new Date().toISOString())
+        .limit(1);
+
+      return (convs && convs.length > 0) || false;
     },
   };
 }

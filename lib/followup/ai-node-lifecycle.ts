@@ -140,6 +140,143 @@ export function buildAiNodeSendIdempotencyKey(params: {
   return `ai_node_send:${params.organizationId}:${params.enrollmentId}:${params.nodeId}:${params.inboundMessageId}`;
 }
 
+async function applyAiNodeTransition(
+  db: DbPoolLike,
+  input: ExecuteAiNodeLifecycleInput,
+  nextNodeId: string,
+  branchId: string,
+  updatedSession: AiNodeSession,
+  nowIso: string,
+  exitedKey: string,
+  deps: ExecuteAiNodeLifecycleDeps | undefined,
+  metadata?: Record<string, unknown>,
+): Promise<'transition_fresh' | 'transition_already_applied'> {
+  const { rows: exitedRows } = await db.query<{ id: string }>(
+    `SELECT id FROM followup_enrollment_events WHERE enrollment_id = $1 AND idempotency_key = $2 LIMIT 1`,
+    [input.enrollmentId, exitedKey],
+  );
+
+  let transitionStatus: 'transition_fresh' | 'transition_already_applied' = 'transition_fresh';
+
+  if (exitedRows.length > 0) {
+    transitionStatus = 'transition_already_applied';
+    logger.info('[ai-node-lifecycle] Transição já havia sido aplicada anteriormente (zero re-transição)', {
+      enrollment_id: input.enrollmentId,
+      node_id: input.nodeId,
+      branch_id: branchId,
+    });
+  } else {
+    // 1. Atualiza followup_enrollments com status ativo e next_eval_at imediato
+    await db.query(
+      `UPDATE followup_enrollments
+       SET current_node_id = $1, steps_taken = steps_taken + 1, ai_node_session = $2, next_eval_at = $3, status = 'active', claimed_until = null, updated_at = $3
+       WHERE organization_id = $4 AND id = $5`,
+      [nextNodeId, JSON.stringify(updatedSession), nowIso, input.organizationId, input.enrollmentId],
+    );
+
+    // 2. Registra o evento canônico ai_node.exited com chave de idempotência
+    await db.query(
+      `INSERT INTO followup_enrollment_events (
+         organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (enrollment_id, idempotency_key) DO NOTHING`,
+      [
+        input.organizationId,
+        input.enrollmentId,
+        input.nodeId,
+        'ai_node.exited',
+        JSON.stringify({
+          next_node_id: nextNodeId,
+          branch: branchId,
+          exited_at: nowIso,
+          ...metadata,
+        }),
+        exitedKey,
+        nowIso,
+      ],
+    );
+
+    // 3. Mecanismo Durável: enfileira job wait_wake na job_queue
+    let contactId = input.contactId;
+    if (!contactId) {
+      try {
+        const { rows: cRows } = await db.query<{ contact_id: string }>(
+          `SELECT contact_id FROM followup_enrollments WHERE id = $1 LIMIT 1`,
+          [input.enrollmentId],
+        );
+        contactId = cRows[0]?.contact_id;
+      } catch {}
+    }
+
+    if (contactId) {
+      const sourceEventId = deterministicUuid(`followup:${input.enrollmentId}:${exitedKey}`);
+      try {
+        await db.query(
+          `INSERT INTO job_queue (
+             organization_id, contact_id, kind, payload, source_event_id, run_after, status
+           ) VALUES ($1, $2, 'followup_turn', $3, $4, $5, 'pending')
+           ON CONFLICT (organization_id, source_event_id) DO NOTHING`,
+          [
+            input.organizationId,
+            contactId,
+            JSON.stringify({
+              followup_enrollment_id: input.enrollmentId,
+              node_id: nextNodeId,
+              purpose: 'wait_wake',
+              source_step_key: exitedKey,
+            }),
+            sourceEventId,
+            nowIso,
+          ],
+        );
+      } catch (err) {
+        // Mock ou ambiente sem tabela job_queue não quebra a transição
+        logger.warn('[ai-node-lifecycle] Não foi possível enfileirar wait_wake durável na job_queue', {
+          error: String(err),
+        });
+      }
+    }
+  }
+
+  // Continuação crash-safe
+  if (deps?.advanceEnrollmentFn) {
+    if (transitionStatus === 'transition_fresh') {
+      try {
+        await deps.advanceEnrollmentFn(input.enrollmentId, input.organizationId, nextNodeId);
+      } catch (err) {
+        logger.error('[ai-node-lifecycle] Falha ao avançar enrollment pós-transição fresca', {
+          enrollment_id: input.enrollmentId,
+          next_node_id: nextNodeId,
+          branch_id: branchId,
+          error: String(err),
+        });
+      }
+    } else {
+      // transition_already_applied: recuperação pós-crash
+      const { rows: currentEnrRows } = await db.query<{ current_node_id: string; status: string }>(
+        `SELECT current_node_id, status FROM followup_enrollments WHERE organization_id = $1 AND id = $2 LIMIT 1`,
+        [input.organizationId, input.enrollmentId],
+      );
+      const currentEnr = currentEnrRows[0];
+      if (currentEnr && currentEnr.status === 'active') {
+        const resumeNodeId = currentEnr.current_node_id;
+        try {
+          await deps.advanceEnrollmentFn(input.enrollmentId, input.organizationId, resumeNodeId);
+        } catch (err) {
+          logger.error('[ai-node-lifecycle] Falha ao recuperar avanço de enrollment pós-crash', {
+            enrollment_id: input.enrollmentId,
+            resume_node_id: resumeNodeId,
+            branch_id: branchId,
+            error: String(err),
+          });
+        }
+      }
+    }
+  }
+
+  return transitionStatus;
+}
+
 /**
  * Executa o ciclo de vida completo do Node IA com garantias de segurança e idempotência.
  */
@@ -153,8 +290,16 @@ export async function executeAiNodeLifecycle(
   const nowIso = now.toISOString();
 
   // =========================================================================
-  // 1. CHECAGEM INICIAL DE IDEMPOTÊNCIA DO TURNO COMPLETO
+  // 1. CHECAGEM INICIAL DE IDEMPOTÊNCIA DO TURNO COMPLETO OU TRANSIÇÃO JÁ APLICADA
   // =========================================================================
+  const exitedKey = `ai_node_exited:${input.organizationId}:${input.enrollmentId}:${input.nodeId}:${input.inboundMessageId}`;
+  const { rows: exitedRows } = await db.query<{ id: string; payload: unknown }>(
+    `SELECT id, payload FROM followup_enrollment_events
+     WHERE enrollment_id = $1 AND idempotency_key = $2
+     LIMIT 1`,
+    [input.enrollmentId, exitedKey],
+  );
+
   const completedKey = buildAiNodeTurnCompletedKey(input);
   const { rows: completedRows } = await db.query<{ id: string }>(
     `SELECT id FROM followup_enrollment_events
@@ -163,9 +308,54 @@ export async function executeAiNodeLifecycle(
     [input.enrollmentId, completedKey],
   );
 
-  if (completedRows.length > 0) {
-    // Turno já completamente finalizado no passado — replay seguro
+  if (exitedRows.length > 0 || completedRows.length > 0) {
+    // A transição de saída do Nó IA já ocorreu no passado para esta inbound.
+    // Recupera dados estruturados e desfecho gravados.
     const cachedReply = await getAiNodeGeneratedReply(db, input);
+    let targetNodeId: string | null = null;
+    const payloadRaw = exitedRows[0]?.payload;
+    if (payloadRaw) {
+      const payloadObj = typeof payloadRaw === 'string' ? JSON.parse(payloadRaw) : payloadRaw;
+      targetNodeId = payloadObj.next_node_id ?? null;
+    }
+
+    // Consulta estado atual do enrollment no banco para continuação crash-safe
+    const { rows: currentEnrRows } = await db.query<{ current_node_id: string; status: string }>(
+      `SELECT current_node_id, status FROM followup_enrollments WHERE organization_id = $1 AND id = $2 LIMIT 1`,
+      [input.organizationId, input.enrollmentId],
+    );
+    const currentEnr = currentEnrRows[0];
+
+    // CONTINUAÇÃO CRASH-SAFE:
+    // Se o enrollment estiver 'active', retomamos a execução a partir de current_node_id.
+    // Se o worker morreu antes de advanceEnrollmentFn, current_node_id === targetNodeId.
+    // Se o worker morreu após avançar nós subsequentes, current_node_id estará no nó pendente.
+    // Se o enrollment já concluiu (status !== 'active'), NENHUM nó é re-executado (zero duplicação).
+    if (deps?.advanceEnrollmentFn && currentEnr && currentEnr.status === 'active') {
+      const resumeNodeId = currentEnr.current_node_id;
+      try {
+        await deps.advanceEnrollmentFn(input.enrollmentId, input.organizationId, resumeNodeId);
+      } catch (err) {
+        logger.error('[ai-node-lifecycle] Falha ao recuperar avanço pós-crash em retry', {
+          enrollment_id: input.enrollmentId,
+          resume_node_id: resumeNodeId,
+          error: String(err),
+        });
+      }
+    }
+
+    // Se o turno ainda não tiver gravado completedKey, formaliza agora
+    if (completedRows.length === 0) {
+      await completeAiNodeInboundTurn(db, {
+        organizationId: input.organizationId,
+        enrollmentId: input.enrollmentId,
+        nodeId: input.nodeId,
+        inboundMessageId: input.inboundMessageId,
+        workerId: input.workerId,
+        leaseGeneration: input.leaseGeneration,
+      });
+    }
+
     return {
       status: cachedReply?.node_status ?? 'completed',
       reply: cachedReply?.reply,
@@ -177,6 +367,7 @@ export async function executeAiNodeLifecycle(
             extracted_data: cachedReply.extracted_data,
           }
         : undefined,
+      nextNodeId: targetNodeId,
       isRetry: true,
       transitionStatus: 'transition_already_applied',
       outboundStatus: 'outbound_already_sent',
@@ -320,45 +511,18 @@ export async function executeAiNodeLifecycle(
     }
 
     const exitedKey = `ai_node_exited:${input.organizationId}:${input.enrollmentId}:${input.nodeId}:${input.inboundMessageId}`;
-    const { rows: exitedRows } = await db.query<{ id: string }>(
-      `SELECT id FROM followup_enrollment_events WHERE enrollment_id = $1 AND idempotency_key = $2 LIMIT 1`,
-      [input.enrollmentId, exitedKey],
+
+    const transitionStatus = await applyAiNodeTransition(
+      db,
+      input,
+      nextNodeId,
+      AI_NODE_COMPLETED_BRANCH_ID,
+      updatedSession,
+      nowIso,
+      exitedKey,
+      deps,
+      { reason: 'deterministic_completed' },
     );
-
-    let transitionStatus: 'transition_fresh' | 'transition_already_applied' = 'transition_fresh';
-
-    if (exitedRows.length > 0) {
-      transitionStatus = 'transition_already_applied';
-    } else {
-      await db.query(
-        `UPDATE followup_enrollments
-         SET current_node_id = $1, steps_taken = steps_taken + 1, ai_node_session = $2, updated_at = $3
-         WHERE organization_id = $4 AND id = $5`,
-        [nextNodeId, JSON.stringify(updatedSession), nowIso, input.organizationId, input.enrollmentId],
-      );
-
-      // Registra evento de saída
-      await db.query(
-        `INSERT INTO followup_enrollment_events (
-           organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-         ON CONFLICT (enrollment_id, idempotency_key) DO NOTHING`,
-        [
-          input.organizationId,
-          input.enrollmentId,
-          input.nodeId,
-          'ai_node.exited',
-          JSON.stringify({
-            next_node_id: nextNodeId,
-            branch: AI_NODE_COMPLETED_BRANCH_ID,
-            reason: 'deterministic_completed',
-            exited_at: nowIso,
-          }),
-          exitedKey,
-          nowIso,
-        ],
-      );
-    }
 
     // Conclui o turno formalmente
     await completeAiNodeInboundTurn(db, {
@@ -369,18 +533,6 @@ export async function executeAiNodeLifecycle(
       workerId: input.workerId,
       leaseGeneration: input.leaseGeneration,
     });
-
-    if (transitionStatus === 'transition_fresh' && nextNodeId && deps.advanceEnrollmentFn) {
-      try {
-        await deps.advanceEnrollmentFn(input.enrollmentId, input.organizationId, nextNodeId);
-      } catch (err) {
-        logger.error('[ai-node-lifecycle] Falha ao avançar enrollment pós-transição (deterministic_completed)', {
-          enrollment_id: input.enrollmentId,
-          next_node_id: nextNodeId,
-          error: String(err),
-        });
-      }
-    }
 
     return {
       status: 'deterministic_completed',
@@ -838,49 +990,18 @@ export async function executeAiNodeLifecycle(
     }
 
     const exitedKey = `ai_node_exited:${input.organizationId}:${input.enrollmentId}:${input.nodeId}:${input.inboundMessageId}`;
-    const { rows: exitedRows } = await db.query<{ id: string }>(
-      `SELECT id FROM followup_enrollment_events WHERE enrollment_id = $1 AND idempotency_key = $2 LIMIT 1`,
-      [input.enrollmentId, exitedKey],
+
+    const transitionStatus = await applyAiNodeTransition(
+      db,
+      input,
+      nextNodeId,
+      AI_NODE_COMPLETED_BRANCH_ID,
+      updatedSession,
+      nowIso,
+      exitedKey,
+      deps,
+      { outcome: structuredOutput.outcome },
     );
-
-    let transitionStatus: 'transition_fresh' | 'transition_already_applied' = 'transition_fresh';
-
-    if (exitedRows.length > 0) {
-      transitionStatus = 'transition_already_applied';
-      logger.info('[ai-node-lifecycle] Transição já havia sido aplicada anteriormente (zero re-transição)', {
-        enrollment_id: input.enrollmentId,
-        node_id: input.nodeId,
-      });
-    } else {
-      await db.query(
-        `UPDATE followup_enrollments
-         SET current_node_id = $1, steps_taken = steps_taken + 1, ai_node_session = $2, updated_at = $3
-         WHERE organization_id = $4 AND id = $5`,
-        [nextNodeId, JSON.stringify(updatedSession), nowIso, input.organizationId, input.enrollmentId],
-      );
-
-      // Registra evento de transição de nó
-      await db.query(
-        `INSERT INTO followup_enrollment_events (
-           organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-         ON CONFLICT (enrollment_id, idempotency_key) DO NOTHING`,
-        [
-          input.organizationId,
-          input.enrollmentId,
-          input.nodeId,
-          'ai_node.exited',
-          JSON.stringify({
-            next_node_id: nextNodeId,
-            branch: AI_NODE_COMPLETED_BRANCH_ID,
-            outcome: structuredOutput.outcome,
-            exited_at: nowIso,
-          }),
-          exitedKey,
-          nowIso,
-        ],
-      );
-    }
 
     // Conclui o turno
     await completeAiNodeInboundTurn(db, {
@@ -892,18 +1013,6 @@ export async function executeAiNodeLifecycle(
       workerId: input.workerId,
       leaseGeneration: input.leaseGeneration,
     });
-
-    if (transitionStatus === 'transition_fresh' && nextNodeId && deps.advanceEnrollmentFn) {
-      try {
-        await deps.advanceEnrollmentFn(input.enrollmentId, input.organizationId, nextNodeId);
-      } catch (err) {
-        logger.error('[ai-node-lifecycle] Falha ao avançar enrollment pós-transição (completed)', {
-          enrollment_id: input.enrollmentId,
-          next_node_id: nextNodeId,
-          error: String(err),
-        });
-      }
-    }
 
     return {
       status: 'completed',
@@ -976,57 +1085,28 @@ export async function executeAiNodeLifecycle(
 
     const nextNodeId = handoffEdge?.target ?? null;
 
-    const exitedKey = `ai_node_exited:${input.organizationId}:${input.enrollmentId}:${input.nodeId}:${input.inboundMessageId}`;
-    const { rows: exitedRows } = await db.query<{ id: string }>(
-      `SELECT id FROM followup_enrollment_events WHERE enrollment_id = $1 AND idempotency_key = $2 LIMIT 1`,
-      [input.enrollmentId, exitedKey],
-    );
-
     let transitionStatus: 'transition_fresh' | 'transition_already_applied' = 'transition_fresh';
 
-    if (exitedRows.length > 0) {
-      transitionStatus = 'transition_already_applied';
-      logger.info('[ai-node-lifecycle] Transição de handoff já havia sido aplicada anteriormente (zero re-transição)', {
-        enrollment_id: input.enrollmentId,
-        node_id: input.nodeId,
-      });
+    if (nextNodeId) {
+      const exitedKey = `ai_node_exited:${input.organizationId}:${input.enrollmentId}:${input.nodeId}:${input.inboundMessageId}`;
+      transitionStatus = await applyAiNodeTransition(
+        db,
+        input,
+        nextNodeId,
+        AI_NODE_HANDOFF_BRANCH_ID,
+        updatedSession,
+        nowIso,
+        exitedKey,
+        deps,
+      );
     } else {
-      if (nextNodeId) {
-        await db.query(
-          `UPDATE followup_enrollments
-           SET current_node_id = $1, steps_taken = steps_taken + 1, ai_node_session = $2, updated_at = $3
-           WHERE organization_id = $4 AND id = $5`,
-          [nextNodeId, JSON.stringify(updatedSession), nowIso, input.organizationId, input.enrollmentId],
-        );
-
-        await db.query(
-          `INSERT INTO followup_enrollment_events (
-             organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
-           ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-           ON CONFLICT (enrollment_id, idempotency_key) DO NOTHING`,
-          [
-            input.organizationId,
-            input.enrollmentId,
-            input.nodeId,
-            'ai_node.exited',
-            JSON.stringify({
-              next_node_id: nextNodeId,
-              branch: AI_NODE_HANDOFF_BRANCH_ID,
-              exited_at: nowIso,
-            }),
-            exitedKey,
-            nowIso,
-          ],
-        );
-      } else {
-        // Pausa o enrollment na fila humana
-        await db.query(
-          `UPDATE followup_enrollments
-           SET status = 'paused_handoff', outcome = 'handoff', ai_node_session = $1, updated_at = $2
-           WHERE organization_id = $3 AND id = $4`,
-          [JSON.stringify(updatedSession), nowIso, input.organizationId, input.enrollmentId],
-        );
-      }
+      // Pausa o enrollment na fila humana
+      await db.query(
+        `UPDATE followup_enrollments
+         SET status = 'paused_handoff', outcome = 'handoff', ai_node_session = $1, next_eval_at = null, claimed_until = null, updated_at = $2
+         WHERE organization_id = $3 AND id = $4`,
+        [JSON.stringify(updatedSession), nowIso, input.organizationId, input.enrollmentId],
+      );
     }
 
     // Conclui o turno
@@ -1039,18 +1119,6 @@ export async function executeAiNodeLifecycle(
       workerId: input.workerId,
       leaseGeneration: input.leaseGeneration,
     });
-
-    if (transitionStatus === 'transition_fresh' && nextNodeId && deps.advanceEnrollmentFn) {
-      try {
-        await deps.advanceEnrollmentFn(input.enrollmentId, input.organizationId, nextNodeId);
-      } catch (err) {
-        logger.error('[ai-node-lifecycle] Falha ao avançar enrollment pós-transição (handoff)', {
-          enrollment_id: input.enrollmentId,
-          next_node_id: nextNodeId,
-          error: String(err),
-        });
-      }
-    }
 
     return {
       status: 'handoff',
@@ -1109,68 +1177,37 @@ async function handleAiNodeError(
 
   const nextNodeId = errorEdge?.target ?? null;
 
-  const exitedKey = `ai_node_exited:${input.organizationId}:${input.enrollmentId}:${input.nodeId}:${input.inboundMessageId}`;
-  const { rows: exitedRows } = await db.query<{ id: string }>(
-    `SELECT id FROM followup_enrollment_events WHERE enrollment_id = $1 AND idempotency_key = $2 LIMIT 1`,
-    [input.enrollmentId, exitedKey],
-  );
-
   let transitionStatus: 'transition_fresh' | 'transition_already_applied' = 'transition_fresh';
 
-  if (exitedRows.length > 0) {
-    transitionStatus = 'transition_already_applied';
-    logger.info('[ai-node-lifecycle] Transição de erro já havia sido aplicada anteriormente (zero re-transição)', {
-      enrollment_id: input.enrollmentId,
-      node_id: input.nodeId,
-    });
+  if (nextNodeId) {
+    const updatedSession: AiNodeSession = {
+      ...session,
+      status: 'completed',
+    };
+    const exitedKey = `ai_node_exited:${input.organizationId}:${input.enrollmentId}:${input.nodeId}:${input.inboundMessageId}`;
+    transitionStatus = await applyAiNodeTransition(
+      db,
+      input,
+      nextNodeId,
+      AI_NODE_ERROR_BRANCH_ID,
+      updatedSession,
+      nowIso,
+      exitedKey,
+      deps,
+      { reason },
+    );
   } else {
-    if (nextNodeId) {
-      const updatedSession: AiNodeSession = {
-        ...session,
-        status: 'completed',
-      };
-
-      await db.query(
-        `UPDATE followup_enrollments
-         SET current_node_id = $1, steps_taken = steps_taken + 1, ai_node_session = $2, updated_at = $3
-         WHERE organization_id = $4 AND id = $5`,
-        [nextNodeId, JSON.stringify(updatedSession), nowIso, input.organizationId, input.enrollmentId],
-      );
-
-      // Registra ai_node.exited
-      await db.query(
-        `INSERT INTO followup_enrollment_events (
-           organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-         ON CONFLICT (enrollment_id, idempotency_key) DO NOTHING`,
-        [
-          input.organizationId,
-          input.enrollmentId,
-          input.nodeId,
-          'ai_node.exited',
-          JSON.stringify({
-            next_node_id: nextNodeId,
-            branch: AI_NODE_ERROR_BRANCH_ID,
-            reason,
-            exited_at: nowIso,
-          }),
-          exitedKey,
-          nowIso,
-        ],
-      );
-    } else {
-      // Fail-closed seguro: marca erro na sessão sem avançar
-      const errorSession: AiNodeSession = {
-        ...session,
-        status: 'error',
-      };
-      await db.query(
-        `UPDATE followup_enrollments
-         SET ai_node_session = $1, updated_at = $2
-         WHERE organization_id = $3 AND id = $4`,
-        [JSON.stringify(errorSession), nowIso, input.organizationId, input.enrollmentId],
-      );
-    }
+    // Fail-closed seguro: marca erro na sessão sem avançar
+    const errorSession: AiNodeSession = {
+      ...session,
+      status: 'error',
+    };
+    await db.query(
+      `UPDATE followup_enrollments
+       SET ai_node_session = $1, updated_at = $2
+       WHERE organization_id = $3 AND id = $4`,
+      [JSON.stringify(errorSession), nowIso, input.organizationId, input.enrollmentId],
+    );
   }
 
   // Conclui turno para não travar workers
@@ -1184,18 +1221,6 @@ async function handleAiNodeError(
       leaseGeneration: input.leaseGeneration,
     });
   } catch {}
-
-  if (transitionStatus === 'transition_fresh' && nextNodeId && deps?.advanceEnrollmentFn) {
-    try {
-      await deps.advanceEnrollmentFn(input.enrollmentId, input.organizationId, nextNodeId);
-    } catch (err) {
-      logger.error('[ai-node-lifecycle] Falha ao avançar enrollment pós-transição (error)', {
-        enrollment_id: input.enrollmentId,
-        next_node_id: nextNodeId,
-        error: String(err),
-      });
-    }
-  }
 
   return {
     status: 'error',

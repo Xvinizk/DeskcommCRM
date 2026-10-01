@@ -4443,10 +4443,43 @@ export function createInboundTurnHandler(deps: InboundTurnDeps) {
             llmCfg: deps.llmCfg,
             registry: deps.registry,
             log: deps.log,
+            advanceEnrollmentFn: async (enrId, orgId, _nextNodeId) => {
+              const supabaseAdmin = createAdminClient();
+              const followupAdmin = createSupabaseAdminClient(supabaseAdmin);
+              const fullRow = await followupAdmin.loadEnrollmentById?.(
+                orgId,
+                enrId,
+              );
+              if (fullRow && fullRow.status === 'active') {
+                await avancarEnrollmentAtivo(
+                  {
+                    db: followupAdmin,
+                    clock: deps.clock ?? (() => new Date()),
+                    enqueueJob: async (j) => {
+                      const sourceEventId = j.payload.source_step_key
+                        ? deterministicUuid(
+                            `followup:${j.payload.followup_enrollment_id}:${j.payload.source_step_key}`,
+                          )
+                        : undefined;
+                      const { error: jobErr } = await supabaseAdmin.from('job_queue').insert({
+                        organization_id: j.organization_id,
+                        contact_id: j.contact_id,
+                        kind: 'followup_turn',
+                        payload: j.payload,
+                        ...(j.run_after ? { run_after: j.run_after.toISOString() } : {}),
+                        ...(sourceEventId ? { source_event_id: sourceEventId } : {}),
+                      });
+                      if (jobErr && jobErr.code !== '23505') throw new Error(jobErr.message);
+                    },
+                  },
+                  fullRow,
+                );
+              }
+            },
           },
         );
 
-        deps.log.info('ciclo de vida do Node IA finalizado (Fase 4)', {
+        deps.log.info('ciclo de vida do Node IA finalizado (Fase 4.1)', {
           job_id: job.id,
           enrollment_id: authorityResult.enrollment_id,
           node_id: authorityResult.node_id,
@@ -4456,61 +4489,6 @@ export function createInboundTurnHandler(deps: InboundTurnDeps) {
           transition_status: lifecycleResult.transitionStatus,
           next_node_id: lifecycleResult.nextNodeId,
         });
-
-        // =========================================================================
-        // FASE 4.1: CONTINUAÇÃO AUTOMÁTICA DO FLUXO (MOTOR CANÔNICO)
-        // Se a transição foi aplicada nesta execução ('transition_fresh') e há próximo nó,
-        // aciona o motor canônico para executar o próximo nó (ex: stage_move, tag,
-        // message_text) sem aguardar novo inbound do cliente.
-        // =========================================================================
-        if (
-          lifecycleResult.transitionStatus === 'transition_fresh' &&
-          lifecycleResult.nextNodeId
-        ) {
-          try {
-            const supabaseAdmin = createAdminClient();
-            const followupAdmin = createSupabaseAdminClient(supabaseAdmin);
-            const fullRow = await followupAdmin.loadEnrollmentById?.(
-              job.organization_id,
-              authorityResult.enrollment_id,
-            );
-            if (fullRow && fullRow.status === 'active') {
-              await avancarEnrollmentAtivo(
-                {
-                  db: followupAdmin,
-                  clock: deps.clock ?? (() => new Date()),
-                  enqueueJob: async (j) => {
-                    const sourceEventId = j.payload.source_step_key
-                      ? deterministicUuid(
-                          `followup:${j.payload.followup_enrollment_id}:${j.payload.source_step_key}`,
-                        )
-                      : undefined;
-                    const { error: jobErr } = await supabaseAdmin.from('job_queue').insert({
-                      organization_id: j.organization_id,
-                      contact_id: j.contact_id,
-                      kind: 'followup_turn',
-                      payload: j.payload,
-                      ...(j.run_after ? { run_after: j.run_after.toISOString() } : {}),
-                      ...(sourceEventId ? { source_event_id: sourceEventId } : {}),
-                    });
-                    if (jobErr && jobErr.code !== '23505') throw new Error(jobErr.message);
-                  },
-                },
-                fullRow,
-              );
-              deps.log.info('fluxo continuado com sucesso pelo motor canônico após transição do Node IA', {
-                enrollment_id: authorityResult.enrollment_id,
-                target_node_id: lifecycleResult.nextNodeId,
-              });
-            }
-          } catch (continuationErr) {
-            deps.log.error('falha ao continuar fluxo após transição do Node IA', {
-              enrollment_id: authorityResult.enrollment_id,
-              target_node_id: lifecycleResult.nextNodeId,
-              error: String(continuationErr),
-            });
-          }
-        }
       }
 
       return;
