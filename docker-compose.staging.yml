@@ -8,6 +8,8 @@
 #     -f docker-compose.prod.yml -f docker-compose.staging.yml <comando>
 #
 # Regras de isolamento:
+# - Imagens próprias pinadas estritamente no Release Candidate (rc-47c6f94)
+# - pull_policy: never em app, worker e scheduler (impede pull de imagens remotas mutáveis)
 # - Zero container_name fixo (prefixo automático: deskcomm-staging-)
 # - Zero volume com name: explícito (prefixo automático: deskcomm-staging_)
 # - Zero rede externa (rede 'internal' isolada: deskcomm-staging_internal)
@@ -17,12 +19,20 @@
 
 services:
   app:
+    image: deskcommcrm:rc-47c6f94
+    pull_policy: never
     env_file: !reset
       - .env.staging
 
   worker:
+    image: deskcomm-worker:rc-47c6f94
+    pull_policy: never
     env_file: !reset
       - .env.staging
+
+  scheduler:
+    image: deskcomm-scheduler:rc-47c6f94
+    pull_policy: never
 
   voice-agent:
     env_file: !reset

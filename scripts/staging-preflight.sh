@@ -7,8 +7,8 @@
 # isolado de produção antes de qualquer subida ou homologação.
 #
 # Validações executadas:
-# 1. Commit HEAD contra o Functional RC congelado e STAGING_RC_COMMIT
-# 2. Integridade do diff (apenas artefatos de staging permitidos)
+# 1. Commit HEAD contra o Functional RC canônico e STAGING_RC_COMMIT
+# 2. Integridade do diff (apenas artefatos de staging permitidos em relação ao Functional RC)
 # 3. Presença e sintaxe de .env.staging
 # 4. Feature flag FOLLOWUP_AI_NODE_ENABLED=true
 # 5. Domínios e URLs exclusivas de staging
@@ -17,15 +17,19 @@
 #    DATABASE_URL e SUPABASE_DB_URL
 # 8. Validação matemática do par WAHA_API_KEY (plaintext) x WAHA_API_KEY_SHA512
 # 9. Verificação de WAHA_WEBHOOK_REQUIRE_SIGNATURE=false
-# 10. Auditoria estrutural do Docker Compose resolvido (sem container_name,
-#     sem external: true, sem networks/volumes alheios, apenas portas 80/443)
+# 10. Auditoria estrutural do Docker Compose resolvido:
+#     - Zero container_name fixo
+#     - Zero redes ou volumes externos de produção
+#     - Apenas portas 80 e 443 expostas no host (Caddy)
+#     - Bloqueio estrito de tags flutuantes (:stable, :latest) em app, worker e scheduler
+#     - Obrigatoriedade da tag de Release Candidate (rc-47c6f94) e pull_policy: never
 # =============================================================================
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-FUNCTIONAL_RC_PARENT="47c6f94e39bae2e3632b7dd06d8e5d435c0ca344"
+FUNCTIONAL_RC_CANONICAL="47c6f94e39bae2e3632b7dd06d8e5d435c0ca344"
 STAGING_RC_TARGET="${1:-${STAGING_RC_COMMIT:-}}"
 ENV_FILE="$ROOT_DIR/.env.staging"
 COMPOSE_HELPER="$ROOT_DIR/scripts/staging-compose.sh"
@@ -49,19 +53,20 @@ if [ -n "$STAGING_RC_TARGET" ]; then
   fi
   echo "✓ HEAD confere com STAGING_RC_COMMIT: $CURRENT_COMMIT"
 else
-  echo "ℹ HEAD atual: $CURRENT_COMMIT"
+  echo "ℹ HEAD atual de staging infra: $CURRENT_COMMIT"
 fi
 
 # Verifica derivação estrita a partir do Functional RC congelado
-PARENT_SHORT="${FUNCTIONAL_RC_PARENT:0:7}"
+PARENT_SHORT="${FUNCTIONAL_RC_CANONICAL:0:7}"
 if ! git merge-base --is-ancestor "$PARENT_SHORT" HEAD 2>/dev/null; then
-  echo "❌ ERRO: O commit atual não descende do Functional RC congelado ($PARENT_SHORT)!" >&2
+  echo "❌ ERRO: O commit atual não descende do Functional RC congelado ($FUNCTIONAL_RC_CANONICAL)!" >&2
   exit 1
 fi
 echo "✓ Ancestralidade válida comprovada a partir do Functional RC ($PARENT_SHORT)."
 
 # Valida que o diff contra o Functional RC contém APENAS os 6 arquivos autorizados
-DIFF_FILES="$(git diff --name-only "$PARENT_SHORT"..HEAD)"
+DIFF_FILES="$(git diff --name-only "$PARENT_SHORT"..HEAD)
+$(git diff --name-only "$PARENT_SHORT")"
 ALLOWED_FILES="docker-compose.staging.yml
 .env.staging.example
 scripts/staging-compose.sh
@@ -277,9 +282,9 @@ node --env-file="$ENV_FILE" -e '
 '
 
 # -----------------------------------------------------------------------------
-# 6. Auditoria Estrutural do Docker Compose Resolvido
+# 6. Auditoria Estrutural do Docker Compose Resolvido e Validação de Imagens
 # -----------------------------------------------------------------------------
-echo "[6/8] Auditando estrutura resolvida do Docker Compose..."
+echo "[6/8] Auditando estrutura resolvida do Docker Compose e tags de imagem..."
 
 # Executa inspeção via staging-compose.sh capturando JSON internamente
 RESOLVED_JSON="$(docker compose -p deskcomm-staging --env-file "$ENV_FILE" -f "$ROOT_DIR/docker-compose.prod.yml" -f "$ROOT_DIR/docker-compose.staging.yml" config --format json 2>&1)"
@@ -344,14 +349,44 @@ node -e '
     }
   }
 
+  // 6. Validação estrita de tags de imagens próprias: bloqueio de :stable e :latest
+  const EXPECTED_RC_TAG = "rc-47c6f94";
+  const ownServices = [
+    { name: "app", prefix: "deskcommcrm:" },
+    { name: "worker", prefix: "deskcomm-worker:" },
+    { name: "scheduler", prefix: "deskcomm-scheduler:" }
+  ];
+
+  for (const item of ownServices) {
+    const srv = services[item.name];
+    if (!srv) {
+      console.error(`❌ ERRO: Serviço obrigatório "${item.name}" não encontrado na composição!`);
+      process.exit(1);
+    }
+    const img = srv.image || "";
+    if (img.includes(":stable") || img.includes(":latest")) {
+      console.error(`❌ ERRO DE TAG FLUTUANTE: Serviço "${item.name}" utiliza tag flutuante (:stable ou :latest)! Imagem: ${img}. Proibido em staging.`);
+      process.exit(1);
+    }
+    if (!img.includes(EXPECTED_RC_TAG)) {
+      console.error(`❌ ERRO DE IMAGEM: Serviço "${item.name}" não utiliza a tag do Release Candidate (${EXPECTED_RC_TAG})! Imagem resolvida: ${img}`);
+      process.exit(1);
+    }
+    if (srv.pull_policy !== "never") {
+      console.error(`❌ ERRO DE PULL POLICY: Serviço "${item.name}" deve ter "pull_policy: never"! Atual: ${srv.pull_policy || "padrão"}`);
+      process.exit(1);
+    }
+  }
+
   console.log("✓ Projeto Docker Compose: deskcomm-staging confirmado.");
   console.log("✓ Zero container_name fixo (nomes com namespace deskcomm-staging-*).");
   console.log("✓ Zero volumes ou redes externas de produção.");
   console.log("✓ Portas públicas expostas no host estritamente restritas a 80 e 443 (Caddy).");
+  console.log("✓ Imagens próprias validadas: app, worker e scheduler pinados em rc-47c6f94 com pull_policy: never.");
 ' "$RESOLVED_JSON"
 
 # -----------------------------------------------------------------------------
-# 7. Verificação de Saúde e Autenticação do Provedor LLM Configurado
+# 7. Verificação de Configuração dos Provedores LLM
 # -----------------------------------------------------------------------------
 echo "[7/8] Verificando configuração dos provedores de IA..."
 
@@ -379,5 +414,6 @@ node --env-file="$ENV_FILE" -e '
 echo "=================================================================="
 echo "✓ PREFLIGHT APROVADO COM SUCESSO!"
 echo "  Isolamento de staging comprovado: ZERO conexões com produção."
+echo "  Imagens pinadas estritamente no Release Candidate (rc-47c6f94)."
 echo "=================================================================="
 exit 0

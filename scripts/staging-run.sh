@@ -9,6 +9,11 @@
 # Utiliza o parser seguro nativo do Node 22+ (--env-file).
 # NÃO utiliza 'export $(cat .env.staging)'.
 #
+# DEPENDÊNCIAS DE BANCO DE DADOS (ESTRATÉGIA B):
+# Para eliminar a necessidade de instalar postgresql-client / psql no host da VPS,
+# os subcomandos 'baseline' e 'psql' executam o cliente através de uma imagem
+# efêmera oficial postgres:17-alpine via Docker, alimentada via stdin.
+#
 # IMPORTANTE SOBRE EXPANSÃO DE SHELL:
 # Comandos como './scripts/staging-run.sh psql "$DATABASE_URL"' são INCORRETOS
 # porque a shell externa do operador tenta expandir "$DATABASE_URL" ANTES de o
@@ -17,11 +22,11 @@
 # Para preservar a expansão correta até depois do ambiente de staging ser carregado,
 # utilize:
 #
-# 1. Subcomando seguro dedicado (recomendado para aplicar migrations/baseline):
+# 1. Subcomando seguro dedicado (executa via postgres:17-alpine em container):
 #    ./scripts/staging-run.sh baseline
 #    ./scripts/staging-run.sh baseline supabase/baseline.sql
 #
-# 2. Subcomando psql dedicado (injeta DATABASE_URL de staging automaticamente):
+# 2. Subcomando psql dedicado (injeta DATABASE_URL via container postgres:17-alpine):
 #    ./scripts/staging-run.sh psql -c "SELECT current_database(), current_user;"
 #
 # 3. Execução em subshell com aspas simples (evita expansão externa):
@@ -46,15 +51,15 @@ fi
 
 if [ $# -eq 0 ] || [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   echo "Uso:"
-  echo "  $0 baseline [arquivo.sql]            # Aplica baseline/SQL no banco de staging via psql"
-  echo "  $0 psql [argumentos_psql...]          # Executa psql conectado diretamente a DATABASE_URL de staging"
+  echo "  $0 baseline [arquivo.sql]            # Aplica baseline/SQL no banco de staging via container postgres:17-alpine"
+  echo "  $0 psql [argumentos_psql...]          # Executa psql conectado a DATABASE_URL de staging via container"
   echo "  $0 bash -c 'comando \$VARIAVEL'       # Executa em subshell preservando variáveis de staging"
   echo "  $0 <comando> [args...]               # Executa qualquer binário herdando as variáveis de staging"
   echo ""
   echo "Exemplos:"
   echo "  $0 baseline"
   echo "  $0 psql -c 'SELECT count(*) FROM organizations;'"
-  echo "  $0 bash -c 'psql \"\$DATABASE_URL\" -v ON_ERROR_STOP=1 -f supabase/baseline.sql'"
+  echo "  $0 bash -c 'echo \"DB Host: \$DATABASE_URL\"'"
   exit 0
 fi
 
@@ -66,20 +71,28 @@ case "$1" in
       echo "❌ ERRO: Arquivo SQL $SQL_TARGET não encontrado!" >&2
       exit 1
     fi
-    echo "Executando aplicação de $SQL_TARGET no banco de staging..."
+    echo "Executando aplicação de $SQL_TARGET no banco de staging via container postgres:17-alpine..."
     exec node --env-file="$ENV_FILE" -e '
       const { spawnSync } = require("child_process");
+      const fs = require("fs");
       const dbUrl = process.env.DATABASE_URL;
       if (!dbUrl) {
         console.error("❌ ERRO: DATABASE_URL não definida em .env.staging!");
         process.exit(1);
       }
       const sqlFile = process.argv[1];
-      const res = spawnSync("psql", [dbUrl, "-v", "ON_ERROR_STOP=1", "-f", sqlFile], {
-        stdio: "inherit"
+      const sqlContent = fs.readFileSync(sqlFile);
+      const res = spawnSync("docker", [
+        "run", "--rm", "-i",
+        "-e", `DATABASE_URL=${dbUrl}`,
+        "postgres:17-alpine",
+        "psql", dbUrl, "-v", "ON_ERROR_STOP=1"
+      ], {
+        input: sqlContent,
+        stdio: ["pipe", "inherit", "inherit"]
       });
       if (res.error) {
-        console.error("❌ ERRO ao invocar psql:", res.error.message);
+        console.error("❌ ERRO ao invocar docker/psql:", res.error.message);
         process.exit(1);
       }
       process.exit(res.status ?? 0);
@@ -96,11 +109,16 @@ case "$1" in
         process.exit(1);
       }
       const psqlArgs = process.argv.slice(1);
-      const res = spawnSync("psql", [dbUrl, ...psqlArgs], {
+      const res = spawnSync("docker", [
+        "run", "--rm", "-i",
+        "-e", `DATABASE_URL=${dbUrl}`,
+        "postgres:17-alpine",
+        "psql", dbUrl, ...psqlArgs
+      ], {
         stdio: "inherit"
       });
       if (res.error) {
-        console.error("❌ ERRO ao invocar psql:", res.error.message);
+        console.error("❌ ERRO ao invocar docker/psql:", res.error.message);
         process.exit(1);
       }
       process.exit(res.status ?? 0);
