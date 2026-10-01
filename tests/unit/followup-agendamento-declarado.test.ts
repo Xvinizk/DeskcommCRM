@@ -122,6 +122,12 @@ const ESCRITORES: Record<string, { agenda: "agora" | "futuro" | "nenhum"; nota: 
     agenda: "nenhum",
     nota: "traduz o campo para a timeline do dossiê; não escreve.",
   },
+  "ai-node-lifecycle.ts": {
+    agenda: "agora",
+    nota:
+      "Avanço imediato pós-transição usa public.fn_agora() (relógio do banco); " +
+      "rearmamento de timeout de inatividade e adiamento de lease usam data futura.",
+  },
 };
 
 function modulosQueMencionam(): string[] {

@@ -223,7 +223,7 @@ export async function completeTurnForEnrollment(
       {},
       { current_node_id: edge.target, status: "active", next_eval_at: now.toISOString() },
     );
-    if (applied && db.enqueueJob) {
+    if (applied && db.enqueueJob && node.type !== "action") {
       await avancarEnrollmentAtivo(
         { db, clock, enqueueJob: db.enqueueJob },
         {

@@ -175,9 +175,9 @@ async function applyAiNodeTransition(
     // 1. Atualiza followup_enrollments com status ativo e next_eval_at imediato
     await db.query(
       `UPDATE followup_enrollments
-       SET current_node_id = $1, steps_taken = steps_taken + 1, ai_node_session = $2, next_eval_at = $3, status = 'active', claimed_until = null, updated_at = $3
-       WHERE organization_id = $4 AND id = $5`,
-      [nextNodeId, JSON.stringify(updatedSession), nowIso, input.organizationId, input.enrollmentId],
+       SET current_node_id = $1, steps_taken = steps_taken + 1, ai_node_session = $2, next_eval_at = public.fn_agora(), status = 'active', claimed_until = null, updated_at = public.fn_agora()
+       WHERE organization_id = $3 AND id = $4`,
+      [nextNodeId, JSON.stringify(updatedSession), input.organizationId, input.enrollmentId],
     );
 
     // 2. Registra o evento canônico ai_node.exited com chave de idempotência

@@ -763,7 +763,7 @@ export async function avancarEnrollmentAtivo(
   enrollment: EnrollmentRow,
 ): Promise<void> {
   const summary: TickSummary = { claimed: 0, advanced: 0, scheduled: 0, failed: 0, dead: 0 };
-  await processEnrollment(deps, enrollment, summary);
+  await processEnrollment(deps, enrollment, summary, undefined, true);
 }
 
 async function processEnrollment(
@@ -771,6 +771,7 @@ async function processEnrollment(
   initialEnrollment: EnrollmentRow,
   summary: TickSummary,
   inboundBodyOverride?: string,
+  cascade = false,
 ): Promise<void> {
   const { db, clock } = deps;
   let currentEnrollment = initialEnrollment;
@@ -1163,7 +1164,7 @@ async function processEnrollment(
       node.type === "match_reply" && wokeEarly ? (lastInboundBody ?? "").trim() || null : null,
     );
 
-    if (!applied || result.kind !== "advance") {
+    if (!applied || result.kind !== "advance" || !cascade) {
       break;
     }
 
