@@ -33,7 +33,16 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { idsDoContatoEGemeos } from "@/lib/channels/contato-por-telefone";
 import { logger } from "@/lib/logger";
 
-import { flowGraphSchema, isSendMessageNode, type FlowGraph, type FlowNode, type ReplySaveTo } from "./graph-schema";
+import {
+  flowGraphSchema,
+  isSendMessageNode,
+  computeAiNodeTimeoutMs,
+  normalizeAiNodeTimeout,
+  type FlowGraph,
+  type FlowNode,
+  type ReplySaveTo,
+} from "./graph-schema";
+import type { AiNodeSession } from "./ai-node-session";
 import {
   ACTION_RECHECK_MS,
   BACKOFF_MS,
@@ -82,6 +91,8 @@ export interface EnrollmentPatch {
   updated_at?: string;
   /** Plano de tempo decidido no acionamento (migration 0144) — escrito uma vez, pela ponte. */
   timing_plan?: TimingPlan;
+  /** Sessão do Node IA para persistência e rastreabilidade */
+  ai_node_session?: AiNodeSession | null;
 }
 
 export interface FollowupJobRequest {
@@ -604,11 +615,33 @@ async function applyResult(
       patch.current_node_id = result.next_node_id;
       patch.status = "active";
       patch.next_eval_at = result.next_eval_at.toISOString();
+      if (node.type === "ai_node") {
+        if ((enrollment as { ai_node_session?: AiNodeSession | null }).ai_node_session) {
+          patch.ai_node_session = (enrollment as { ai_node_session?: AiNodeSession | null }).ai_node_session;
+        }
+        const exitedKey = `ai_node_exited:${enrollment.organization_id}:${enrollment.id}:${node.id}:timeout`;
+        await db.insertEnrollmentEvent({
+          organization_id: enrollment.organization_id,
+          enrollment_id: enrollment.id,
+          node_id: node.id,
+          event_type: "ai_node.exited",
+          payload: {
+            next_node_id: result.next_node_id,
+            branch: "timeout",
+            exited_at: clock().toISOString(),
+            reason: "timeout",
+          },
+          idempotency_key: exitedKey,
+        });
+      }
       break;
     case "wait":
       patch.current_node_id = enrollment.current_node_id;
       patch.status = result.wake_status ?? "active";
       patch.next_eval_at = result.next_eval_at.toISOString();
+      if (node.type === "ai_node" && (enrollment as { ai_node_session?: AiNodeSession | null }).ai_node_session) {
+        patch.ai_node_session = (enrollment as { ai_node_session?: AiNodeSession | null }).ai_node_session;
+      }
       if (!isReplay) {
         const wakeKey = `${node.id}:${enrollment.steps_taken}:wake`;
         await enqueueJob({
@@ -842,6 +875,7 @@ async function processEnrollment(
       node.type === "message_video" ||
       node.type === "message_audio" ||
       node.type === "repeat" ||
+      node.type === "ai_node" ||
       // O `condition` só entra aqui por causa de `last_outcome`: o desfecho do
       // passo anterior mora nos eventos (evento `ai_classified`), e sem lê-los o
       // motor avaliava a condição contra `null` fixo — controle decorativo.
@@ -866,6 +900,7 @@ async function processEnrollment(
       node.type === "typing" ||
       node.type === "ai_classify" ||
       node.type === "match_reply" ||
+      node.type === "ai_node" ||
       isSendMessageNode(node)
     ) {
       waitElapsed = resolveWaitPhase(events, node.id, currentEnrollment.steps_taken);
@@ -922,6 +957,143 @@ async function processEnrollment(
         // `rechecksOciososDaAcao` / `EVENTO_ACAO_ADIADA` em node-handlers.ts.
         actionRecheckCount = rechecksOciososDaAcao(events, node.id);
         actionCompleted = actionTurnCompleted(events, node.id);
+      }
+    }
+
+    if (node.type === "ai_node") {
+      if (!waitElapsed) {
+        // Entrada inicial no nó IA: inicializa a sessão e arma o timeout de inatividade
+        const normalized = normalizeAiNodeTimeout(node.config);
+        const timeoutMs = computeAiNodeTimeoutMs(normalized.timeout);
+        const timeoutAt = new Date(clock().getTime() + timeoutMs).toISOString();
+
+        const currentSession = (currentEnrollment as { ai_node_session?: AiNodeSession | null }).ai_node_session;
+        const sess: AiNodeSession = currentSession?.node_id === node.id
+          ? currentSession
+          : {
+              node_id: node.id,
+              flow_id: currentEnrollment.version_id,
+              mode: node.config.mode ?? "existing_agent",
+              agent_id: node.config.agent_binding?.agent_id ?? null,
+              agent_version_id: node.config.agent_binding?.version_strategy === "pinned" ? (node.config.agent_binding?.pinned_version_id ?? null) : null,
+              status: "running",
+              turn_count: 0,
+              max_turns: node.config.max_turns ?? 10,
+              started_at: clock().toISOString(),
+              timeout_at: timeoutAt,
+              media_summary: { images_count: 0, audios_count: 0, documents_count: 0, last_media_ids: [] },
+            };
+
+        (currentEnrollment as { ai_node_session?: AiNodeSession | null }).ai_node_session = sess;
+
+        const armedKey = `${node.id}:${currentEnrollment.steps_taken}:timeout_armed`;
+        await db.insertEnrollmentEvent({
+          organization_id: currentEnrollment.organization_id,
+          enrollment_id: currentEnrollment.id,
+          node_id: node.id,
+          event_type: "ai_node.timeout_armed",
+          payload: {
+            timeout_ms: timeoutMs,
+            timeout_at: timeoutAt,
+            armed_at: clock().toISOString(),
+          },
+          idempotency_key: armedKey,
+        });
+      } else {
+        // Disparo do timeout quando a deadline de espera expira
+        const sess = (currentEnrollment as { ai_node_session?: AiNodeSession | null }).ai_node_session;
+
+        // 1. Prioridade humana (HUMANO > IA)
+        if (db.isLeadInHandoff) {
+          const inHandoff = await db.isLeadInHandoff(
+            currentEnrollment.organization_id,
+            currentEnrollment.contact_id,
+            currentEnrollment.conversation_id,
+          );
+          if (inHandoff) {
+            logger.warn("followup: timeout do Node IA cancelado — lead em handoff humano (HUMANO > IA)", {
+              enrollment_id: currentEnrollment.id,
+              node_id: node.id,
+              contact_id: currentEnrollment.contact_id,
+            });
+            await db.updateEnrollment(currentEnrollment.id, currentEnrollment.organization_id, {
+              status: "paused_handoff",
+              claimed_until: null,
+              next_eval_at: null,
+              updated_at: clock().toISOString(),
+            });
+            return;
+          }
+        }
+
+        // 2. LLM em voo / lease ativa (não mata turno em andamento)
+        if (sess?.active_turn) {
+          const leaseUntilTime = new Date(sess.active_turn.lease_until).getTime();
+          if (clock().getTime() < leaseUntilTime) {
+            logger.info("followup: timeout adiado — LLM em andamento com lease ativa", {
+              enrollment_id: currentEnrollment.id,
+              node_id: node.id,
+              active_inbound_message_id: sess.active_turn.inbound_message_id,
+            });
+            const deferredEval = new Date(leaseUntilTime + 5_000).toISOString();
+            await db.updateEnrollment(currentEnrollment.id, currentEnrollment.organization_id, {
+              next_eval_at: deferredEval,
+              claimed_until: null,
+              updated_at: clock().toISOString(),
+            });
+            return;
+          }
+        }
+
+        // 3. Stale timer check (job antigo após rearm)
+        const deadlineStr = sess?.timeout_at ?? currentEnrollment.next_eval_at;
+        if (deadlineStr && clock().getTime() < new Date(deadlineStr).getTime()) {
+          logger.info("followup: timeout stale ignorado — deadline foi estendida por resposta recente", {
+            enrollment_id: currentEnrollment.id,
+            node_id: node.id,
+            deadline: deadlineStr,
+          });
+          await db.insertEnrollmentEvent({
+            organization_id: currentEnrollment.organization_id,
+            enrollment_id: currentEnrollment.id,
+            node_id: node.id,
+            event_type: "ai_node.timeout_stale_ignored",
+            payload: {
+              timeout_at: sess?.timeout_at,
+              next_eval_at: currentEnrollment.next_eval_at,
+              ignored_at: clock().toISOString(),
+              reason: "deadline_in_future",
+            },
+            idempotency_key: `${node.id}:${currentEnrollment.steps_taken}:timeout_stale_ignored:${currentEnrollment.next_eval_at}`,
+          });
+          await db.updateEnrollment(currentEnrollment.id, currentEnrollment.organization_id, {
+            next_eval_at: deadlineStr,
+            claimed_until: null,
+            updated_at: clock().toISOString(),
+          });
+          return;
+        }
+
+        // 4. Timeout legítimo
+        const timeoutKey = `${node.id}:${currentEnrollment.steps_taken}:timeout`;
+        await db.insertEnrollmentEvent({
+          organization_id: currentEnrollment.organization_id,
+          enrollment_id: currentEnrollment.id,
+          node_id: node.id,
+          event_type: "ai_node.timeout",
+          payload: {
+            expired_at: clock().toISOString(),
+            timeout_at: sess?.timeout_at,
+            reason: "customer_inactivity_timeout",
+          },
+          idempotency_key: timeoutKey,
+        });
+
+        if (sess) {
+          sess.status = "timeout";
+          sess.completion_reason = "timeout";
+          sess.active_turn = null;
+        }
       }
     }
     const textoInbound = currentInboundBody?.trim() ?? "";

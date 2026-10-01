@@ -4,7 +4,16 @@ import type { ServiceBoundary } from "@/lib/atendimento/fronteira";
  * `engine.ts` owns the tick/DB orchestration; this file only decides "given
  * this node + these facts, what happens next" so it's testable without Postgres.
  */
-import { NO_REPLY_BRANCH_ID, REPEAT_BODY_BRANCH_ID, REPEAT_DONE_BRANCH_ID, nodeBranches } from "./graph-schema";
+import {
+  NO_REPLY_BRANCH_ID,
+  REPEAT_BODY_BRANCH_ID,
+  REPEAT_DONE_BRANCH_ID,
+  AI_NODE_TIMEOUT_BRANCH_ID,
+  AI_NODE_ERROR_BRANCH_ID,
+  computeAiNodeTimeoutMs,
+  normalizeAiNodeTimeout,
+  nodeBranches,
+} from "./graph-schema";
 import type { FlowEdge, FlowNode, ReplySaveTo } from "./graph-schema";
 import { parseReplyCount } from "./parse-count";
 import { clampEspera, esperaPlanejadaDe, type EsperaAdaptativa } from "./timing-plan";
@@ -65,6 +74,8 @@ export interface EnrollmentRow {
    * Ausente/`null` = enrollment de antes da feature ⇒ comportamento anterior.
    */
   timing_plan?: unknown;
+  /** Estado da sessão do Nó IA (quando em execução) */
+  ai_node_session?: unknown;
 }
 
 /** Minimal typed facts a `condition` node can check — loaded by the engine, never guessed. */
@@ -924,7 +935,28 @@ export function processNode(input: {
     }
 
     case "ai_node": {
-      return { kind: "fail", error: `ai_node "${node.id}" execution is not enabled in this phase` };
+      const isEnabled = process.env.FOLLOWUP_AI_NODE_ENABLED === "true";
+      if (!isEnabled) {
+        return { kind: "fail", error: `ai_node "${node.id}" execution is not enabled in this phase` };
+      }
+      if (!waitElapsed) {
+        const normalized = normalizeAiNodeTimeout(node.config);
+        const timeoutMs = computeAiNodeTimeoutMs(normalized.timeout);
+        return {
+          kind: "wait",
+          next_eval_at: new Date(clock().getTime() + timeoutMs),
+          wake_status: "active",
+        };
+      }
+      const timeoutEdge = selectEdge(edges, node.id, { type: "branch", branch_id: AI_NODE_TIMEOUT_BRANCH_ID });
+      if (!timeoutEdge) {
+        const errorEdge = selectEdge(edges, node.id, { type: "branch", branch_id: AI_NODE_ERROR_BRANCH_ID });
+        if (!errorEdge) {
+          return { kind: "fail", error: `ai_node "${node.id}" timeout expired but no timeout or error branch is configured` };
+        }
+        return { kind: "advance", next_node_id: errorEdge.target, next_eval_at: clock() };
+      }
+      return { kind: "advance", next_node_id: timeoutEdge.target, next_eval_at: clock() };
     }
   }
 }

@@ -44,8 +44,12 @@ import {
   flowGraphSchema,
   aiNodeConfigSchema,
   AI_NODE_COMPLETED_BRANCH_ID,
+  AI_NODE_TIMEOUT_BRANCH_ID,
+  AI_NODE_MAX_TURNS_BRANCH_ID,
   AI_NODE_HANDOFF_BRANCH_ID,
   AI_NODE_ERROR_BRANCH_ID,
+  computeAiNodeTimeoutMs,
+  normalizeAiNodeTimeout,
   type FlowGraph,
   type AiNodeConfig,
   type FlowEdge,
@@ -99,6 +103,8 @@ export interface ExecuteAiNodeLifecycleInput {
 export type AiNodeLifecycleStatus =
   | 'continue'
   | 'completed'
+  | 'max_turns'
+  | 'timeout'
   | 'handoff'
   | 'deterministic_completed'
   | 'aborted_human_takeover'
@@ -175,11 +181,12 @@ async function applyAiNodeTransition(
     );
 
     // 2. Registra o evento canônico ai_node.exited com chave de idempotência
-    await db.query(
+    const exitedInsertRes = await db.query<{ id: string }>(
       `INSERT INTO followup_enrollment_events (
          organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (enrollment_id, idempotency_key) DO NOTHING`,
+       ON CONFLICT (enrollment_id, idempotency_key) DO NOTHING
+       RETURNING id`,
       [
         input.organizationId,
         input.enrollmentId,
@@ -195,6 +202,15 @@ async function applyAiNodeTransition(
         nowIso,
       ],
     );
+
+    if (exitedInsertRes.rows.length === 0) {
+      transitionStatus = 'transition_already_applied';
+      logger.info('[ai-node-lifecycle] Conflito atômico na transição detectado (zero re-transição)', {
+        enrollment_id: input.enrollmentId,
+        node_id: input.nodeId,
+        branch_id: branchId,
+      });
+    }
 
     // 3. Mecanismo Durável: enfileira job wait_wake na job_queue
     let contactId = input.contactId;
@@ -312,11 +328,17 @@ export async function executeAiNodeLifecycle(
     // A transição de saída do Nó IA já ocorreu no passado para esta inbound.
     // Recupera dados estruturados e desfecho gravados.
     const cachedReply = await getAiNodeGeneratedReply(db, input);
+    let desfechoStatus: AiNodeLifecycleStatus = cachedReply?.node_status ?? 'completed';
     let targetNodeId: string | null = null;
     const payloadRaw = exitedRows[0]?.payload;
     if (payloadRaw) {
       const payloadObj = typeof payloadRaw === 'string' ? JSON.parse(payloadRaw) : payloadRaw;
       targetNodeId = payloadObj.next_node_id ?? null;
+      if (payloadObj.branch === AI_NODE_MAX_TURNS_BRANCH_ID || payloadObj.reason === 'max_turns') {
+        desfechoStatus = 'max_turns';
+      } else if (payloadObj.branch === AI_NODE_TIMEOUT_BRANCH_ID || payloadObj.reason === 'timeout') {
+        desfechoStatus = 'timeout';
+      }
     }
 
     // Consulta estado atual do enrollment no banco para continuação crash-safe
@@ -357,7 +379,7 @@ export async function executeAiNodeLifecycle(
     }
 
     return {
-      status: cachedReply?.node_status ?? 'completed',
+      status: desfechoStatus,
       reply: cachedReply?.reply,
       structuredOutput: cachedReply
         ? {
@@ -685,7 +707,8 @@ export async function executeAiNodeLifecycle(
   // =========================================================================
   // 6. FENCING IMEDIATAMENTE ANTES DO ENVIO
   // =========================================================================
-  const ownershipValidation = await validateAiNodeTurnOwnership(db, {
+  const validateOwnership = deps.validateOwnershipFn ?? validateAiNodeTurnOwnership;
+  const ownershipValidation = await validateOwnership(db, {
     organizationId: input.organizationId,
     enrollmentId: input.enrollmentId,
     nodeId: input.nodeId,
@@ -717,9 +740,191 @@ export async function executeAiNodeLifecycle(
 
   const currentEnr = enrCheckRows[0];
   if (!currentEnr || currentEnr.current_node_id !== input.nodeId || currentEnr.ai_node_session?.status !== 'running') {
+    // Corrida atômica: outra thread do mesmo turno pode ter acabado de aplicar a transição
+    const { rows: exitedCheck } = await db.query<{ id: string; payload: unknown }>(
+      `SELECT id, payload FROM followup_enrollment_events WHERE enrollment_id = $1 AND idempotency_key = $2 LIMIT 1`,
+      [input.enrollmentId, exitedKey],
+    );
+
+    if (exitedCheck.length > 0) {
+      let desfecho: AiNodeLifecycleStatus = 'completed';
+      const pRaw = exitedCheck[0]?.payload;
+      if (pRaw) {
+        const pObj = typeof pRaw === 'string' ? JSON.parse(pRaw) : pRaw;
+        if (pObj.branch === AI_NODE_MAX_TURNS_BRANCH_ID || pObj.reason === 'max_turns') {
+          desfecho = 'max_turns';
+        } else if (pObj.branch === AI_NODE_TIMEOUT_BRANCH_ID || pObj.reason === 'timeout') {
+          desfecho = 'timeout';
+        }
+      }
+      return {
+        status: desfecho,
+        transitionStatus: 'transition_already_applied',
+        outboundStatus: 'skipped',
+        isRetry: true,
+      };
+    }
+
     return {
       status: 'stale_lease_owner',
       reason: 'node_or_session_not_running',
+    };
+  }
+
+  // =========================================================================
+  // 6.1. PRECEDÊNCIA DE MAX_TURNS: SE CONTINUE E ATINGIU LIMITE, NÃO ENVIA REPLY
+  // =========================================================================
+  const maxTurnsLimit = nodeConfig.max_turns ?? session.max_turns ?? 10;
+  if (structuredOutput.node_status === 'continue' && session.turn_count >= maxTurnsLimit) {
+    logger.info('[ai-node-lifecycle] max_turns atingido no turno continue — suprimindo reply e transicionando', {
+      enrollment_id: input.enrollmentId,
+      node_id: input.nodeId,
+      turn_count: session.turn_count,
+      max_turns: maxTurnsLimit,
+    });
+
+    const currentExtracted = (session.extracted_data as Record<string, unknown> | undefined) ?? {};
+    const mergedExtracted = {
+      ...currentExtracted,
+      ...structuredOutput.extracted_data,
+    };
+
+    const updatedSession: AiNodeSession = {
+      ...session,
+      extracted_data: mergedExtracted,
+      status: 'max_turns',
+      completion_reason: 'max_turns',
+      active_turn: null,
+    };
+
+    // Registra evento ai_node.max_turns
+    await db.query(
+      `INSERT INTO followup_enrollment_events (
+         organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (enrollment_id, idempotency_key) DO NOTHING`,
+      [
+        input.organizationId,
+        input.enrollmentId,
+        input.nodeId,
+        'ai_node.max_turns',
+        JSON.stringify({
+          inbound_message_id: input.inboundMessageId,
+          turn_count: session.turn_count,
+          max_turns: maxTurnsLimit,
+          reason: 'max_turns_reached',
+          occurred_at: nowIso,
+        }),
+        `ai_node_max_turns:${input.organizationId}:${input.enrollmentId}:${input.nodeId}:${input.inboundMessageId}`,
+        nowIso,
+      ],
+    );
+
+    // Segue estritamente aresta branch_id=max_turns do grafo
+    const maxTurnsEdge = findAiNodeStrictBranchEdge(
+      graph.edges,
+      input.nodeId,
+      AI_NODE_MAX_TURNS_BRANCH_ID,
+    );
+
+    const nextNodeId = maxTurnsEdge?.target ?? null;
+
+    if (!nextNodeId) {
+      // Se não houver aresta max_turns, tenta error branch antes do fail-closed
+      const errorEdge = findAiNodeStrictBranchEdge(
+        graph.edges,
+        input.nodeId,
+        AI_NODE_ERROR_BRANCH_ID,
+      );
+
+      if (errorEdge?.target) {
+        const exitedKey = `ai_node_exited:${input.organizationId}:${input.enrollmentId}:${input.nodeId}:${input.inboundMessageId}`;
+        const transitionStatus = await applyAiNodeTransition(
+          db,
+          input,
+          errorEdge.target,
+          AI_NODE_ERROR_BRANCH_ID,
+          updatedSession,
+          nowIso,
+          exitedKey,
+          deps,
+          { reason: 'missing_max_turns_branch' },
+        );
+
+        await completeAiNodeInboundTurn(db, {
+          organizationId: input.organizationId,
+          enrollmentId: input.enrollmentId,
+          nodeId: input.nodeId,
+          inboundMessageId: input.inboundMessageId,
+          workerId: input.workerId,
+          leaseGeneration: input.leaseGeneration,
+        });
+
+        return {
+          status: 'max_turns',
+          nextNodeId: errorEdge.target,
+          outboundStatus: 'skipped',
+          llmStatus,
+          transitionStatus,
+          reason: 'missing_max_turns_branch_fallback_error',
+        };
+      }
+
+      // Fail-closed seguro: grava sessão max_turns e não avança nó
+      await db.query(
+        `UPDATE followup_enrollments
+         SET ai_node_session = $1, status = 'active', next_eval_at = null, claimed_until = null, updated_at = $2
+         WHERE organization_id = $3 AND id = $4`,
+        [JSON.stringify(updatedSession), nowIso, input.organizationId, input.enrollmentId],
+      );
+
+      await completeAiNodeInboundTurn(db, {
+        organizationId: input.organizationId,
+        enrollmentId: input.enrollmentId,
+        nodeId: input.nodeId,
+        inboundMessageId: input.inboundMessageId,
+        workerId: input.workerId,
+        leaseGeneration: input.leaseGeneration,
+      });
+
+      return {
+        status: 'max_turns',
+        outboundStatus: 'skipped',
+        llmStatus,
+        transitionStatus: 'skipped',
+        reason: 'missing_max_turns_branch_fail_closed',
+      };
+    }
+
+    const exitedKey = `ai_node_exited:${input.organizationId}:${input.enrollmentId}:${input.nodeId}:${input.inboundMessageId}`;
+    const transitionStatus = await applyAiNodeTransition(
+      db,
+      input,
+      nextNodeId,
+      AI_NODE_MAX_TURNS_BRANCH_ID,
+      updatedSession,
+      nowIso,
+      exitedKey,
+      deps,
+      { reason: 'max_turns', turn_count: session.turn_count, max_turns: maxTurnsLimit },
+    );
+
+    await completeAiNodeInboundTurn(db, {
+      organizationId: input.organizationId,
+      enrollmentId: input.enrollmentId,
+      nodeId: input.nodeId,
+      inboundMessageId: input.inboundMessageId,
+      workerId: input.workerId,
+      leaseGeneration: input.leaseGeneration,
+    });
+
+    return {
+      status: 'max_turns',
+      nextNodeId,
+      outboundStatus: 'skipped',
+      llmStatus,
+      transitionStatus,
+      reason: 'max_turns_reached',
     };
   }
 
@@ -881,10 +1086,16 @@ export async function executeAiNodeLifecycle(
 
   // CASO 8.1: STATUS CONTINUE
   if (nodeStatus === 'continue') {
+    const normalizedTimeout = normalizeAiNodeTimeout(nodeConfig);
+    const timeoutMs = computeAiNodeTimeoutMs(normalizedTimeout.timeout);
+    const nextEvalAt = new Date(now.getTime() + timeoutMs);
+    const nextEvalAtIso = nextEvalAt.toISOString();
+
     const updatedSession: AiNodeSession = {
       ...session,
       extracted_data: mergedExtracted,
       status: 'running',
+      timeout_at: nextEvalAtIso,
     };
 
     // Registra ai_node.continue
@@ -908,13 +1119,64 @@ export async function executeAiNodeLifecycle(
       ],
     );
 
-    // Atualiza enrollment mantendo no mesmo node
+    // Registra ai_node.timeout_rearmed (Deadline estendida para novo período de inatividade)
+    await db.query(
+      `INSERT INTO followup_enrollment_events (
+         organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (enrollment_id, idempotency_key) DO NOTHING`,
+      [
+        input.organizationId,
+        input.enrollmentId,
+        input.nodeId,
+        'ai_node.timeout_rearmed',
+        JSON.stringify({
+          inbound_message_id: input.inboundMessageId,
+          timeout_ms: timeoutMs,
+          next_eval_at: nextEvalAtIso,
+          rearmed_at: nowIso,
+        }),
+        `ai_node_timeout_rearmed:${input.organizationId}:${input.enrollmentId}:${input.nodeId}:${input.inboundMessageId}`,
+        nowIso,
+      ],
+    );
+
+    // Atualiza enrollment mantendo no mesmo node e persistindo o novo prazo de inatividade
     await db.query(
       `UPDATE followup_enrollments
-       SET ai_node_session = $1, updated_at = $2
-       WHERE organization_id = $3 AND id = $4`,
-      [JSON.stringify(updatedSession), nowIso, input.organizationId, input.enrollmentId],
+       SET ai_node_session = $1, next_eval_at = $2, updated_at = $3
+       WHERE organization_id = $4 AND id = $5`,
+      [JSON.stringify(updatedSession), nextEvalAtIso, nowIso, input.organizationId, input.enrollmentId],
     );
+
+    // Enfileira job wait_wake durável na job_queue para acordar na deadline
+    if (contactId) {
+      const sourceEventId = deterministicUuid(`followup:${input.enrollmentId}:${input.nodeId}:${input.inboundMessageId}:wake`);
+      try {
+        await db.query(
+          `INSERT INTO job_queue (
+             organization_id, contact_id, kind, payload, source_event_id, run_after, status
+           ) VALUES ($1, $2, 'followup_turn', $3, $4, $5, 'pending')
+           ON CONFLICT (organization_id, source_event_id) DO NOTHING`,
+          [
+            input.organizationId,
+            contactId,
+            JSON.stringify({
+              followup_enrollment_id: input.enrollmentId,
+              node_id: input.nodeId,
+              purpose: 'wait_wake',
+              source_step_key: `ai_node_wake:${input.nodeId}:${input.inboundMessageId}`,
+            }),
+            sourceEventId,
+            nextEvalAtIso,
+          ],
+        );
+      } catch (err) {
+        logger.warn('[ai-node-lifecycle] Não foi possível enfileirar wait_wake durável na job_queue', {
+          error: String(err),
+        });
+      }
+    }
 
     // Conclui o turno atual liberando active_turn
     await completeAiNodeInboundTurn(db, {
@@ -1230,3 +1492,328 @@ async function handleAiNodeError(
     transitionStatus,
   };
 }
+
+export interface ExecuteAiNodeTimeoutInput {
+  organizationId: string;
+  enrollmentId: string;
+  nodeId: string;
+  contactId?: string | null;
+  conversationId?: string | null;
+  workerId?: string;
+  graph?: FlowGraph;
+  nodeConfig?: AiNodeConfig;
+}
+
+export interface ExecuteAiNodeTimeoutDeps {
+  isLeadInHandoffFn?: typeof isLeadInHandoff;
+  clock?: () => Date;
+  advanceEnrollmentFn?: (enrollmentId: string, orgId: string, nextNodeId: string) => Promise<void>;
+}
+
+export interface ExecuteAiNodeTimeoutResult {
+  status:
+    | 'timeout'
+    | 'stale_ignored'
+    | 'deferred_active_turn'
+    | 'aborted_human_takeover'
+    | 'node_changed'
+    | 'session_not_running'
+    | 'error';
+  nextNodeId?: string | null;
+  transitionStatus?: 'transition_fresh' | 'transition_already_applied' | 'skipped';
+  reason?: string;
+  error?: string;
+}
+
+/**
+ * Executa determinísticamente o timeout do Node IA quando o prazo de inatividade do cliente expira.
+ *
+ * Garantias:
+ * 1. Lock atômico (FOR UPDATE) para proteger corridas contra inbound simultâneo.
+ * 2. HUMANO > NODE IA: se o atendente assumiu o controle, aborta e pausa o enrollment sem avançar.
+ * 3. LLM em voo protegida: se active_turn possui lease válida, adia o timeout e não encerra o nó.
+ * 4. Stale timer descartado: se next_eval_at / timeout_at for futuro (resposta recente), é no-op e emite ai_node.timeout_stale_ignored.
+ * 5. ZERO LLM, ZERO reply inventada no timeout legítimo.
+ * 6. Segue estritamente aresta branch_id="timeout" (fallback para "error" se ausente, ou fail-closed seguro).
+ * 7. Durable continuation: registra ai_node.exited e garante continuação pós-crash.
+ */
+export async function executeAiNodeTimeout(
+  db: DbPoolLike,
+  input: ExecuteAiNodeTimeoutInput,
+  deps: ExecuteAiNodeTimeoutDeps = {},
+): Promise<ExecuteAiNodeTimeoutResult> {
+  const clock = deps.clock ?? (() => new Date());
+  const now = clock();
+  const nowIso = now.toISOString();
+
+  // 1. Lock atômico FOR UPDATE no enrollment
+  const { rows } = await db.query<{
+    current_node_id: string;
+    status: string;
+    ai_node_session: AiNodeSession | string | null;
+    contact_id: string;
+    conversation_id: string | null;
+    next_eval_at: string | null;
+    version_id: string;
+    graph?: unknown;
+  }>(
+    `SELECT e.current_node_id, e.status, e.ai_node_session, e.contact_id, e.conversation_id, e.next_eval_at, e.version_id, v.graph
+     FROM followup_enrollments e
+     JOIN followup_flow_versions v ON v.id = e.version_id
+     WHERE e.organization_id = $1 AND e.id = $2
+     FOR UPDATE`,
+    [input.organizationId, input.enrollmentId],
+  );
+
+  const row = rows[0];
+  if (!row) {
+    return { status: 'error', reason: 'enrollment_not_found' };
+  }
+
+  // 2. Confirma se current_node_id ainda é o nó esperado
+  if (row.current_node_id !== input.nodeId) {
+    return { status: 'node_changed', reason: `current_node_is_${row.current_node_id}` };
+  }
+
+  // 3. Confirma se o status da inscrição é ativo
+  if (row.status !== 'active' && row.status !== 'waiting_reply') {
+    return { status: 'session_not_running', reason: `enrollment_status_${row.status}` };
+  }
+
+  let session: AiNodeSession | null = null;
+  if (row.ai_node_session) {
+    session = typeof row.ai_node_session === 'string'
+      ? JSON.parse(row.ai_node_session)
+      : row.ai_node_session;
+  }
+
+  if (!session || session.status !== 'running') {
+    return { status: 'session_not_running', reason: session?.status ?? 'missing_ai_node_session' };
+  }
+
+  // 4. AUTORIDADE HUMANA (HUMANO > NODE IA)
+  const contactId = input.contactId ?? row.contact_id;
+  const checkHuman = deps.isLeadInHandoffFn ?? isLeadInHandoff;
+  if (contactId) {
+    const isHuman = await checkHuman(db as unknown as pg.Pool, input.organizationId, contactId);
+    if (isHuman) {
+      logger.warn('[ai-node-timeout] Humano assumiu o controle — pausando enrollment sem avançar timeout', {
+        enrollment_id: input.enrollmentId,
+        node_id: input.nodeId,
+        contact_id: contactId,
+      });
+
+      await db.query(
+        `UPDATE followup_enrollments
+         SET status = 'paused_handoff', updated_at = $1, next_eval_at = null, claimed_until = null
+         WHERE organization_id = $2 AND id = $3`,
+        [nowIso, input.organizationId, input.enrollmentId],
+      );
+
+      return { status: 'aborted_human_takeover', reason: 'human_takeover_active' };
+    }
+  }
+
+  // 5. LLM LENTA / ACTIVE TURN EM VOO (active_turn com lease válida não pode sofrer timeout)
+  if (session.active_turn) {
+    const leaseUntilTime = new Date(session.active_turn.lease_until).getTime();
+    if (now.getTime() < leaseUntilTime) {
+      logger.info('[ai-node-timeout] Turno ativo com lease válida em andamento — adiando timeout', {
+        enrollment_id: input.enrollmentId,
+        node_id: input.nodeId,
+        active_inbound_message_id: session.active_turn.inbound_message_id,
+        lease_until: session.active_turn.lease_until,
+      });
+
+      const deferredEval = new Date(leaseUntilTime + 5_000).toISOString();
+      await db.query(
+        `UPDATE followup_enrollments
+         SET next_eval_at = $1, updated_at = $2
+         WHERE organization_id = $3 AND id = $4`,
+        [deferredEval, nowIso, input.organizationId, input.enrollmentId],
+      );
+
+      return { status: 'deferred_active_turn', reason: 'turn_in_flight' };
+    }
+  }
+
+  // 6. STALE TIMER CHECK (Job antigo que acordou após deadline ter sido renovada)
+  const deadlineStr = session.timeout_at ?? row.next_eval_at;
+  if (deadlineStr) {
+    const deadlineTime = new Date(deadlineStr).getTime();
+    if (now.getTime() < deadlineTime) {
+      logger.info('[ai-node-timeout] Job de timeout antigo ignorado — prazo atual é futuro', {
+        enrollment_id: input.enrollmentId,
+        node_id: input.nodeId,
+        deadline: deadlineStr,
+        now: nowIso,
+      });
+
+      // Registra evento de observabilidade ai_node.timeout_stale_ignored
+      await db.query(
+        `INSERT INTO followup_enrollment_events (
+           organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (enrollment_id, idempotency_key) DO NOTHING`,
+        [
+          input.organizationId,
+          input.enrollmentId,
+          input.nodeId,
+          'ai_node.timeout_stale_ignored',
+          JSON.stringify({
+            timeout_at: session.timeout_at,
+            next_eval_at: row.next_eval_at,
+            ignored_at: nowIso,
+            reason: 'deadline_in_future',
+          }),
+          `ai_node_stale_timeout:${input.organizationId}:${input.enrollmentId}:${input.nodeId}:${row.next_eval_at}`,
+          nowIso,
+        ],
+      );
+
+      return { status: 'stale_ignored', reason: 'deadline_extended_by_recent_inbound' };
+    }
+  }
+
+  // 7. TIMEOUT LEGÍTIMO CONFIRMADO
+  // ZERO LLM, ZERO mensagem inventada.
+  logger.info('[ai-node-timeout] Prazo de inatividade expirado legitimamente — executando timeout', {
+    enrollment_id: input.enrollmentId,
+    node_id: input.nodeId,
+  });
+
+  const updatedSession: AiNodeSession = {
+    ...session,
+    status: 'timeout',
+    completion_reason: 'timeout',
+    active_turn: null,
+  };
+
+  // Registra ai_node.timeout
+  await db.query(
+    `INSERT INTO followup_enrollment_events (
+       organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (enrollment_id, idempotency_key) DO NOTHING`,
+    [
+      input.organizationId,
+      input.enrollmentId,
+      input.nodeId,
+      'ai_node.timeout',
+      JSON.stringify({
+        expired_at: nowIso,
+        timeout_at: session.timeout_at,
+        reason: 'customer_inactivity_timeout',
+      }),
+      `ai_node_timeout:${input.organizationId}:${input.enrollmentId}:${input.nodeId}`,
+      nowIso,
+    ],
+  );
+
+  let graph = input.graph;
+  if (!graph && row.graph) {
+    try {
+      graph = flowGraphSchema.parse(row.graph);
+    } catch {}
+  }
+
+  if (!graph) {
+    return { status: 'error', reason: 'graph_not_found' };
+  }
+
+  // Busca estrita da branch 'timeout'
+  const timeoutEdge = findAiNodeStrictBranchEdge(
+    graph.edges,
+    input.nodeId,
+    AI_NODE_TIMEOUT_BRANCH_ID,
+  );
+
+  const nextNodeId = timeoutEdge?.target ?? null;
+
+  if (!nextNodeId) {
+    // Se não houver aresta timeout, tenta a branch de erro
+    const errorEdge = findAiNodeStrictBranchEdge(
+      graph.edges,
+      input.nodeId,
+      AI_NODE_ERROR_BRANCH_ID,
+    );
+
+    if (errorEdge?.target) {
+      const exitedKey = `ai_node_exited:${input.organizationId}:${input.enrollmentId}:${input.nodeId}:timeout`;
+      const transitionStatus = await applyAiNodeTransition(
+        db,
+        {
+          organizationId: input.organizationId,
+          enrollmentId: input.enrollmentId,
+          nodeId: input.nodeId,
+          inboundMessageId: 'timeout',
+          workerId: input.workerId ?? 'timeout_worker',
+          leaseGeneration: 1,
+          contactId,
+          conversationId: input.conversationId ?? row.conversation_id,
+        },
+        errorEdge.target,
+        AI_NODE_ERROR_BRANCH_ID,
+        updatedSession,
+        nowIso,
+        exitedKey,
+        deps,
+        { reason: 'missing_timeout_branch' },
+      );
+      return {
+        status: 'timeout',
+        nextNodeId: errorEdge.target,
+        transitionStatus,
+        reason: 'missing_timeout_branch_fallback_error',
+      };
+    }
+
+    // Fail-closed seguro: atualiza sessão para error e não avança
+    const errSession: AiNodeSession = {
+      ...updatedSession,
+      status: 'error',
+    };
+    await db.query(
+      `UPDATE followup_enrollments
+       SET ai_node_session = $1, status = 'active', next_eval_at = null, claimed_until = null, updated_at = $2
+       WHERE organization_id = $3 AND id = $4`,
+      [JSON.stringify(errSession), nowIso, input.organizationId, input.enrollmentId],
+    );
+
+    return {
+      status: 'error',
+      reason: 'missing_timeout_branch_fail_closed',
+      transitionStatus: 'skipped',
+    };
+  }
+
+  const exitedKey = `ai_node_exited:${input.organizationId}:${input.enrollmentId}:${input.nodeId}:timeout`;
+  const transitionStatus = await applyAiNodeTransition(
+    db,
+    {
+      organizationId: input.organizationId,
+      enrollmentId: input.enrollmentId,
+      nodeId: input.nodeId,
+      inboundMessageId: 'timeout',
+      workerId: input.workerId ?? 'timeout_worker',
+      leaseGeneration: 1,
+      contactId,
+      conversationId: input.conversationId ?? row.conversation_id,
+    },
+    nextNodeId,
+    AI_NODE_TIMEOUT_BRANCH_ID,
+    updatedSession,
+    nowIso,
+    exitedKey,
+    deps,
+    { reason: 'customer_inactivity_timeout' },
+  );
+
+  return {
+    status: 'timeout',
+    nextNodeId,
+    transitionStatus,
+    reason: 'customer_inactivity_timeout',
+  };
+}
+

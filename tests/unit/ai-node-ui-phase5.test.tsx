@@ -2,11 +2,13 @@ import { describe, it, expect, vi, beforeAll } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import type { NodeProps } from "@xyflow/react";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { NodePalette } from "@/app/app/ai/followups/[id]/_components/NodePalette";
 import { NodeConfigPanel } from "@/app/app/ai/followups/[id]/_components/NodeConfigPanel";
 import { AiNode } from "@/app/app/ai/followups/[id]/_components/nodes/AiNode";
-import { NODE_VISUALS, describeNodeConfig } from "@/app/app/ai/followups/[id]/_components/nodes/nodeVisuals";
+import { NODE_VISUALS } from "@/app/app/ai/followups/[id]/_components/nodes/nodeVisuals";
 import {
   nodeBranches,
   type FlowGraph,
@@ -162,7 +164,7 @@ function createAiRfNode(config: Record<string, unknown> = {}): RFNode {
         max_turns: 10,
         timeout: { duration_value: 24, unit: "hours" },
         ...config,
-      } as any,
+      } as AiNodeConfig,
     },
   };
 }
@@ -453,7 +455,7 @@ describe("Fase 5: UI / UX do Node IA no Fluxo (Testes A a S)", () => {
             agent_name: "Vinícius Org A",
             objective: "Apresentar produto",
             max_turns: 15,
-          } as any,
+          } as AiNodeConfig,
         },
       ],
       edges: [
@@ -506,7 +508,7 @@ describe("Fase 5: UI / UX do Node IA no Fluxo (Testes A a S)", () => {
     };
 
     const result = await importFlowIntoOrg({
-      admin: mockAdmin as any,
+      admin: mockAdmin as unknown as SupabaseClient,
       targetOrgId: "org-destination-tenant",
       userId: "user-target",
       flowName: "Fluxo Importado com IA",
@@ -519,15 +521,16 @@ describe("Fase 5: UI / UX do Node IA no Fluxo (Testes A a S)", () => {
 
     // O grafo importado NÃO possui o agent_id nem pinned_version_id da org de origem
     const importedAiNode = insertedGraph!.nodes.find((n) => n.type === "ai_node")!;
-    const importedBinding = (importedAiNode.config as any).agent_binding;
-    expect(importedBinding.agent_id).toBeUndefined();
-    expect(importedBinding.pinned_version_id).toBeUndefined();
-    expect((importedAiNode.config as any).agent_name).toBeUndefined();
+    const importedConfig = importedAiNode.config as AiNodeConfig;
+    const importedBinding = importedConfig.agent_binding;
+    expect(importedBinding?.agent_id).toBeUndefined();
+    expect(importedBinding?.pinned_version_id).toBeUndefined();
+    expect(importedConfig.agent_name).toBeUndefined();
 
     // Mas preserva objetivo, modo e limites
-    expect((importedAiNode.config as any).objective).toBe("Apresentar produto");
-    expect((importedAiNode.config as any).mode).toBe("existing_agent");
-    expect((importedAiNode.config as any).max_turns).toBe(15);
+    expect(importedConfig.objective).toBe("Apresentar produto");
+    expect(importedConfig.mode).toBe("existing_agent");
+    expect(importedConfig.max_turns).toBe(15);
   });
 
   // Q. Configuração incompleta exibe warning no canvas.
@@ -544,7 +547,7 @@ describe("Fase 5: UI / UX do Node IA no Fluxo (Testes A a S)", () => {
       selected: false,
     };
 
-    wrapWithProviders(<AiNode {...(nodeProps as any)} />);
+    wrapWithProviders(<AiNode {...(nodeProps as unknown as NodeProps<RFNode>)} />);
 
     const card = screen.getByTestId("node-card-ai_node-1");
     expect(card).toBeInTheDocument();

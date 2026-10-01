@@ -1,14 +1,15 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { ReactFlowProvider } from "@xyflow/react";
+import { ReactFlowProvider, type NodeProps } from "@xyflow/react";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import type { RFNode } from "@/lib/followup/graph-mappers";
 
 import { AiNodeForm } from "@/app/app/ai/followups/[id]/_components/forms/AiNodeForm";
 import { NodePalette } from "@/app/app/ai/followups/[id]/_components/NodePalette";
 import { AiNode } from "@/app/app/ai/followups/[id]/_components/nodes/AiNode";
 import {
   flowGraphSchema,
-  aiNodeConfigSchema,
   computeAiNodeTimeoutMs,
   normalizeLegacyTimeoutMs,
   normalizeAiNodeTimeout,
@@ -175,7 +176,7 @@ describe("Fase 5.1: Auditoria Rigorosa de Integração UI ↔ Schema ↔ Runtime
     const loadVersionMock = vi.fn();
 
     const resolved = await resolveAiNodeAgentConfig(
-      {} as any,
+      {} as unknown as Parameters<typeof resolveAiNodeAgentConfig>[0],
       TARGET_ORG_UUID,
       validatedConfig,
       {
@@ -267,7 +268,7 @@ describe("Fase 5.1: Auditoria Rigorosa de Integração UI ↔ Schema ↔ Runtime
     });
 
     const resolved = await resolveAiNodeAgentConfig(
-      {} as any,
+      {} as unknown as Parameters<typeof resolveAiNodeAgentConfig>[0],
       TARGET_ORG_UUID,
       validatedConfig,
       {
@@ -363,7 +364,7 @@ describe("Fase 5.1: Auditoria Rigorosa de Integração UI ↔ Schema ↔ Runtime
     };
 
     const res = await importFlowIntoOrg({
-      admin: mockAdmin as any,
+      admin: mockAdmin as unknown as SupabaseClient,
       targetOrgId: TARGET_ORG_UUID,
       userId: TARGET_USER_UUID,
       flowName: foreignFlow.name,
@@ -374,7 +375,7 @@ describe("Fase 5.1: Auditoria Rigorosa de Integração UI ↔ Schema ↔ Runtime
     expect(insertedGraph).toBeDefined();
 
     const importedAiNode = insertedGraph!.nodes.find((n) => n.type === "ai_node")!;
-    const cfg = importedAiNode.config as any;
+    const cfg = importedAiNode.config as AiNodeConfig;
 
     // UUIDs da Org estrangeira foram totalmente removidos
     expect(cfg.agent_binding?.agent_id).toBeUndefined();
@@ -494,7 +495,7 @@ describe("Fase 5.1: Auditoria Rigorosa de Integração UI ↔ Schema ↔ Runtime
       selected: false,
     };
 
-    renderWithProviders(<AiNode {...(existingNode as any)} />);
+    renderWithProviders(<AiNode {...(existingNode as unknown as NodeProps<RFNode>)} />);
     expect(screen.getByText("IA")).toBeInTheDocument();
     expect(screen.getByText("Atendimento preexistente em produção")).toBeInTheDocument();
   });
@@ -600,7 +601,7 @@ describe("Fase 5.1: Auditoria Rigorosa de Integração UI ↔ Schema ↔ Runtime
       selected: true,
     };
 
-    const { unmount } = renderWithProviders(<AiNode {...(nodeData as any)} />);
+    const { unmount } = renderWithProviders(<AiNode {...(nodeData as unknown as NodeProps<RFNode>)} />);
     const card = screen.getByTestId("node-card-ai-node-responsive");
     expect(card).toBeInTheDocument();
 
@@ -613,7 +614,7 @@ describe("Fase 5.1: Auditoria Rigorosa de Integração UI ↔ Schema ↔ Runtime
     window.innerHeight = 720;
     window.dispatchEvent(new Event("resize"));
 
-    renderWithProviders(<AiNode {...(nodeData as any)} />);
+    renderWithProviders(<AiNode {...(nodeData as unknown as NodeProps<RFNode>)} />);
     const card720 = screen.getByTestId("node-card-ai-node-responsive");
     expect(card720).toBeInTheDocument();
     expect(card720.querySelectorAll(".react-flow__handle-right").length).toBe(5);
