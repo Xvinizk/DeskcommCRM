@@ -371,7 +371,7 @@ export function MessageMediaForm({ type, config, onChange }: Props) {
                 <img
                   src={previewSource}
                   alt={mediaFilename || t("Pré-visualização")}
-                  className="max-h-44 w-auto object-contain rounded"
+                  className="max-h-44 w-auto object-contain rounded-md"
                   onError={() => setError(t("Não foi possível carregar a imagem."))}
                 />
               </div>

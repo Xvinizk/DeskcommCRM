@@ -17,7 +17,10 @@ import {
   CalendarBlank,
   Sparkle,
   TreeStructure,
+  XCircle,
 } from "@/lib/ui/icons";
+import { useT } from "@/hooks/i18n/useT";
+import { useTagDeIdioma } from "@/hooks/i18n/useLocaleDeData";
 
 interface Props {
   token: string;
@@ -28,6 +31,33 @@ interface Props {
   audioCount: number;
   snapshotDate: string;
   isAuthenticated: boolean;
+}
+
+export function SharedFlowUnavailable() {
+  const t = useT();
+
+  return (
+    <div className="flex min-h-screen flex-col items-center justify-center p-4">
+      <Card className="max-w-md p-8 text-center space-y-4 border border-border shadow-xl">
+        <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-error/10 text-error">
+          <XCircle size={32} weight="fill" />
+        </div>
+        <div>
+          <h1 className="text-xl font-bold text-text">{t("Fluxo Indisponível")}</h1>
+          <p className="mt-1 text-sm text-text-muted">
+            {t("Este link de compartilhamento foi desativado, expirou ou não existe.")}
+          </p>
+        </div>
+        <div className="pt-2">
+          <Link href="/app">
+            <Button variant="outline" className="w-full">
+              {t("Ir para o CRM")}
+            </Button>
+          </Link>
+        </div>
+      </Card>
+    </div>
+  );
 }
 
 export function SharedFlowClient({
@@ -41,6 +71,8 @@ export function SharedFlowClient({
   isAuthenticated,
 }: Props) {
   const router = useRouter();
+  const t = useT();
+  const tagDeIdioma = useTagDeIdioma();
   const [isImporting, setIsImporting] = useState(false);
   const [importResult, setImportResult] = useState<{
     flow_id: string;
@@ -49,7 +81,7 @@ export function SharedFlowClient({
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const formattedDate = new Date(snapshotDate).toLocaleDateString("pt-BR", {
+  const formattedDate = new Date(snapshotDate).toLocaleDateString(tagDeIdioma, {
     day: "2-digit",
     month: "long",
     year: "numeric",
@@ -74,13 +106,13 @@ export function SharedFlowClient({
 
       const json = await res.json();
       if (!res.ok || !json.data?.flow_id) {
-        setError(json.error?.message || "Falha ao importar o fluxo para sua conta.");
+        setError(json.error?.message || t("Falha ao importar o fluxo para sua conta."));
         return;
       }
 
       setImportResult(json.data);
     } catch {
-      setError("Falha na conexão ao importar o fluxo.");
+      setError(t("Falha na conexão ao importar o fluxo."));
     } finally {
       setIsImporting(false);
     }
@@ -98,7 +130,7 @@ export function SharedFlowClient({
           <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10 text-primary shadow-inner">
             <FlowArrow size={24} weight="bold" />
           </div>
-          <span className="text-lg font-semibold tracking-tight">Fluxo Compartilhado</span>
+          <span className="text-lg font-semibold tracking-tight">{t("Fluxo Compartilhado")}</span>
         </div>
 
         <Card className="overflow-hidden border border-border/80 bg-surface/90 shadow-2xl backdrop-blur-md">
@@ -106,7 +138,7 @@ export function SharedFlowClient({
           <div className="border-b border-border bg-gradient-to-r from-primary/5 via-accent/5 to-surface-raised p-6 text-center sm:p-8">
             <Badge variant="outline" className="mb-3 gap-1.5 border-primary/30 px-3 py-1 font-medium text-primary">
               <Sparkle size={13} weight="fill" />
-              Snapshot Imutável
+              {t("Snapshot Imutável")}
             </Badge>
 
             <h1 className="text-2xl font-bold tracking-tight text-text sm:text-3xl" title={flowName}>
@@ -115,7 +147,7 @@ export function SharedFlowClient({
 
             <div className="mt-2.5 flex items-center justify-center gap-1.5 text-xs text-text-muted">
               <CalendarBlank size={14} className="shrink-0" />
-              <span>Snapshot gerado em {formattedDate}</span>
+              <span>{t("Snapshot gerado em")} {formattedDate}</span>
             </div>
           </div>
 
@@ -126,7 +158,7 @@ export function SharedFlowClient({
                 <TreeStructure size={18} />
               </span>
               <span className="text-xl font-bold text-text">{nodeCount}</span>
-              <span className="text-xs text-text-muted">Nós do Fluxo</span>
+              <span className="text-xs text-text-muted">{t("Nós do Fluxo")}</span>
             </div>
 
             <div className="flex flex-col items-center justify-center bg-surface p-4 text-center">
@@ -134,7 +166,7 @@ export function SharedFlowClient({
                 <ImageIcon size={18} />
               </span>
               <span className="text-xl font-bold text-text">{imageCount}</span>
-              <span className="text-xs text-text-muted">Imagens</span>
+              <span className="text-xs text-text-muted">{t("Imagens")}</span>
             </div>
 
             <div className="flex flex-col items-center justify-center bg-surface p-4 text-center">
@@ -142,7 +174,7 @@ export function SharedFlowClient({
                 <VideoCamera size={18} />
               </span>
               <span className="text-xl font-bold text-text">{videoCount}</span>
-              <span className="text-xs text-text-muted">Vídeos</span>
+              <span className="text-xs text-text-muted">{t("Vídeos")}</span>
             </div>
 
             <div className="flex flex-col items-center justify-center bg-surface p-4 text-center">
@@ -150,7 +182,7 @@ export function SharedFlowClient({
                 <MusicNote size={18} />
               </span>
               <span className="text-xl font-bold text-text">{audioCount}</span>
-              <span className="text-xs text-text-muted">Áudios</span>
+              <span className="text-xs text-text-muted">{t("Áudios")}</span>
             </div>
           </div>
 
@@ -162,15 +194,15 @@ export function SharedFlowClient({
                   <Check size={28} weight="bold" />
                 </div>
                 <div>
-                  <h3 className="text-lg font-semibold text-text">Fluxo importado com sucesso</h3>
+                  <h3 className="text-lg font-semibold text-text">{t("Fluxo importado com sucesso")}</h3>
                   <p className="text-xs text-text-muted mt-1">
-                    Um novo Fluxo foi criado na sua conta como rascunho com mídias e etapas vinculadas.
+                    {t("Um novo Fluxo foi criado na sua conta como rascunho com mídias e etapas vinculadas.")}
                   </p>
                 </div>
 
                 {importResult.warnings && importResult.warnings.length > 0 && (
                   <div className="mt-3 rounded-lg border border-warning/30 bg-warning/10 p-3 text-left text-xs text-warning-fg space-y-1">
-                    <p className="font-semibold">Observações sobre a importação:</p>
+                    <p className="font-semibold">{t("Observações sobre a importação:")}</p>
                     <ul className="list-disc pl-4 space-y-0.5">
                       {importResult.warnings.map((w, i) => (
                         <li key={i}>{w}</li>
@@ -182,7 +214,7 @@ export function SharedFlowClient({
                 <div className="pt-2">
                   <Link href={`/app/ai/followups/${importResult.flow_id}`}>
                     <Button size="lg" className="w-full gap-2 font-medium shadow-md">
-                      <span>Abrir no Fluxo</span>
+                      <span>{t("Abrir no Fluxo")}</span>
                       <ArrowRight size={16} />
                     </Button>
                   </Link>
@@ -192,8 +224,8 @@ export function SharedFlowClient({
               <>
                 <div className="text-center text-xs text-text-muted">
                   {isAuthenticated
-                    ? "O fluxo será clonado para a sua organização ativa como um novo rascunho."
-                    : "Você precisará entrar na sua conta para importar o fluxo."}
+                    ? t("O fluxo será clonado para a sua organização ativa como um novo rascunho.")
+                    : t("Você precisará entrar na sua conta para importar o fluxo.")}
                 </div>
 
                 {error && (
@@ -211,11 +243,11 @@ export function SharedFlowClient({
                   {isImporting ? (
                     <>
                       <CircleNotch size={20} className="animate-spin" />
-                      <span>Importando mídias e nós...</span>
+                      <span>{t("Importando mídias e nós...")}</span>
                     </>
                   ) : (
                     <>
-                      <span>Importar para minha conta</span>
+                      <span>{t("Importar para minha conta")}</span>
                       <ArrowRight size={18} />
                     </>
                   )}

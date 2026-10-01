@@ -232,9 +232,18 @@ export function TriggerConfigControl({ flowId, triggerConfig }: Props) {
                 <SelectItem value="appointment_no_show">{t(KIND_LABEL.appointment_no_show)}</SelectItem>
                 <SelectItem value="case_opened">{t(KIND_LABEL.case_opened)}</SelectItem>
                 <SelectItem value="webhook">{t(KIND_LABEL.webhook)}</SelectItem>
+                <SelectItem value="keyword">{t(KIND_LABEL.keyword)}</SelectItem>
               </SelectContent>
             </Select>
           </div>
+
+          {form.kind === "keyword" && (
+            <p className="text-xs text-muted-foreground">
+              {t(
+                "O fluxo começa quando uma mensagem recebida no WhatsApp contém uma das palavras-chave configuradas.",
+              )}
+            </p>
+          )}
 
           {form.kind === "stage_change" && (
             <div className="space-y-2">

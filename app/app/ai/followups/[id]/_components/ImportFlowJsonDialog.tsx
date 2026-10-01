@@ -198,7 +198,7 @@ export function ImportFlowJsonDialog({ open, onOpenChange, onImportSuccess }: Pr
             </div>
 
             <div className="space-y-1.5">
-              <label className="text-xs font-medium text-text">{t("Conteúdo JSON:")}</label>
+              <label className="block text-xs font-medium text-text">{t("Conteúdo JSON:")}</label>
               <Textarea
                 value={jsonText}
                 onChange={(e) => setJsonText(e.target.value)}

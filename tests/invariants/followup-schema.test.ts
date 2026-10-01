@@ -85,6 +85,9 @@ function seedRlsOrg(
     insert into public.followup_enrollment_events (id, organization_id, enrollment_id, event_type, payload)
       values ('${event}', '${org}', '${enrollment}', 'rls_probe', '{}'::jsonb)
       on conflict (id) do nothing;
+    insert into public.followup_flow_shares (id, organization_id, pointer_id, token, snapshot)
+      values (gen_random_uuid(), '${org}', '${pointer}', 'share-token-${tag}', '{}'::jsonb)
+      on conflict (token) do nothing;
   `;
 }
 
@@ -100,6 +103,7 @@ const FOLLOWUP_TABLES = [
   "followup_flow_pointers",
   "followup_enrollments",
   "followup_enrollment_events",
+  "followup_flow_shares",
 ] as const;
 
 describe("followup schema (0054) — RLS tenant isolation", () => {
