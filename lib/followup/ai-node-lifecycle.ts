@@ -254,39 +254,17 @@ async function applyAiNodeTransition(
     }
   }
 
-  // Continuação crash-safe
-  if (deps?.advanceEnrollmentFn) {
-    if (transitionStatus === 'transition_fresh') {
-      try {
-        await deps.advanceEnrollmentFn(input.enrollmentId, input.organizationId, nextNodeId);
-      } catch (err) {
-        logger.error('[ai-node-lifecycle] Falha ao avançar enrollment pós-transição fresca', {
-          enrollment_id: input.enrollmentId,
-          next_node_id: nextNodeId,
-          branch_id: branchId,
-          error: String(err),
-        });
-      }
-    } else {
-      // transition_already_applied: recuperação pós-crash
-      const { rows: currentEnrRows } = await db.query<{ current_node_id: string; status: string }>(
-        `SELECT current_node_id, status FROM followup_enrollments WHERE organization_id = $1 AND id = $2 LIMIT 1`,
-        [input.organizationId, input.enrollmentId],
-      );
-      const currentEnr = currentEnrRows[0];
-      if (currentEnr && currentEnr.status === 'active') {
-        const resumeNodeId = currentEnr.current_node_id;
-        try {
-          await deps.advanceEnrollmentFn(input.enrollmentId, input.organizationId, resumeNodeId);
-        } catch (err) {
-          logger.error('[ai-node-lifecycle] Falha ao recuperar avanço de enrollment pós-crash', {
-            enrollment_id: input.enrollmentId,
-            resume_node_id: resumeNodeId,
-            branch_id: branchId,
-            error: String(err),
-          });
-        }
-      }
+  // Continuação imediata apenas para transição fresca (durabilidade garantida via job_queue)
+  if (deps?.advanceEnrollmentFn && transitionStatus === 'transition_fresh') {
+    try {
+      await deps.advanceEnrollmentFn(input.enrollmentId, input.organizationId, nextNodeId);
+    } catch (err) {
+      logger.error('[ai-node-lifecycle] Falha ao avançar enrollment pós-transição fresca', {
+        enrollment_id: input.enrollmentId,
+        next_node_id: nextNodeId,
+        branch_id: branchId,
+        error: String(err),
+      });
     }
   }
 
@@ -1555,9 +1533,10 @@ export async function executeAiNodeTimeout(
     conversation_id: string | null;
     next_eval_at: string | null;
     version_id: string;
+    steps_taken: number;
     graph?: unknown;
   }>(
-    `SELECT e.current_node_id, e.status, e.ai_node_session, e.contact_id, e.conversation_id, e.next_eval_at, e.version_id, v.graph
+    `SELECT e.current_node_id, e.status, e.ai_node_session, e.contact_id, e.conversation_id, e.next_eval_at, e.version_id, e.steps_taken, v.graph
      FROM followup_enrollments e
      JOIN followup_flow_versions v ON v.id = e.version_id
      WHERE e.organization_id = $1 AND e.id = $2
@@ -1689,6 +1668,8 @@ export async function executeAiNodeTimeout(
     active_turn: null,
   };
 
+  const executionToken = session.started_at || `step_${row.steps_taken ?? 0}`;
+
   // Registra ai_node.timeout
   await db.query(
     `INSERT INTO followup_enrollment_events (
@@ -1705,7 +1686,7 @@ export async function executeAiNodeTimeout(
         timeout_at: session.timeout_at,
         reason: 'customer_inactivity_timeout',
       }),
-      `ai_node_timeout:${input.organizationId}:${input.enrollmentId}:${input.nodeId}`,
+      `ai_node_timeout:${input.organizationId}:${input.enrollmentId}:${input.nodeId}:${executionToken}`,
       nowIso,
     ],
   );
@@ -1739,7 +1720,7 @@ export async function executeAiNodeTimeout(
     );
 
     if (errorEdge?.target) {
-      const exitedKey = `ai_node_exited:${input.organizationId}:${input.enrollmentId}:${input.nodeId}:timeout`;
+      const exitedKey = `ai_node_exited:${input.organizationId}:${input.enrollmentId}:${input.nodeId}:timeout:${executionToken}`;
       const transitionStatus = await applyAiNodeTransition(
         db,
         {
@@ -1787,7 +1768,7 @@ export async function executeAiNodeTimeout(
     };
   }
 
-  const exitedKey = `ai_node_exited:${input.organizationId}:${input.enrollmentId}:${input.nodeId}:timeout`;
+  const exitedKey = `ai_node_exited:${input.organizationId}:${input.enrollmentId}:${input.nodeId}:timeout:${executionToken}`;
   const transitionStatus = await applyAiNodeTransition(
     db,
     {

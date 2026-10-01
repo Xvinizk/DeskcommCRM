@@ -1378,4 +1378,232 @@ describe('FASE 6: TIMEOUT OPERACIONAL + MAX_TURNS OPERACIONAL DO NODE IA', () =>
     // NUNCA desfechos conflitantes simultâneos: somente max_turns venceu
     expect(harness.getEnrollment().ai_node_session.status).toBe('max_turns');
   });
+
+  // =========================================================================
+  // SEÇÃO 3: AUDITORIA DE REENTRADA / LOOP E CONCORRÊNCIA DE RETRIES (S a U)
+  // =========================================================================
+
+  it('S. Reentrada no mesmo ai_node após loop -> novo timeout legítimo com chaves distintas por started_at', async () => {
+    const harness = createTimeoutAndMaxTurnsHarness({
+      enrollmentId: 'enr-s-loop',
+      organizationId: 'org-s',
+      nodeId: 'node-ai-1',
+      contactId: 'contact-s',
+      conversationId: 'conv-s',
+      graph: baseGraphWith5Branches,
+      nextEvalAt: new Date('2026-10-01T10:00:00Z').toISOString(),
+      session: {
+        started_at: '2026-10-01T09:00:00.000Z', // Primeira visita às 09:00
+        status: 'running',
+        active_turn: null,
+      },
+    });
+
+    // 1. Primeira visita sofre timeout às 10:00
+    const timeout1 = await executeAiNodeTimeout(
+      harness.mockDb,
+      {
+        organizationId: 'org-s',
+        enrollmentId: 'enr-s-loop',
+        nodeId: 'node-ai-1',
+        contactId: 'contact-s',
+        graph: baseGraphWith5Branches,
+      },
+      {
+        clock: () => new Date('2026-10-01T10:00:00Z'),
+        advanceEnrollmentFn: harness.advanceEnrollmentFn,
+      },
+    );
+
+    expect(timeout1.status).toBe('timeout');
+    expect(timeout1.transitionStatus).toBe('transition_fresh');
+    expect(timeout1.nextNodeId).toBe('node-timeout-target');
+    expect(harness.getEnrollment().current_node_id).toBe('node-timeout-target');
+
+    // 2. Fluxo caminha por nós intermediários e faz um loop de volta para 'node-ai-1'
+    // Simulando a nova entrada no node-ai-1 com nova sessão e novo started_at:
+    const enr = harness.getEnrollment();
+    enr.current_node_id = 'node-ai-1';
+    enr.status = 'active';
+    enr.ai_node_session = {
+      node_id: 'node-ai-1',
+      mode: 'custom_prompt',
+      turn_count: 0,
+      started_at: '2026-10-01T15:00:00.000Z', // Segunda visita às 15:00!
+      status: 'running',
+      active_turn: null,
+      timeout_at: '2026-10-01T16:00:00.000Z',
+      extracted_data: {},
+      media_summary: { images_count: 0, audios_count: 0, documents_count: 0, last_media_ids: [] },
+    };
+    enr.next_eval_at = '2026-10-01T16:00:00.000Z';
+
+    // 3. Segunda visita sofre novo timeout legítimo às 16:00
+    const timeout2 = await executeAiNodeTimeout(
+      harness.mockDb,
+      {
+        organizationId: 'org-s',
+        enrollmentId: 'enr-s-loop',
+        nodeId: 'node-ai-1',
+        contactId: 'contact-s',
+        graph: baseGraphWith5Branches,
+      },
+      {
+        clock: () => new Date('2026-10-01T16:00:00Z'),
+        advanceEnrollmentFn: harness.advanceEnrollmentFn,
+      },
+    );
+
+    // O segundo timeout NÃO colide com o primeiro! Transiciona normalmente como 'transition_fresh'!
+    expect(timeout2.status).toBe('timeout');
+    expect(timeout2.transitionStatus).toBe('transition_fresh');
+    expect(timeout2.nextNodeId).toBe('node-timeout-target');
+    expect(harness.getEnrollment().current_node_id).toBe('node-timeout-target');
+
+    // Dois eventos ai_node.timeout distintos gravados com sucesso
+    const timeoutEvents = harness.getEvents().filter((e) => e.event_type === 'ai_node.timeout');
+    expect(timeoutEvents.length).toBe(2);
+
+    // Dois eventos ai_node.exited distintos com tokens diferentes
+    const exitedEvents = harness.getEvents().filter((e) => e.event_type === 'ai_node.exited');
+    expect(exitedEvents.length).toBe(2);
+    expect(exitedEvents[0]!.idempotency_key).toContain('2026-10-01T09:00:00.000Z');
+    expect(exitedEvents[1]!.idempotency_key).toContain('2026-10-01T15:00:00.000Z');
+  });
+
+  it('T. Mesma visita com 20 retries concorrentes de timeout -> exatamente 1 transição fresh e 19 already_applied', async () => {
+    const harness = createTimeoutAndMaxTurnsHarness({
+      enrollmentId: 'enr-t-concurrent',
+      organizationId: 'org-t',
+      nodeId: 'node-ai-1',
+      contactId: 'contact-t',
+      conversationId: 'conv-t',
+      graph: baseGraphWith5Branches,
+      nextEvalAt: new Date('2026-10-01T10:00:00Z').toISOString(),
+      session: {
+        started_at: '2026-10-01T09:00:00.000Z',
+        status: 'running',
+        active_turn: null,
+      },
+    });
+
+    const promises = Array.from({ length: 20 }, () =>
+      executeAiNodeTimeout(
+        harness.mockDb,
+        {
+          organizationId: 'org-t',
+          enrollmentId: 'enr-t-concurrent',
+          nodeId: 'node-ai-1',
+          contactId: 'contact-t',
+          graph: baseGraphWith5Branches,
+        },
+        {
+          clock: () => new Date('2026-10-01T10:00:00Z'),
+          advanceEnrollmentFn: harness.advanceEnrollmentFn,
+        },
+      ),
+    );
+
+    const results = await Promise.all(promises);
+
+    const fresh = results.filter((r) => r.transitionStatus === 'transition_fresh');
+    const alreadyApplied = results.filter((r) => r.transitionStatus === 'transition_already_applied' || r.status === 'node_changed');
+
+    expect(fresh.length).toBe(1);
+    expect(alreadyApplied.length).toBe(19);
+
+    // Exatamente 1 evento ai_node.timeout e 1 evento ai_node.exited
+    const timeoutEvents = harness.getEvents().filter((e) => e.event_type === 'ai_node.timeout');
+    const exitedEvents = harness.getEvents().filter((e) => e.event_type === 'ai_node.exited');
+    expect(timeoutEvents.length).toBe(1);
+    expect(exitedEvents.length).toBe(1);
+
+    // advanceEnrollment chamado exatamente 1x
+    expect(harness.getAdvanceCalls().length).toBe(1);
+  });
+
+  it('U. Reentrada no mesmo ai_node após loop -> novo max_turns legítimo (inboundMessageId distinto)', async () => {
+    const harness = createTimeoutAndMaxTurnsHarness({
+      enrollmentId: 'enr-u-loop',
+      organizationId: 'org-u',
+      nodeId: 'node-ai-1',
+      contactId: 'contact-u',
+      conversationId: 'conv-u',
+      graph: baseGraphWith5Branches,
+      session: {
+        turn_count: 10,
+        status: 'running',
+      },
+    });
+
+    // 1. Primeiro max_turns com msg-inbound-1
+    const res1 = await harness.runLifecycle(
+      {
+        organizationId: 'org-u',
+        enrollmentId: 'enr-u-loop',
+        nodeId: 'node-ai-1',
+        inboundMessageId: 'msg-inbound-1',
+        workerId: 'w-1',
+        leaseGeneration: 1,
+        graph: baseGraphWith5Branches,
+        contactId: 'contact-u',
+      },
+      {
+        generateStructuredOutputFn: async () => ({
+          reply: 'Mais detalhes',
+          node_status: 'continue',
+        }),
+        isLeadInHandoffFn: async () => false,
+      },
+    );
+
+    expect(res1.status).toBe('max_turns');
+    expect(res1.transitionStatus).toBe('transition_fresh');
+    expect(harness.getEnrollment().current_node_id).toBe('node-maxturns-target');
+
+    // 2. Loop de volta para o nó com nova sessão
+    const enr = harness.getEnrollment();
+    enr.current_node_id = 'node-ai-1';
+    enr.status = 'active';
+    enr.ai_node_session = {
+      node_id: 'node-ai-1',
+      mode: 'custom_prompt',
+      turn_count: 10, // Novo ciclo já atingiu o limite da nova visita
+      started_at: '2026-10-01T18:00:00.000Z',
+      status: 'running',
+      active_turn: null,
+      extracted_data: {},
+      media_summary: { images_count: 0, audios_count: 0, documents_count: 0, last_media_ids: [] },
+    };
+
+    // 3. Segundo max_turns com msg-inbound-2
+    const res2 = await harness.runLifecycle(
+      {
+        organizationId: 'org-u',
+        enrollmentId: 'enr-u-loop',
+        nodeId: 'node-ai-1',
+        inboundMessageId: 'msg-inbound-2',
+        workerId: 'w-2',
+        leaseGeneration: 1,
+        graph: baseGraphWith5Branches,
+        contactId: 'contact-u',
+      },
+      {
+        generateStructuredOutputFn: async () => ({
+          reply: 'Mais dados',
+          node_status: 'continue',
+        }),
+        isLeadInHandoffFn: async () => false,
+      },
+    );
+
+    expect(res2.status).toBe('max_turns');
+    expect(res2.transitionStatus).toBe('transition_fresh');
+
+    // Dois eventos ai_node.max_turns registrados sem colisão
+    const maxTurnsEvents = harness.getEvents().filter((e) => e.event_type === 'ai_node.max_turns');
+    expect(maxTurnsEvents.length).toBe(2);
+    expect(maxTurnsEvents[0]!.idempotency_key).toContain('msg-inbound-1');
+    expect(maxTurnsEvents[1]!.idempotency_key).toContain('msg-inbound-2');
+  });
 });
