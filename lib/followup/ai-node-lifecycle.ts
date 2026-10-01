@@ -1668,7 +1668,9 @@ export async function executeAiNodeTimeout(
     active_turn: null,
   };
 
-  const executionToken = session.started_at || `step_${row.steps_taken ?? 0}`;
+  const executionToken = session.started_at
+    ? `${row.steps_taken ?? 0}:${session.started_at}`
+    : `step_${row.steps_taken ?? 0}`;
 
   // Registra ai_node.timeout
   await db.query(
