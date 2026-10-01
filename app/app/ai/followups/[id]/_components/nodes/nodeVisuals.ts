@@ -32,6 +32,7 @@ import { RESULTADOS_DO_FIM } from "@/lib/followup/vocabulario";
 export interface NodeVisual {
   type: NodeType;
   paletteLabel: string;
+  paletteDescription?: string;
   icon: ComponentType<{ size?: number; className?: string; "aria-hidden"?: boolean }>;
   /** Icon chip background + text. */
   chipClassName: string;
@@ -221,12 +222,19 @@ export const NODE_VISUALS: Record<NodeType, NodeVisual> = {
   },
   ai_node: {
     type: "ai_node",
-    paletteLabel: "Agente IA",
+    paletteLabel: "IA",
+    paletteDescription: "Converse com o lead usando um agente de IA.",
     icon: Brain,
     chipClassName: "bg-accent-soft text-accent",
     borderClassName: "border-l-accent-500",
-    defaultLabel: "Atendimento IA",
-    defaultConfig: () => ({ mode: "custom_prompt", objective: "" }),
+    defaultLabel: "IA",
+    defaultConfig: () => ({
+      mode: "custom_prompt",
+      custom_prompt: "",
+      objective: "",
+      max_turns: 10,
+      timeout: { duration_value: 24, unit: "hours" },
+    }),
   },
 };
 
@@ -247,10 +255,6 @@ function minutos(ms: number): string {
 export function describeNodeConfig(
   type: NodeType,
   config: FlowNode["config"],
-  // `t` OBRIGATÓRIO. Era opcional com padrão identidade, e foi assim que dois
-  // cards que chegaram por outra branch (repetir e casar resposta) ficaram sem
-  // tradução nenhuma sem o typecheck notar: em português o padrão devolve o
-  // mesmo texto, então o esquecimento só aparecia para quem usa espanhol.
   t: (texto: string) => string,
 ): string {
   switch (type) {
@@ -264,16 +268,10 @@ export function describeNodeConfig(
     }
     case "condition": {
       const c = config as ConfigOf<"condition">;
-      // No modo uma-saída-por-regra o combinador NÃO é consultado (a regra não
-      // vota, ela roteia). Continuar anunciando "E"/"OU" ali seria o card
-      // afirmando uma coisa que o motor ignora — e o usuário acredita no card.
       if (c.branching === "per_check")
         return `${c.checks.length} ${c.checks.length === 1 ? t("regra · uma saída por regra") : t("regras · uma saída por regra")}`;
       return `${c.checks.length} ${c.checks.length === 1 ? t("condição") : t("condições")} · ${c.combinator === "and" ? t("E") : t("OU")}`;
     }
-    // "grace" é o nome do CAMPO, não palavra nenhuma para quem tem uma loja — e o
-    // formulário do mesmo nó já perguntava "Esperar a resposta por (minutos)".
-    // O card dizia o número com dois nomes na mesma tela.
     case "ai_classify": {
       const c = config as ConfigOf<"ai_classify">;
       return `${c.classes.length} ${c.classes.length === 1 ? t("classe · espera") : t("classes · espera")} ${minutos(c.grace_timeout_ms)}`;
@@ -334,8 +332,14 @@ export function describeNodeConfig(
     }
     case "ai_node": {
       const c = config as ConfigOf<"ai_node">;
-      if (c.mode === "existing_agent") return t("Agente existente");
-      if (c.mode === "existing_with_supplementary") return t("Agente com instrução complementar");
+      const agentName = (c as Record<string, unknown>).agent_name as string | undefined;
+      if (c.mode === "existing_agent") {
+        return agentName || (c.agent_binding?.agent_id ? t("Agente existente") : t("Agente não selecionado"));
+      }
+      if (c.mode === "existing_with_supplementary") {
+        const base = agentName || t("Agente");
+        return `${base} + ${t("instrução da etapa")}`;
+      }
       return c.objective || t("Instrução personalizada");
     }
     default: {

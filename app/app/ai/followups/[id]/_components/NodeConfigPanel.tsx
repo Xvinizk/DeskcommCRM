@@ -24,6 +24,7 @@ import { DelayForm } from "./forms/DelayForm";
 import { TagForm } from "./forms/TagForm";
 import { StageMoveForm } from "./forms/StageMoveForm";
 import { TriggerForm } from "./forms/TriggerForm";
+import { AiNodeForm } from "./forms/AiNodeForm";
 import type { ConfigOf } from "./forms/shared";
 import { NODE_VISUALS } from "./nodes/nodeVisuals";
 
@@ -154,6 +155,13 @@ export function NodeConfigPanel({ node, onChange, onDelete, ramosLigados }: Prop
         )}
         {type === "stage_move" && (
           <StageMoveForm config={node.data.config as ConfigOf<"stage_move">} onChange={(config) => onChange({ config })} />
+        )}
+        {type === "ai_node" && (
+          <AiNodeForm
+            config={node.data.config as ConfigOf<"ai_node">}
+            onChange={(config) => onChange({ config })}
+            ramosLigados={ramosLigados}
+          />
         )}
       </div>
 

@@ -22,12 +22,13 @@ const FlowCanvas = dynamic(() => import("./FlowCanvas").then((m) => m.FlowCanvas
 interface Props {
   flowId: string;
   initialData: FollowupFlowDetailRow;
+  aiNodeEnabled?: boolean;
 }
 
-export function FlowBuilder({ flowId, initialData }: Props) {
+export function FlowBuilder({ flowId, initialData, aiNodeEnabled }: Props) {
   return (
     <div className="flex h-full min-h-[600px] flex-1 flex-col" data-testid="flow-builder-shell">
-      <FlowCanvas flowId={flowId} initialData={initialData} />
+      <FlowCanvas flowId={flowId} initialData={initialData} aiNodeEnabled={aiNodeEnabled} />
     </div>
   );
 }

@@ -59,9 +59,11 @@ export default async function FollowupFlowBuilderPage({
     previous_version_id: versionRows?.[1]?.id ?? null,
   };
 
+  const aiNodeEnabled = process.env.FOLLOWUP_AI_NODE_ENABLED === "true";
+
   return (
     <div className="flex h-full flex-col">
-      <FlowBuilder flowId={id} initialData={flow} />
+      <FlowBuilder flowId={id} initialData={flow} aiNodeEnabled={aiNodeEnabled} />
     </div>
   );
 }

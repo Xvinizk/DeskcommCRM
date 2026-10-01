@@ -11,12 +11,19 @@ interface Props {
   /** "mobile" = mesmo conteúdo dentro do Sheet que `FlowCanvas` abre abaixo de
    * `lg` — a barra fixa de 224px não cabia perto do canvas num celular. */
   variant?: "desktop" | "mobile";
+  /** Feature flag para exibição do nó IA na paleta */
+  aiNodeEnabled?: boolean;
 }
 
 /** Sidebar palette — click to add. Native HTML5 drag-and-drop wired in FlowCanvas (increment 3). */
-export function NodePalette({ onAdd, variant = "desktop" }: Props) {
+export function NodePalette({ onAdd, variant = "desktop", aiNodeEnabled = false }: Props) {
   const t = useT();
   const isMobile = variant === "mobile";
+
+  const availableVisuals = NODE_VISUAL_LIST.filter(
+    (visual) => visual.type !== "ai_node" || aiNodeEnabled,
+  );
+
   return (
     <aside
       className={cn(
@@ -30,7 +37,7 @@ export function NodePalette({ onAdd, variant = "desktop" }: Props) {
       <h2 className="px-1 pb-1 text-xs font-medium uppercase tracking-wide text-text-muted">
         {t("Adicionar nó")}
       </h2>
-      {NODE_VISUAL_LIST.map((visual) => {
+      {availableVisuals.map((visual) => {
         const Icon = visual.icon;
         return (
           <Button
@@ -40,6 +47,7 @@ export function NodePalette({ onAdd, variant = "desktop" }: Props) {
             size="sm"
             className="justify-start gap-2"
             draggable
+            title={visual.paletteDescription ? t(visual.paletteDescription) : undefined}
             onDragStart={(e) => {
               e.dataTransfer.setData("application/x-followup-node-type", visual.type);
               e.dataTransfer.effectAllowed = "move";

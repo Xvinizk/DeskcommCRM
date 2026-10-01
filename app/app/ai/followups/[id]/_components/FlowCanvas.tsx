@@ -73,6 +73,7 @@ import {
   TagNode,
   StageMoveNode,
 } from "./nodes/NewNodes";
+import { AiNode } from "./nodes/AiNode";
 
 const EMPTY_GRAPH: FlowGraph = { nodes: [], edges: [] };
 const DND_MIME = "application/x-followup-node-type";
@@ -96,14 +97,16 @@ const nodeTypes: NodeTypes = {
   delay: DelayNode,
   tag: TagNode,
   stage_move: StageMoveNode,
+  ai_node: AiNode,
 };
 
 interface Props {
   flowId: string;
   initialData: FollowupFlowDetailRow;
+  aiNodeEnabled?: boolean;
 }
 
-function FlowCanvasInner({ flowId, initialData }: Props) {
+function FlowCanvasInner({ flowId, initialData, aiNodeEnabled = false }: Props) {
   const t = useT();
   const { nomes } = useEtapasDoFluxo();
   const { data: flow } = useFollowupFlow(flowId, { initialData });
@@ -360,7 +363,7 @@ function FlowCanvasInner({ flowId, initialData }: Props) {
         />
       )}
       <div className="flex flex-1 overflow-hidden">
-        <NodePalette onAdd={onPaletteAdd} />
+        <NodePalette onAdd={onPaletteAdd} aiNodeEnabled={aiNodeEnabled} />
         {/* Abaixo de `lg` a paleta fixa de 224px não cabe do lado do canvas —
             vira um drawer, disparado por este botão flutuante. */}
         <Sheet open={paletteOpen} onOpenChange={setPaletteOpen}>
@@ -368,6 +371,7 @@ function FlowCanvasInner({ flowId, initialData }: Props) {
             <SheetTitle className="sr-only">{t("Adicionar nó")}</SheetTitle>
             <NodePalette
               variant="mobile"
+              aiNodeEnabled={aiNodeEnabled}
               onAdd={(type) => {
                 onPaletteAdd(type);
                 setPaletteOpen(false);

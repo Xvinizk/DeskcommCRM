@@ -159,6 +159,20 @@ export async function importFlowIntoOrg({
         // As tags operam isoladas estritamente no escopo da organização de destino
       }
 
+      // Compatibilizar nós de IA (ai_node) — isolamento cross-tenant estrito
+      if (node.type === "ai_node") {
+        if (nodeConfig.agent_binding) {
+          const binding = { ...(nodeConfig.agent_binding as Record<string, unknown>) };
+          delete binding.agent_id;
+          delete binding.pinned_version_id;
+          delete (nodeConfig as Record<string, unknown>).agent_name;
+          nodeConfig.agent_binding = binding;
+          warnings.push(
+            `O nó IA «${node.label}» requer a seleção de um agente da sua organização antes de publicar.`,
+          );
+        }
+      }
+
       newNodes.push({
         id: newId,
         type: node.type,
