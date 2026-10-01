@@ -84,11 +84,11 @@ describe('ai_node — Graph Schema (Fase 1)', () => {
   });
 
   describe('2. Configurações inválidas ou incompletas', () => {
-    it('rejeita existing_agent sem agent_binding', () => {
+    it('permite existing_agent em draft mesmo antes de selecionar agent_binding (validação estrita ocorre no publish)', () => {
       const parsed = aiNodeConfigSchema.safeParse({
         mode: 'existing_agent',
       });
-      expect(parsed.success).toBe(false);
+      expect(parsed.success).toBe(true);
     });
 
     it('rejeita existing_agent com agent_id inválido (não UUID)', () => {
@@ -102,7 +102,7 @@ describe('ai_node — Graph Schema (Fase 1)', () => {
       expect(parsed.success).toBe(false);
     });
 
-    it('rejeita version_strategy pinned sem pinned_version_id', () => {
+    it('permite version_strategy pinned em draft com pinned_version_id pendente (validação estrita ocorre no publish)', () => {
       const parsed = aiNodeConfigSchema.safeParse({
         mode: 'existing_agent',
         agent_binding: {
@@ -110,15 +110,15 @@ describe('ai_node — Graph Schema (Fase 1)', () => {
           version_strategy: 'pinned',
         },
       });
-      expect(parsed.success).toBe(false);
+      expect(parsed.success).toBe(true);
     });
 
-    it('rejeita custom_prompt sem objective', () => {
+    it('permite custom_prompt em draft com objective/prompt ainda em edição (validação estrita ocorre no publish)', () => {
       const parsed = aiNodeConfigSchema.safeParse({
         mode: 'custom_prompt',
         objective: '',
       });
-      expect(parsed.success).toBe(false);
+      expect(parsed.success).toBe(true);
     });
 
     it('rejeita max_turns menor que 1 ou maior que 100', () => {

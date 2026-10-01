@@ -466,54 +466,25 @@ export const aiNodeDeterministicConditionsSchema = z.union([
 ]).optional();
 export type AiNodeDeterministicConditions = z.infer<typeof aiNodeDeterministicConditionsSchema>;
 
-export const aiNodeConfigSchema = z
-  .strictObject({
-    mode: aiNodeModeSchema,
-    agent_binding: aiNodeAgentBindingSchema.optional(),
-    objective: z.string().max(1000).optional(),
-    supplementary_instruction: z.string().max(2000).optional(),
-    custom_prompt: z.string().max(4000).optional(),
-    completion_condition: z.string().max(1000).optional(),
-    max_turns: z.number().int().min(1).max(100).default(10).optional(),
-    timeout: aiNodeTimeoutSchema.optional(),
-    timeout_ms: z
-      .number()
-      .int()
-      .min(60_000)
-      .max(30 * 86_400_000)
-      .default(86_400_000)
-      .optional(), // 1 min a 30 dias, default 24h
-    deterministic_conditions: aiNodeDeterministicConditionsSchema,
-  })
-  .superRefine((config, ctx) => {
-    if (config.mode === 'existing_agent' || config.mode === 'existing_with_supplementary') {
-      if (!config.agent_binding?.agent_id) {
-        ctx.addIssue({
-          code: 'custom',
-          message: 'agent_binding.agent_id é obrigatório para modos com agente existente',
-          path: ['agent_binding', 'agent_id'],
-        });
-      }
-      if (config.agent_binding?.version_strategy === 'pinned' && !config.agent_binding.pinned_version_id) {
-        ctx.addIssue({
-          code: 'custom',
-          message: 'pinned_version_id é obrigatório quando version_strategy é pinned',
-          path: ['agent_binding', 'pinned_version_id'],
-        });
-      }
-    }
-    if (config.mode === 'custom_prompt') {
-      const hasObjective = config.objective && config.objective.trim().length > 0;
-      const hasCustomPrompt = config.custom_prompt && config.custom_prompt.trim().length > 0;
-      if (!hasObjective && !hasCustomPrompt) {
-        ctx.addIssue({
-          code: 'custom',
-          message: 'objective ou custom_prompt é obrigatório quando o modo é custom_prompt',
-          path: ['objective'],
-        });
-      }
-    }
-  });
+export const aiNodeConfigSchema = z.strictObject({
+  mode: aiNodeModeSchema,
+  agent_binding: aiNodeAgentBindingSchema.optional(),
+  agent_name: z.string().max(120).optional(),
+  objective: z.string().max(1000).optional(),
+  supplementary_instruction: z.string().max(2000).optional(),
+  custom_prompt: z.string().max(4000).optional(),
+  completion_condition: z.string().max(1000).optional(),
+  max_turns: z.number().int().min(1).max(100).default(10).optional(),
+  timeout: aiNodeTimeoutSchema.optional(),
+  timeout_ms: z
+    .number()
+    .int()
+    .min(60_000)
+    .max(30 * 86_400_000)
+    .default(86_400_000)
+    .optional(), // 1 min a 30 dias, default 24h
+  deterministic_conditions: aiNodeDeterministicConditionsSchema,
+});
 export type AiNodeConfig = z.infer<typeof aiNodeConfigSchema>;
 
 export const triggerNodeConfigSchema = z.union([

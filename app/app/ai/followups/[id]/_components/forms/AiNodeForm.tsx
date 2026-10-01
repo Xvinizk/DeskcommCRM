@@ -71,12 +71,22 @@ export function AiNodeForm({ config, onChange }: Props) {
   const isAgentMode =
     mode === "existing_agent" || mode === "existing_with_supplementary";
 
-  // Helpers de mutação
+  // Helpers de conversão e cálculo determinístico de timeout_ms
+  const computeTimeoutMs = (durationValue: number, unit: "minutes" | "hours" | "days"): number => {
+    if (unit === "minutes") return Math.max(60_000, durationValue * 60_000);
+    if (unit === "days") return Math.max(60_000, durationValue * 86_400_000);
+    return Math.max(60_000, durationValue * 3_600_000);
+  };
+
+  // Helpers de mutação com limpeza de campos undefined
   const updateConfig = (patch: Partial<ConfigOf<"ai_node">>) => {
-    onChange({
-      ...config,
-      ...patch,
-    });
+    const next = { ...config, ...patch };
+    for (const key of Object.keys(next)) {
+      if ((next as Record<string, unknown>)[key] === undefined) {
+        delete (next as Record<string, unknown>)[key];
+      }
+    }
+    onChange(next);
   };
 
   const handleModeChange = (newMode: AiNodeMode) => {
@@ -84,9 +94,10 @@ export function AiNodeForm({ config, onChange }: Props) {
       updateConfig({
         mode: newMode,
         agent_binding: undefined,
+        agent_name: undefined,
         supplementary_instruction: undefined,
       });
-    } else {
+    } else if (newMode === "existing_agent") {
       updateConfig({
         mode: newMode,
         agent_binding: {
@@ -94,6 +105,19 @@ export function AiNodeForm({ config, onChange }: Props) {
           version_strategy: versionStrategy,
           pinned_version_id: pinnedVersionId || null,
         },
+        supplementary_instruction: undefined,
+        custom_prompt: undefined,
+      });
+    } else {
+      // existing_with_supplementary
+      updateConfig({
+        mode: newMode,
+        agent_binding: {
+          agent_id: agentId || null,
+          version_strategy: versionStrategy,
+          pinned_version_id: pinnedVersionId || null,
+        },
+        custom_prompt: undefined,
       });
     }
   };
@@ -104,11 +128,11 @@ export function AiNodeForm({ config, onChange }: Props) {
       agent_binding: {
         agent_id: newAgentId,
         version_strategy: versionStrategy,
-        pinned_version_id: versionStrategy === "pinned" ? pinnedVersionId : null,
+        // Limpa IMEDIATAMENTE a versão fixada antiga para nunca vincular versão de Agent A em Agent B
+        pinned_version_id: null,
       },
-      // Guardar o nome do agente no config para exibição imediata no card do canvas
-      ...(ag ? { agent_name: ag.name } : {}),
-    } as Partial<ConfigOf<"ai_node">>);
+      agent_name: ag?.name || undefined,
+    });
   };
 
   const handleVersionStrategyChange = (strat: AiNodeVersionStrategy) => {
@@ -160,10 +184,38 @@ export function AiNodeForm({ config, onChange }: Props) {
     });
   };
 
-  // Limites e Timeout
+  // Limites e Timeout — derivação determinística se apenas timeout_ms estiver presente
   const maxTurns = config.max_turns ?? 10;
-  const timeoutValue = config.timeout?.duration_value ?? 24;
-  const timeoutUnit = config.timeout?.unit ?? "hours";
+
+  let initialTimeoutValue = config.timeout?.duration_value ?? 24;
+  let initialTimeoutUnit = config.timeout?.unit ?? "hours";
+
+  if (!config.timeout && typeof config.timeout_ms === "number") {
+    if (config.timeout_ms % 86_400_000 === 0) {
+      initialTimeoutValue = config.timeout_ms / 86_400_000;
+      initialTimeoutUnit = "days";
+    } else if (config.timeout_ms % 3_600_000 === 0) {
+      initialTimeoutValue = config.timeout_ms / 3_600_000;
+      initialTimeoutUnit = "hours";
+    } else {
+      initialTimeoutValue = Math.max(1, Math.round(config.timeout_ms / 60_000));
+      initialTimeoutUnit = "minutes";
+    }
+  }
+
+  const timeoutValue = initialTimeoutValue;
+  const timeoutUnit = initialTimeoutUnit;
+
+  const handleTimeoutChange = (newVal: number, newUnit: "minutes" | "hours" | "days") => {
+    const duration = Math.max(1, newVal);
+    updateConfig({
+      timeout: {
+        duration_value: duration,
+        unit: newUnit,
+      },
+      timeout_ms: computeTimeoutMs(duration, newUnit),
+    });
+  };
 
   // Validação humana inline
   let agentError: string | null = null;
@@ -676,12 +728,7 @@ export function AiNodeForm({ config, onChange }: Props) {
               max={9999}
               value={timeoutValue}
               onChange={(e) =>
-                updateConfig({
-                  timeout: {
-                    duration_value: parseInt(e.target.value, 10) || 24,
-                    unit: timeoutUnit,
-                  },
-                })
+                handleTimeoutChange(parseInt(e.target.value, 10) || 24, timeoutUnit)
               }
               className="w-24 text-center"
               data-testid="input-timeout-value"
@@ -689,12 +736,7 @@ export function AiNodeForm({ config, onChange }: Props) {
             <Select
               value={timeoutUnit}
               onValueChange={(val: "minutes" | "hours" | "days") =>
-                updateConfig({
-                  timeout: {
-                    duration_value: timeoutValue,
-                    unit: val,
-                  },
-                })
+                handleTimeoutChange(timeoutValue, val)
               }
             >
               <SelectTrigger className="w-32" data-testid="select-timeout-unit">

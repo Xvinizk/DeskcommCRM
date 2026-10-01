@@ -36,6 +36,7 @@ export const PUBLISH_ERROR_CODES = [
   'ai_node_agent_archived',
   'ai_node_agent_unpublished',
   'ai_node_pinned_version_invalid',
+  'ai_node_missing_instruction',
 ] as const;
 export type PublishErrorCode = (typeof PUBLISH_ERROR_CODES)[number];
 
@@ -621,6 +622,18 @@ export function validateFlowForPublish(
           });
           continue;
         }
+      }
+    }
+
+    if (cfg.mode === 'custom_prompt') {
+      const hasObjective = Boolean(cfg.objective && cfg.objective.trim().length > 0);
+      const hasCustomPrompt = Boolean(cfg.custom_prompt && cfg.custom_prompt.trim().length > 0);
+      if (!hasObjective && !hasCustomPrompt) {
+        errors.push({
+          node_id: node.id,
+          code: 'ai_node_missing_instruction',
+          message: `Nó IA "${node.label || node.id}" requer um objetivo ou instruções para a IA.`,
+        });
       }
     }
   }
