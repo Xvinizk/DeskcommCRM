@@ -22,14 +22,14 @@
 #     - Zero redes ou volumes externos de produção
 #     - Apenas portas 80 e 443 expostas no host (Caddy)
 #     - Bloqueio estrito de tags flutuantes (:stable, :latest) em app, worker e scheduler
-#     - Obrigatoriedade da tag de Release Candidate (rc-47c6f94) e pull_policy: never
+#     - Obrigatoriedade da tag de Release Candidate (rc-4eedf2d6c) e pull_policy: never
 # =============================================================================
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-FUNCTIONAL_RC_CANONICAL="47c6f94e39bae2e3632b7dd06d8e5d435c0ca344"
+FUNCTIONAL_RC_CANONICAL="4eedf2d6c328ebd83d3348518981af3a859dcda5"
 STAGING_RC_TARGET="${1:-${STAGING_RC_COMMIT:-}}"
 ENV_FILE="$ROOT_DIR/.env.staging"
 COMPOSE_HELPER="$ROOT_DIR/scripts/staging-compose.sh"
@@ -47,7 +47,7 @@ CURRENT_COMMIT="$(git rev-parse HEAD)"
 
 # Se um commit de staging alvo for especificado, valida correspondência
 if [ -n "$STAGING_RC_TARGET" ]; then
-  if [ "$CURRENT_COMMIT" != "$STAGING_RC_TARGET" ] && [ "${CURRENT_COMMIT:0:7}" != "${STAGING_RC_TARGET:0:7}" ]; then
+  if [ "$CURRENT_COMMIT" != "$STAGING_RC_TARGET" ] && [ "${CURRENT_COMMIT:0:7}" != "${STAGING_RC_TARGET:0:7}" ] && [ "${CURRENT_COMMIT:0:9}" != "${STAGING_RC_TARGET:0:9}" ]; then
     echo "❌ ERRO: HEAD atual ($CURRENT_COMMIT) difere do STAGING_RC_COMMIT esperado ($STAGING_RC_TARGET)!" >&2
     exit 1
   fi
@@ -57,7 +57,7 @@ else
 fi
 
 # Verifica derivação estrita a partir do Functional RC congelado
-PARENT_SHORT="${FUNCTIONAL_RC_CANONICAL:0:7}"
+PARENT_SHORT="${FUNCTIONAL_RC_CANONICAL:0:9}"
 if ! git merge-base --is-ancestor "$PARENT_SHORT" HEAD 2>/dev/null; then
   echo "❌ ERRO: O commit atual não descende do Functional RC congelado ($FUNCTIONAL_RC_CANONICAL)!" >&2
   exit 1
@@ -350,7 +350,7 @@ node -e '
   }
 
   // 6. Validação estrita de tags de imagens próprias: bloqueio de :stable e :latest
-  const EXPECTED_RC_TAG = "rc-47c6f94";
+  const EXPECTED_RC_TAG = "rc-4eedf2d6c";
   const ownServices = [
     { name: "app", prefix: "deskcommcrm:" },
     { name: "worker", prefix: "deskcomm-worker:" },
@@ -382,7 +382,7 @@ node -e '
   console.log("✓ Zero container_name fixo (nomes com namespace deskcomm-staging-*).");
   console.log("✓ Zero volumes ou redes externas de produção.");
   console.log("✓ Portas públicas expostas no host estritamente restritas a 80 e 443 (Caddy).");
-  console.log("✓ Imagens próprias validadas: app, worker e scheduler pinados em rc-47c6f94 com pull_policy: never.");
+  console.log("✓ Imagens próprias validadas: app, worker e scheduler pinados em rc-4eedf2d6c com pull_policy: never.");
 ' "$RESOLVED_JSON"
 
 # -----------------------------------------------------------------------------
@@ -414,6 +414,6 @@ node --env-file="$ENV_FILE" -e '
 echo "=================================================================="
 echo "✓ PREFLIGHT APROVADO COM SUCESSO!"
 echo "  Isolamento de staging comprovado: ZERO conexões com produção."
-echo "  Imagens pinadas estritamente no Release Candidate (rc-47c6f94)."
+echo "  Imagens pinadas estritamente no Release Candidate (rc-4eedf2d6c)."
 echo "=================================================================="
 exit 0
