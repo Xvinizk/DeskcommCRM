@@ -35461,6 +35461,117 @@ $$;
 revoke all on function public.fn_followup_job_current(uuid,uuid,uuid,text) from public,anon,authenticated;
 grant execute on function public.fn_followup_job_current(uuid,uuid,uuid,text) to service_role;
 
+-- ---- Mensagens Programadas da Inbox (migration 0381) ----
+create table if not exists public.scheduled_messages (
+  id uuid primary key default gen_random_uuid(),
+  organization_id uuid not null references public.organizations(id) on delete cascade,
+  conversation_id uuid not null references public.conversations(id) on delete cascade,
+  created_by uuid references auth.users(id) on delete set null,
+  status text not null default 'pending' check (status in ('pending', 'processing', 'sent', 'cancelled', 'failed')),
+  scheduled_for timestamptz not null,
+  body text,
+  media_storage_path text,
+  media_type text check (media_type is null or media_type in ('image', 'video', 'audio')),
+  media_mime text,
+  media_filename text,
+  caption text,
+  attempts integer not null default 0,
+  max_attempts integer not null default 3,
+  claimed_until timestamptz,
+  last_error text,
+  sent_message_id uuid references public.messages(id) on delete set null,
+  sent_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint chk_scheduled_messages_content check (body is not null or media_storage_path is not null)
+);
+
+create index if not exists idx_scheduled_messages_due
+  on public.scheduled_messages (scheduled_for)
+  where status in ('pending', 'processing');
+
+create index if not exists idx_scheduled_messages_conversation
+  on public.scheduled_messages (organization_id, conversation_id, status);
+
+create index if not exists idx_scheduled_messages_org
+  on public.scheduled_messages (organization_id);
+
+alter table public.scheduled_messages enable row level security;
+
+do $$ begin
+  create policy tenant_isolation_scheduled_messages_all on public.scheduled_messages
+    for all using (
+      organization_id in (select fn_user_org_ids())
+      and public.fn_role_at_least(organization_id, 'agent')
+    )
+    with check (
+      organization_id in (select fn_user_org_ids())
+      and public.fn_role_at_least(organization_id, 'agent')
+    );
+exception when duplicate_object then null; end $$;
+
+grant select, insert, update, delete on public.scheduled_messages to authenticated;
+grant all on public.scheduled_messages to service_role;
+revoke all on public.scheduled_messages from anon;
+
+drop trigger if exists trg_scheduled_messages_updated_at on public.scheduled_messages;
+create trigger trg_scheduled_messages_updated_at
+  before update on public.scheduled_messages
+  for each row execute function public.fn_set_updated_at();
+
+create or replace function public.fn_claim_due_scheduled_messages(p_limit int, p_lease_seconds int)
+returns setof public.scheduled_messages
+language sql
+security definer
+set search_path = public
+as $$
+  update public.scheduled_messages sm
+  set status = 'processing',
+      claimed_until = now() + make_interval(secs => p_lease_seconds),
+      attempts = sm.attempts + 1,
+      updated_at = now()
+  where sm.id in (
+    select id from public.scheduled_messages
+    where (
+      (status = 'pending' and scheduled_for <= now() and (claimed_until is null or claimed_until < now()))
+      or
+      (status = 'processing' and claimed_until < now())
+    )
+    order by scheduled_for
+    limit p_limit
+    for update skip locked
+  )
+  returning sm.*;
+$$;
+
+revoke all on function public.fn_claim_due_scheduled_messages(int, int) from public, anon, authenticated;
+grant execute on function public.fn_claim_due_scheduled_messages(int, int) to service_role;
+
+
+-- 0386: Persistência de ai_node_session em fn_followup_patch
+create or replace function public.fn_followup_patch(p_org uuid, p_id uuid, p_revision bigint, p_patch jsonb)
+returns bigint language plpgsql security definer set search_path=public as $$
+declare current public.followup_enrollments; patched public.followup_enrollments; contact uuid;
+begin
+ select contact_id into contact from public.followup_enrollments where id=p_id and organization_id=p_org;
+ if not found then raise exception 'followup_stale' using errcode='P0001'; end if;
+ perform public.fn_service_lock(p_org,contact);
+ select * into current from public.followup_enrollments where id=p_id and organization_id=p_org for update;
+ if current.contact_id is distinct from contact or current.revision is distinct from p_revision then raise exception 'followup_stale' using errcode='P0001'; end if;
+ if p_patch->>'status' in ('active','waiting_reply') and current.appointment_revision is not null and not public.fn_appointment_enrollment_current(p_org,p_id,current.current_node_id) then raise exception 'followup_stale' using errcode='P0001'; end if;
+ select * into patched from jsonb_populate_record(current,p_patch);
+ update public.followup_enrollments set status=patched.status,current_node_id=patched.current_node_id,next_eval_at=patched.next_eval_at,
+  claimed_until=patched.claimed_until,attempts=patched.attempts,last_error=patched.last_error,steps_taken=patched.steps_taken,
+  outcome=patched.outcome,cancel_reason=patched.cancel_reason,completed_at=patched.completed_at,timing_plan=patched.timing_plan,
+  ai_node_session=patched.ai_node_session
+ where organization_id=p_org and id=p_id returning revision into p_revision;
+ return p_revision;
+end; $$;
+
+revoke all on function public.fn_followup_patch(uuid,uuid,bigint,jsonb) from public,anon,authenticated;
+grant execute on function public.fn_followup_patch(uuid,uuid,bigint,jsonb) to service_role;
+
+
 -- ---- VARREDURA anon: função nova nasce exposta em quem ATUALIZA (migration 0116) ----
 --
 -- ⚠️ DE PROPÓSITO, NENHUMA FUNÇÃO É CRIADA DEPOIS DESTE BLOCO. Apêndice que cria
@@ -36127,116 +36238,6 @@ create trigger trg_external_db_connections_audit
   after insert or update or delete on public.external_db_connections
   for each row execute function public.fn_audit_log_row();
 
--- ---- Mensagens Programadas da Inbox (migration 0381) ----
-create table if not exists public.scheduled_messages (
-  id uuid primary key default gen_random_uuid(),
-  organization_id uuid not null references public.organizations(id) on delete cascade,
-  conversation_id uuid not null references public.conversations(id) on delete cascade,
-  created_by uuid references auth.users(id) on delete set null,
-  status text not null default 'pending' check (status in ('pending', 'processing', 'sent', 'cancelled', 'failed')),
-  scheduled_for timestamptz not null,
-  body text,
-  media_storage_path text,
-  media_type text check (media_type is null or media_type in ('image', 'video', 'audio')),
-  media_mime text,
-  media_filename text,
-  caption text,
-  attempts integer not null default 0,
-  max_attempts integer not null default 3,
-  claimed_until timestamptz,
-  last_error text,
-  sent_message_id uuid references public.messages(id) on delete set null,
-  sent_at timestamptz,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now(),
-  constraint chk_scheduled_messages_content check (body is not null or media_storage_path is not null)
-);
-
-create index if not exists idx_scheduled_messages_due
-  on public.scheduled_messages (scheduled_for)
-  where status in ('pending', 'processing');
-
-create index if not exists idx_scheduled_messages_conversation
-  on public.scheduled_messages (organization_id, conversation_id, status);
-
-create index if not exists idx_scheduled_messages_org
-  on public.scheduled_messages (organization_id);
-
-alter table public.scheduled_messages enable row level security;
-
-do $$ begin
-  create policy tenant_isolation_scheduled_messages_all on public.scheduled_messages
-    for all using (organization_id in (select fn_user_org_ids()))
-    with check (organization_id in (select fn_user_org_ids()));
-exception when duplicate_object then null; end $$;
-
-grant select, insert, update, delete on public.scheduled_messages to authenticated;
-grant all on public.scheduled_messages to service_role;
-revoke all on public.scheduled_messages from anon;
-
-drop trigger if exists trg_scheduled_messages_updated_at on public.scheduled_messages;
-create trigger trg_scheduled_messages_updated_at
-  before update on public.scheduled_messages
-  for each row execute function public.fn_set_updated_at();
-
-create or replace function public.fn_claim_due_scheduled_messages(p_limit int, p_lease_seconds int)
-returns setof public.scheduled_messages
-language sql
-security definer
-set search_path = public
-as $$
-  update public.scheduled_messages sm
-  set status = 'processing',
-      claimed_until = now() + make_interval(secs => p_lease_seconds),
-      attempts = sm.attempts + 1,
-      updated_at = now()
-  where sm.id in (
-    select id from public.scheduled_messages
-    where (
-      (status = 'pending' and scheduled_for <= now() and (claimed_until is null or claimed_until < now()))
-      or
-      (status = 'processing' and claimed_until < now())
-    )
-    order by scheduled_for
-    limit p_limit
-    for update skip locked
-  )
-  returning sm.*;
-$$;
-
-revoke all on function public.fn_claim_due_scheduled_messages(int, int) from public, anon, authenticated;
-grant execute on function public.fn_claim_due_scheduled_messages(int, int) to service_role;
-
--- ---- módulos instalados são reaplicados, depois de toda tabela do núcleo (migration 0340) ----
---
--- A provisionadora de cada módulo instalado roda de novo, sobre o núcleo já
--- atualizado. Falha de um módulo NÃO derruba este comando: ele marca o módulo
--- `suspenso` e a marca se confirma sozinha (o kit aplica sem transação única).
--- Vem ANTES das proteções e das travas, para que tabela recriada aqui passe por elas.
-do $f$ begin perform public.fn_reaplicar_modulos_instalados(); end $f$;
-
--- ---- proteção de tabela de organização, depois de toda tabela (migration 0325) ----
---
--- Auto-curativa e no-op hoje (as 119 tabelas de organização deste baseline já
--- têm RLS ligada — medido, e cobrado por
--- tests/invariants/rls-completude-varredura.test.ts). Ela existe para o dia em
--- que um apêndice novo, ou a provisionadora de um módulo, criar tabela de
--- organização sem as proteções: a cura acontece no MESMO run em que o defeito
--- nasceria. Vem ANTES da chamada da 0274 de propósito — as travas do suporte
--- leem o privilégio de `authenticated` de cada tabela, então precisam ver a
--- tabela já com RLS e isolamento.
-do $f$ begin perform public.fn_proteger_tabelas_de_organizacao(); end $f$;
-
--- ---- travas do modo somente leitura do suporte, depois de toda tabela (migration 0274) ----
---
--- ⚠️ ESTA CHAMADA É O ÚLTIMO BLOCO DO ARQUIVO. Tabela nova, coluna
--- `organization_id` nova, RLS ligada ou grant a `authenticated` entram ANTES
--- dela: é o que faz a primeira aplicação do arquivo chegar ao mesmo conjunto de
--- travas que a segunda. Vigiado, com o baseline aplicado UMA vez, por
--- tests/invariants/travas-de-suporte-cobrem-toda-tabela-na-instalacao.test.ts.
--- A definição da função está antes da varredura de anon.
-do $f$ begin perform public.fn_aplicar_travas_de_suporte(); end $f$;
-
 -- ---- Catálogo da DeepSeek (migration 0342) ----
 --
 -- O próximo provedor que a abertura de vocabulário da 0127 existia para
@@ -36343,7 +36344,14 @@ alter table public.followup_flow_shares enable row level security;
 
 drop policy if exists tenant_isolation_followup_flow_shares_all on public.followup_flow_shares;
 create policy tenant_isolation_followup_flow_shares_all on public.followup_flow_shares
-  for all using (organization_id in (select fn_user_org_ids()));
+  for all using (
+    organization_id in (select fn_user_org_ids())
+    and public.fn_role_at_least(organization_id, 'agent')
+  )
+  with check (
+    organization_id in (select fn_user_org_ids())
+    and public.fn_role_at_least(organization_id, 'agent')
+  );
 
 create index if not exists idx_followup_flow_shares_token
   on public.followup_flow_shares (token) where status = 'active';
@@ -36369,6 +36377,37 @@ alter table public.followup_enrollments
 
 comment on column public.followup_enrollments.ai_node_session is
   'Estado transiente de execução do nó IA (turn_count, last_inbound_at, agent_id, etc.). Fonte da verdade canônica do nó no enrollment.';
+
+
+-- ---- módulos instalados são reaplicados, depois de toda tabela do núcleo (migration 0340) ----
+--
+-- A provisionadora de cada módulo instalado roda de novo, sobre o núcleo já
+-- atualizado. Falha de um módulo NÃO derruba este comando: ele marca o módulo
+-- `suspenso` e a marca se confirma sozinha (o kit aplica sem transação única).
+-- Vem ANTES das proteções e das travas, para que tabela recriada aqui passe por elas.
+do $f$ begin perform public.fn_reaplicar_modulos_instalados(); end $f$;
+
+-- ---- proteção de tabela de organização, depois de toda tabela (migration 0325) ----
+--
+-- Auto-curativa e no-op hoje (as 119 tabelas de organização deste baseline já
+-- têm RLS ligada — medido, e cobrado por
+-- tests/invariants/rls-completude-varredura.test.ts). Ela existe para o dia em
+-- que um apêndice novo, ou a provisionadora de um módulo, criar tabela de
+-- organização sem as proteções: a cura acontece no MESMO run em que o defeito
+-- nasceria. Vem ANTES da chamada da 0274 de propósito — as travas do suporte
+-- leem o privilégio de `authenticated` de cada tabela, então precisam ver a
+-- tabela já com RLS e isolamento.
+do $f$ begin perform public.fn_proteger_tabelas_de_organizacao(); end $f$;
+
+-- ---- travas do modo somente leitura do suporte, depois de toda tabela (migration 0274) ----
+--
+-- ⚠️ ESTA CHAMADA É O ÚLTIMO BLOCO DO ARQUIVO. Tabela nova, coluna
+-- `organization_id` nova, RLS ligada ou grant a `authenticated` entram ANTES
+-- dela: é o que faz a primeira aplicação do arquivo chegar ao mesmo conjunto de
+-- travas que a segunda. Vigiado, com o baseline aplicado UMA vez, por
+-- tests/invariants/travas-de-suporte-cobrem-toda-tabela-na-instalacao.test.ts.
+-- A definição da função está antes da varredura de anon.
+do $f$ begin perform public.fn_aplicar_travas_de_suporte(); end $f$;
 
 -- ---- módulo suspenso vira ERRO que o kit reporta (migration 0340) ----
 --

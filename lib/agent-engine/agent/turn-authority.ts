@@ -92,7 +92,7 @@ async function defaultFindActiveAiNodeSession(
        e.organization_id,
        e.current_node_id,
        e.ai_node_session,
-       p.flow_id
+       p.id as flow_id
      FROM followup_enrollments e
      LEFT JOIN followup_flow_pointers p ON p.id = e.pointer_id
      WHERE e.organization_id = $1

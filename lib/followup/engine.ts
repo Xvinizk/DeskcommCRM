@@ -763,7 +763,7 @@ export async function avancarEnrollmentAtivo(
   enrollment: EnrollmentRow,
 ): Promise<void> {
   const summary: TickSummary = { claimed: 0, advanced: 0, scheduled: 0, failed: 0, dead: 0 };
-  await processEnrollment(deps, enrollment, summary);
+  await processEnrollment(deps, enrollment, summary, undefined, true);
 }
 
 async function processEnrollment(
@@ -771,12 +771,19 @@ async function processEnrollment(
   initialEnrollment: EnrollmentRow,
   summary: TickSummary,
   inboundBodyOverride?: string,
+  cascade = false,
 ): Promise<void> {
   const { db, clock } = deps;
   let currentEnrollment = initialEnrollment;
   let currentInboundBody = inboundBodyOverride;
 
-  while (currentEnrollment.steps_taken <= MAX_STEPS) {
+  while (true) {
+    if (currentEnrollment.steps_taken > MAX_STEPS) {
+      await markDead(db, clock, currentEnrollment, "max_steps");
+      summary.dead++;
+      return;
+    }
+
     try { await db.assertServiceBoundary?.(currentEnrollment); await db.assertAgenda?.(currentEnrollment); }
     catch (error) {
       if(error instanceof AgendaDeferredError){
@@ -813,12 +820,6 @@ async function processEnrollment(
         });
       }
       await db.updateEnrollment(currentEnrollment.id, currentEnrollment.organization_id, { status: "cancelled", cancel_reason: "Atendimento encerrado ou substituído", claimed_until: null, completed_at: clock().toISOString() });
-      return;
-    }
-
-    if (currentEnrollment.steps_taken > MAX_STEPS) {
-      await markDead(db, clock, currentEnrollment, "max_steps");
-      summary.dead++;
       return;
     }
 
@@ -1163,7 +1164,7 @@ async function processEnrollment(
       node.type === "match_reply" && wokeEarly ? (lastInboundBody ?? "").trim() || null : null,
     );
 
-    if (!applied || result.kind !== "advance") {
+    if (!applied || result.kind !== "advance" || !cascade) {
       break;
     }
 

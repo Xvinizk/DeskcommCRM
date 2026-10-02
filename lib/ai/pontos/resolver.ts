@@ -183,11 +183,18 @@ export function decidirBinding(entrada: EntradaDaDecisao): DecisaoDeBinding {
     };
   }
 
-  // 1 · O agente publicado manda nos pontos que são o próprio agente.
-  if (PONTOS_DO_AGENTE_PUBLICADO.has(entrada.pontoId) && entrada.agentePublicado !== null) {
+  // 1 · O agente publicado manda nos pontos que são o próprio agente
+  // ou nós de fluxo quando há agente vinculado.
+  const ehPontoDoAgente =
+    PONTOS_DO_AGENTE_PUBLICADO.has(entrada.pontoId) ||
+    (entrada.pontoId === "ai_node" && entrada.agentePublicado !== null);
+
+  if (ehPontoDoAgente && entrada.agentePublicado !== null) {
     if (entrada.binding !== null && entrada.binding.is_enabled) {
       avisos.push(
-        "Este ponto usa o modelo definido na versão publicada do agente; a escolha do painel não se aplica.",
+        entrada.pontoId === "ai_node"
+          ? "Este nó de fluxo usa o modelo definido no agente vinculado; a escolha do painel não se aplica."
+          : "Este ponto usa o modelo definido na versão publicada do agente; a escolha do painel não se aplica.",
       );
     }
     const agente = entrada.agentePublicado;

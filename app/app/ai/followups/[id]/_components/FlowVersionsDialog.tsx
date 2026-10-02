@@ -22,6 +22,7 @@ import {
   Eye,
 } from "@/lib/ui/icons";
 import { useT } from "@/hooks/i18n/useT";
+import { useTagDeIdioma } from "@/hooks/i18n/useLocaleDeData";
 
 interface Props {
   flowId: string;
@@ -52,6 +53,7 @@ export function FlowVersionsDialog({
   initialCreateBackup,
 }: Props) {
   const t = useT();
+  const tagDeIdioma = useTagDeIdioma();
   const backupInputRef = useRef<HTMLInputElement>(null);
   const [loading, setLoading] = useState(false);
   const [versions, setVersions] = useState<VersionItem[]>([]);
@@ -211,7 +213,7 @@ export function FlowVersionsDialog({
 
         {/* Formulário: Criar backup agora */}
         <div className="rounded-lg border border-border bg-surface-raised p-3.5 space-y-2.5">
-          <label className="text-xs font-semibold text-text">{t("Criar backup agora")}</label>
+          <label className="block text-xs font-semibold text-text">{t("Criar backup agora")}</label>
           <div className="flex items-center gap-2">
             <Input
               ref={backupInputRef}
@@ -266,7 +268,7 @@ export function FlowVersionsDialog({
                   </div>
                   <div className="flex items-center gap-2 text-[11px] text-text-muted">
                     <span>
-                      {new Date(ver.created_at).toLocaleDateString("pt-BR", {
+                      {new Date(ver.created_at).toLocaleDateString(tagDeIdioma, {
                         day: "2-digit",
                         month: "2-digit",
                         year: "numeric",
@@ -363,7 +365,7 @@ export function FlowVersionsDialog({
               <DialogHeader>
                 <DialogTitle>{viewingVersion.label}</DialogTitle>
                 <DialogDescription className="text-xs text-text-muted">
-                  {new Date(viewingVersion.created_at).toLocaleString("pt-BR")}
+                  {new Date(viewingVersion.created_at).toLocaleString(tagDeIdioma)}
                 </DialogDescription>
               </DialogHeader>
               <div className="rounded-lg border border-border bg-surface-raised p-4 space-y-2 text-xs">

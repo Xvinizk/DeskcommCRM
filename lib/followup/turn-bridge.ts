@@ -223,7 +223,7 @@ export async function completeTurnForEnrollment(
       {},
       { current_node_id: edge.target, status: "active", next_eval_at: now.toISOString() },
     );
-    if (applied && db.enqueueJob) {
+    if (applied && db.enqueueJob && node.type !== "action") {
       await avancarEnrollmentAtivo(
         { db, clock, enqueueJob: db.enqueueJob },
         {
@@ -254,18 +254,21 @@ export async function completeTurnForEnrollment(
       { current_node_id: edge.target, status: "active", next_eval_at: now.toISOString() },
     );
     if (applied && db.enqueueJob) {
-      await avancarEnrollmentAtivo(
-        { db, clock, enqueueJob: db.enqueueJob },
-        {
-          ...enrollment,
-          current_node_id: edge.target,
-          steps_taken: enrollment.steps_taken + 1,
-          status: "active",
-          next_eval_at: now.toISOString(),
-          updated_at: now.toISOString(),
-          claimed_until: null,
-        },
-      );
+      const nextNode = graph.nodes.find((n) => n.id === edge.target);
+      if (nextNode && isSendMessageNode(nextNode)) {
+        await avancarEnrollmentAtivo(
+          { db, clock, enqueueJob: db.enqueueJob },
+          {
+            ...enrollment,
+            current_node_id: edge.target,
+            steps_taken: enrollment.steps_taken + 1,
+            status: "active",
+            next_eval_at: now.toISOString(),
+            updated_at: now.toISOString(),
+            claimed_until: null,
+          },
+        );
+      }
     }
     return;
   }
@@ -284,7 +287,7 @@ export async function completeTurnForEnrollment(
   });
   const edge = selectEdge(graph.edges, node.id, { type: "always" });
   if (!edge) throw new Error(`trigger node "${node.id}" sem aresta 'always' de saída`);
-  const applied = await applyStep(
+  await applyStep(
     "timing_plan_decidido",
     // O plano inteiro no evento (não só um ponteiro pra coluna): a timeline do
     // enrollment precisa ser legível sozinha, com o motivo de cada espera.
@@ -296,21 +299,6 @@ export async function completeTurnForEnrollment(
       timing_plan: plano,
     },
   );
-  if (applied && db.enqueueJob) {
-    await avancarEnrollmentAtivo(
-      { db, clock, enqueueJob: db.enqueueJob },
-      {
-        ...enrollment,
-        current_node_id: edge.target,
-        steps_taken: enrollment.steps_taken + 1,
-        status: "active",
-        next_eval_at: now.toISOString(),
-        updated_at: now.toISOString(),
-        claimed_until: null,
-        timing_plan: plano,
-      },
-    );
-  }
 }
 
 // ---------------------------------------------------------------------------

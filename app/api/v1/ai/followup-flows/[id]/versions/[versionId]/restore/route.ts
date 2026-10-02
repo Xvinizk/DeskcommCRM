@@ -66,7 +66,7 @@ export async function POST(_req: NextRequest, ctx: RouteCtx): Promise<Response> 
     activeOrg.orgId,
   );
 
-  const preRestoreLabel = `Backup pré-restauração (${new Date().toLocaleTimeString("pt-BR")})`;
+  const preRestoreLabel = `Backup pré-restauração (${new Date().toISOString()})`;
   await admin.from("followup_flow_versions").insert({
     organization_id: activeOrg.orgId,
     pointer_id: id,

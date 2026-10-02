@@ -99,18 +99,18 @@ export function ScheduledMessagesBanner({ conversationId }: Props) {
                       {formattedDate}
                     </span>
                     {isProcessing ? (
-                      <span className="inline-flex items-center gap-1 rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-600">
+                      <span className="inline-flex items-center gap-1 rounded-md bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-600">
                         <ArrowsClockwise size={11} className="animate-spin" />
                         {t("Enviando…")}
                       </span>
                     ) : (
-                      <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                      <span className="rounded-md bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
                         {t("Pendente")}
                       </span>
                     )}
 
                     {msg.media_type && (
-                      <span className="inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                      <span className="inline-flex items-center gap-1 rounded-md bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
                         {msg.media_type === "image" ? (
                           <ImageSquare size={12} />
                         ) : (

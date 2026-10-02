@@ -175,9 +175,9 @@ async function applyAiNodeTransition(
     // 1. Atualiza followup_enrollments com status ativo e next_eval_at imediato
     await db.query(
       `UPDATE followup_enrollments
-       SET current_node_id = $1, steps_taken = steps_taken + 1, ai_node_session = $2, next_eval_at = $3, status = 'active', claimed_until = null, updated_at = $3
-       WHERE organization_id = $4 AND id = $5`,
-      [nextNodeId, JSON.stringify(updatedSession), nowIso, input.organizationId, input.enrollmentId],
+       SET current_node_id = $1, steps_taken = steps_taken + 1, ai_node_session = $2, next_eval_at = public.fn_agora(), status = 'active', claimed_until = null, updated_at = public.fn_agora()
+       WHERE organization_id = $3 AND id = $4`,
+      [nextNodeId, JSON.stringify(updatedSession), input.organizationId, input.enrollmentId],
     );
 
     // 2. Registra o evento canônico ai_node.exited com chave de idempotência
@@ -185,7 +185,7 @@ async function applyAiNodeTransition(
       `INSERT INTO followup_enrollment_events (
          organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (enrollment_id, idempotency_key) DO NOTHING
+       ON CONFLICT (enrollment_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
        RETURNING id`,
       [
         input.organizationId,
@@ -467,7 +467,7 @@ export async function executeAiNodeLifecycle(
       `INSERT INTO followup_enrollment_events (
          organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (enrollment_id, idempotency_key) DO NOTHING`,
+       ON CONFLICT (enrollment_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`,
       [
         input.organizationId,
         input.enrollmentId,
@@ -636,7 +636,7 @@ export async function executeAiNodeLifecycle(
         `INSERT INTO followup_enrollment_events (
            organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
          ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-         ON CONFLICT (enrollment_id, idempotency_key) DO NOTHING`,
+         ON CONFLICT (enrollment_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`,
         [
           input.organizationId,
           input.enrollmentId,
@@ -780,7 +780,7 @@ export async function executeAiNodeLifecycle(
       `INSERT INTO followup_enrollment_events (
          organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (enrollment_id, idempotency_key) DO NOTHING`,
+       ON CONFLICT (enrollment_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`,
       [
         input.organizationId,
         input.enrollmentId,
@@ -1003,7 +1003,7 @@ export async function executeAiNodeLifecycle(
         `INSERT INTO followup_enrollment_events (
            organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
          ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-         ON CONFLICT (enrollment_id, idempotency_key) DO NOTHING`,
+         ON CONFLICT (enrollment_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`,
         [
           input.organizationId,
           input.enrollmentId,
@@ -1081,7 +1081,7 @@ export async function executeAiNodeLifecycle(
       `INSERT INTO followup_enrollment_events (
          organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (enrollment_id, idempotency_key) DO NOTHING`,
+       ON CONFLICT (enrollment_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`,
       [
         input.organizationId,
         input.enrollmentId,
@@ -1102,7 +1102,7 @@ export async function executeAiNodeLifecycle(
       `INSERT INTO followup_enrollment_events (
          organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (enrollment_id, idempotency_key) DO NOTHING`,
+       ON CONFLICT (enrollment_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`,
       [
         input.organizationId,
         input.enrollmentId,
@@ -1191,7 +1191,7 @@ export async function executeAiNodeLifecycle(
       `INSERT INTO followup_enrollment_events (
          organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (enrollment_id, idempotency_key) DO NOTHING`,
+       ON CONFLICT (enrollment_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`,
       [
         input.organizationId,
         input.enrollmentId,
@@ -1278,7 +1278,7 @@ export async function executeAiNodeLifecycle(
       `INSERT INTO followup_enrollment_events (
          organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (enrollment_id, idempotency_key) DO NOTHING`,
+       ON CONFLICT (enrollment_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`,
       [
         input.organizationId,
         input.enrollmentId,
@@ -1393,7 +1393,7 @@ async function handleAiNodeError(
     `INSERT INTO followup_enrollment_events (
        organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
      ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-     ON CONFLICT (enrollment_id, idempotency_key) DO NOTHING`,
+     ON CONFLICT (enrollment_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`,
     [
       input.organizationId,
       input.enrollmentId,
@@ -1633,7 +1633,7 @@ export async function executeAiNodeTimeout(
         `INSERT INTO followup_enrollment_events (
            organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
          ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-         ON CONFLICT (enrollment_id, idempotency_key) DO NOTHING`,
+         ON CONFLICT (enrollment_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`,
         [
           input.organizationId,
           input.enrollmentId,
@@ -1677,7 +1677,7 @@ export async function executeAiNodeTimeout(
     `INSERT INTO followup_enrollment_events (
        organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
      ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-     ON CONFLICT (enrollment_id, idempotency_key) DO NOTHING`,
+     ON CONFLICT (enrollment_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`,
     [
       input.organizationId,
       input.enrollmentId,

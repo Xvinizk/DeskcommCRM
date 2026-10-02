@@ -251,4 +251,99 @@ describe('resolveTurnAuthority', () => {
       expect(res.config?.agentId).toBe('agent-fallback');
     }
   });
+
+  it('G. Regressão Bug A: resolveTurnAuthority executa defaultFindActiveAiNodeSession contra schema real sem consultar p.flow_id inexistente', async () => {
+    const isLeadInHandoff = vi.fn().mockResolvedValue(false);
+
+    // Schema canônico de followup_flow_pointers segundo migrations 0054/baseline:
+    // colunas válidas: id, organization_id, name, status, active_version_id, draft_graph, handoff_policy, trigger_config, created_at, updated_at
+    // Coluna NÃO existente: flow_id (o identificador é id)
+    const validPointerCols = new Set([
+      'id',
+      'organization_id',
+      'name',
+      'status',
+      'active_version_id',
+      'draft_graph',
+      'handoff_policy',
+      'trigger_config',
+      'created_at',
+      'updated_at',
+    ]);
+
+    const pointerId = 'flow-pointer-uuid-canonical';
+    const mockSession: AiNodeSession = {
+      node_id: 'node-ai-active',
+      flow_id: pointerId,
+      mode: 'existing_agent',
+      agent_id: 'a0000000-0000-0000-0000-000000000001',
+      agent_version_id: 'b0000000-0000-0000-0000-000000000001',
+      status: 'running',
+      turn_count: 0,
+      started_at: '2026-10-02T12:00:00Z',
+      media_summary: {
+        images_count: 0,
+        audios_count: 0,
+        documents_count: 0,
+        last_media_ids: [],
+      },
+    };
+
+    // Fixture de db que valida estritamente o schema das tabelas e aliases consultados
+    const dbFixture = {
+      query: vi.fn(async (sql: string, _params: unknown[]) => {
+        // Valida se qualquer coluna de p.<coluna> inexiste em followup_flow_pointers
+        const pMatches = Array.from(sql.matchAll(/\bp\.([a-zA-Z0-9_]+)/g));
+        for (const match of pMatches) {
+          const col = match[1];
+          if (!col) continue;
+          if (!validPointerCols.has(col)) {
+            const err = new Error(`column p.${col} does not exist`);
+            Object.assign(err, { code: '42703' });
+            throw err;
+          }
+        }
+
+        // Se passar pela validação de schema, simula o retorno do Postgres
+        // verificando se a projeção foi "p.id as flow_id"
+        const hasCorrectProjection = /p\.id\s+as\s+flow_id/i.test(sql);
+        return {
+          rows: [
+            {
+              enrollment_id: 'enr-ai-active-1',
+              organization_id: baseInput.tenantId,
+              current_node_id: 'node-ai-active',
+              ai_node_session: mockSession,
+              flow_id: hasCorrectProjection ? pointerId : null,
+            },
+          ],
+        };
+      }),
+    };
+
+    // NÃO injeta findActiveAiNodeSession: obriga a executar defaultFindActiveAiNodeSession
+    const res = await resolveTurnAuthority(
+      dbFixture as never,
+      {} as never,
+      baseInput,
+      {
+        isAiNodeEnabled: true,
+        isLeadInHandoff,
+      },
+    );
+
+    expect(dbFixture.query).toHaveBeenCalledTimes(1);
+    const firstCall = dbFixture.query.mock.calls[0];
+    const executedSql = (firstCall?.[0] as string) ?? '';
+    expect(executedSql).toContain('p.id as flow_id');
+    expect(executedSql).not.toContain('p.flow_id');
+
+    expect(res.authority).toBe('ai_node');
+    if (res.authority === 'ai_node') {
+      expect(res.enrollment_id).toBe('enr-ai-active-1');
+      expect(res.flow_id).toBe(pointerId);
+      expect(res.node_id).toBe('node-ai-active');
+      expect(res.session).toEqual(mockSession);
+    }
+  });
 });

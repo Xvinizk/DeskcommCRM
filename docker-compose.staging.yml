@@ -1,0 +1,39 @@
+# =============================================================================
+# DeskcommCRM — Override de Isolamento Estrito para Homologação em Staging
+# =============================================================================
+# Uso exclusivo via helper: ./scripts/staging-compose.sh <comando>
+#
+# Composição canônica:
+#   docker compose -p deskcomm-staging --env-file .env.staging \
+#     -f docker-compose.prod.yml -f docker-compose.staging.yml <comando>
+#
+# Regras de isolamento:
+# - Imagens próprias pinadas estritamente no Release Candidate (rc-4eedf2d6c)
+# - pull_policy: never em app, worker e scheduler (impede pull de imagens remotas mutáveis)
+# - Zero container_name fixo (prefixo automático: deskcomm-staging-)
+# - Zero volume com name: explícito (prefixo automático: deskcomm-staging_)
+# - Zero rede externa (rede 'internal' isolada: deskcomm-staging_internal)
+# - Apenas portas 80 e 443 publicadas no host (via serviço caddy)
+# - env_file redefinido com !reset para consumir estritamente .env.staging
+# =============================================================================
+
+services:
+  app:
+    image: deskcommcrm:rc-4eedf2d6c
+    pull_policy: never
+    env_file: !reset
+      - .env.staging
+
+  worker:
+    image: deskcomm-worker:rc-4eedf2d6c
+    pull_policy: never
+    env_file: !reset
+      - .env.staging
+
+  scheduler:
+    image: deskcomm-scheduler:rc-4eedf2d6c
+    pull_policy: never
+
+  voice-agent:
+    env_file: !reset
+      - .env.staging
