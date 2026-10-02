@@ -4433,6 +4433,7 @@ export function createInboundTurnHandler(deps: InboundTurnDeps) {
             inboundMessageId: payload.inbound_message_id,
             conversationId: payload.conversation_id,
             contactId: job.contact_id,
+            jobId: job.id,
             workerId: acquireResult.worker_id,
             leaseGeneration: acquireResult.lease_generation,
             session: acquireResult.session,

@@ -92,6 +92,7 @@ export interface ExecuteAiNodeLifecycleInput {
   inboundMessageId: string;
   conversationId?: string | null;
   contactId?: string | null;
+  jobId?: string | null;
   workerId: string;
   leaseGeneration: number;
   inboundText?: string | null;
@@ -128,7 +129,7 @@ export interface ExecuteAiNodeLifecycleDeps extends ExecuteAiNodeTurnDeps {
   isLeadInHandoffFn?: typeof isLeadInHandoff;
   performHumanHandoffFn?: typeof performHumanHandoff;
   sendWithLedgerFn?: typeof sendWithLedger;
-  sendOutboundHandler?: (key: string, messageId: string) => Promise<{ id: string; status: string }>;
+  sendOutboundHandler?: (key: string, messageId: string, body?: string) => Promise<{ id: string; status: string }>;
   ledgerStore?: Parameters<typeof sendWithLedger>[0];
   clock?: () => Date;
   advanceEnrollmentFn?: (enrollmentId: string, orgId: string, nextNodeId: string) => Promise<void>;
@@ -931,11 +932,36 @@ export async function executeAiNodeLifecycle(
   } else {
     // Envio canônico com sendWithLedger
     const sendKey = buildAiNodeSendIdempotencyKey(input);
-    const intentJobId = deterministicUuid(sendKey);
+    const intentJobId = input.jobId ?? deterministicUuid(sendKey);
     const store = deps.ledgerStore ?? pgSendLedger(db as unknown as Parameters<typeof pgSendLedger>[0]);
-    const sendFn = deps.sendOutboundHandler ?? (async (key: string, id: string) => {
+    const defaultSendFn = async (key: string, id: string) => {
+      if (input.conversationId) {
+        const { sendMessageHandler } = await import('@/app/api/v1/messages/_handler');
+        const { createAdminClient } = await import('@/lib/supabase/admin');
+        const admin = createAdminClient();
+        const sent = await sendMessageHandler(
+          admin,
+          {
+            organization_id: input.organizationId,
+            actor: { type: 'webhook_source', id: input.enrollmentId },
+            requestId: key,
+            internalMessageId: id,
+          },
+          {
+            conversation_id: input.conversationId,
+            type: 'text',
+            body: structuredOutput.reply,
+            metadata: { idempotency_key: key },
+          },
+        );
+        return { id: sent.id, status: sent.status };
+      }
       return { id, status: 'sent' };
-    });
+    };
+
+    const sendFn = deps.sendOutboundHandler
+      ? (key: string, id: string) => deps.sendOutboundHandler!(key, id, structuredOutput.reply)
+      : defaultSendFn;
 
     const sendCaller = deps.sendWithLedgerFn ?? sendWithLedger;
 
@@ -1422,7 +1448,7 @@ async function handleAiNodeError(
   if (nextNodeId) {
     const updatedSession: AiNodeSession = {
       ...session,
-      status: 'completed',
+      status: 'error',
     };
     const exitedKey = `ai_node_exited:${input.organizationId}:${input.enrollmentId}:${input.nodeId}:${input.inboundMessageId}`;
     transitionStatus = await applyAiNodeTransition(
