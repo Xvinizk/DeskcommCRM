@@ -219,6 +219,57 @@ describe("followup schema (0054) — unique: idempotency_key por enrollment", ()
       ),
     ).rejects.toMatchObject({ code: "23505" });
   });
+
+  it("ON CONFLICT sem WHERE na partial index idx_followup_events_idem → 42P10 e com WHERE → sucesso", async () => {
+    const { pointerId, versionId } = await seedFlow(ORG_IDEM);
+    const contactId = await seedContact(ORG_IDEM);
+    const { rows: enrollment } = await pool.query<{ id: string }>(
+      `insert into followup_enrollments (organization_id, pointer_id, version_id, contact_id, current_node_id, status, next_eval_at)
+       values ($1, $2, $3, $4, 'start', 'active', now()) returning id`,
+      [ORG_IDEM, pointerId, versionId, contactId],
+    );
+    const enrollmentId = enrollment[0]!.id;
+
+    // 1. SQL antigo sem WHERE falha com 42P10
+    await expect(
+      pool.query(
+        `insert into followup_enrollment_events (organization_id, enrollment_id, node_id, event_type, payload, idempotency_key)
+         values ($1, $2, 'node_1', 'ai_node.inbound_received', '{}', 'idem-sql-err')
+         on conflict (enrollment_id, idempotency_key) do nothing`,
+        [ORG_IDEM, enrollmentId],
+      ),
+    ).rejects.toMatchObject({ code: "42P10" });
+
+    // 2. SQL corrigido com WHERE -> 1º insert = sucesso
+    const r1 = await pool.query(
+      `insert into followup_enrollment_events (organization_id, enrollment_id, node_id, event_type, payload, idempotency_key)
+       values ($1, $2, 'node_1', 'ai_node.inbound_received', '{}', 'idem-sql-ok')
+       on conflict (enrollment_id, idempotency_key) where idempotency_key is not null do nothing
+       returning id`,
+      [ORG_IDEM, enrollmentId],
+    );
+    expect(r1.rows).toHaveLength(1);
+
+    // 3. Mesma idempotency_key -> no-op (0 rows inseridas)
+    const r2 = await pool.query(
+      `insert into followup_enrollment_events (organization_id, enrollment_id, node_id, event_type, payload, idempotency_key)
+       values ($1, $2, 'node_1', 'ai_node.inbound_received', '{}', 'idem-sql-ok')
+       on conflict (enrollment_id, idempotency_key) where idempotency_key is not null do nothing
+       returning id`,
+      [ORG_IDEM, enrollmentId],
+    );
+    expect(r2.rows).toHaveLength(0);
+
+    // 4. Idempotency_key diferente -> novo evento inserido
+    const r3 = await pool.query(
+      `insert into followup_enrollment_events (organization_id, enrollment_id, node_id, event_type, payload, idempotency_key)
+       values ($1, $2, 'node_1', 'ai_node.inbound_received', '{}', 'idem-sql-diff')
+       on conflict (enrollment_id, idempotency_key) where idempotency_key is not null do nothing
+       returning id`,
+      [ORG_IDEM, enrollmentId],
+    );
+    expect(r3.rows).toHaveLength(1);
+  });
 });
 
 describe("followup schema (0054) — check: active exige next_eval_at", () => {
