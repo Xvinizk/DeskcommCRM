@@ -119,18 +119,18 @@ export async function completeTurnForEnrollment(
   if (!node) throw new Error("node_not_found");
 
   const now = clock();
-  const idemKey = `${node.id}:${enrollment.steps_taken}`;
 
   const applyStep = async (
     eventType: string,
     payload: Record<string, unknown>,
     patch: EnrollmentPatch,
   ): Promise<boolean> => {
+    const stepIdemKey = `${node.id}:${enrollment.steps_taken}:${eventType}`;
     await db.assertServiceBoundary?.(enrollment);
     if(result.kind === "planned" || result.kind === "classified") await db.assertAgenda?.(enrollment);
     if(db.applyEnrollmentStep){
       const ok = await db.applyEnrollmentStep(enrollmentId,orgId,{...patch,steps_taken:enrollment.steps_taken+1,claimed_until:null,updated_at:now.toISOString()},
-        {...(jobId?{job_id:jobId,job_claim:jobClaim}:{}),node_id:node.id,event_type:eventType,payload,idempotency_key:idemKey});
+        {...(jobId?{job_id:jobId,job_claim:jobClaim}:{}),node_id:node.id,event_type:eventType,payload,idempotency_key:stepIdemKey});
       return ok !== false;
     }
     const { inserted } = await db.insertEnrollmentEvent({
@@ -139,7 +139,7 @@ export async function completeTurnForEnrollment(
       node_id: node.id,
       event_type: eventType,
       payload,
-      idempotency_key: idemKey,
+      idempotency_key: stepIdemKey,
     });
     if (!inserted) return false; // replay — a 1ª aplicação já progrediu o enrollment
     await db.assertServiceBoundary?.(enrollment);
