@@ -11,7 +11,6 @@ import { ApiError } from "@/lib/api/types";
 import { decidirElegibilidadeDaConversaViaSupabase } from "@/lib/ai/elegibilidade/consulta-supabase";
 import { ttlDaAutorizacaoMs } from "@/lib/ai/elegibilidade/gate";
 import { createSupabaseAdminClient, type FollowupJobRequest } from "@/lib/followup/engine";
-import type { EnrollmentRow } from "@/lib/followup/node-handlers";
 import { completeTurnForEnrollment, type TurnBridgeAdminClient } from "@/lib/followup/turn-bridge";
 import { logger } from "@/lib/logger";
 
@@ -27,17 +26,7 @@ function ponteSupabase(admin: SupabaseClient): TurnBridgeAdminClient {
       if(error) throw error;
       if(!data) throw new StaleServiceBoundaryError();
     },
-    async loadEnrollmentById(orgId, id) {
-      const { data, error } = await admin
-        .from("followup_enrollments")
-        .select("*")
-        .eq("id", id)
-        .eq("organization_id", orgId)
-        .maybeSingle();
-      if (error) throw new Error(error.message);
-      if (!data) return null;
-      return data as EnrollmentRow;
-    },
+    loadEnrollmentById: (orgId, id) => base.loadEnrollmentById!(orgId, id),
   };
 }
 
