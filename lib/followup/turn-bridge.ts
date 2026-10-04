@@ -135,6 +135,8 @@ export async function completeTurnForEnrollment(
           (e) => e.node_id === node.id && e.event_type === eventType,
         );
         if (alreadyDone) {
+          const fresh = await db.loadEnrollmentById(orgId, enrollmentId);
+          if (fresh) latestEnrollment = fresh;
           return true;
         }
       }
@@ -164,7 +166,22 @@ export async function completeTurnForEnrollment(
               idempotency_key: stepIdemKey,
             },
           );
-          return ok !== false;
+          if (ok !== false) {
+            const fresh = await db.loadEnrollmentById(orgId, enrollmentId);
+            if (fresh) {
+              latestEnrollment = fresh;
+            } else {
+              latestEnrollment = {
+                ...latestEnrollment,
+                ...patch,
+                steps_taken: latestEnrollment.steps_taken + 1,
+                claimed_until: null,
+                updated_at: now.toISOString(),
+              };
+            }
+            return true;
+          }
+          return false;
         }
 
         const { inserted } = await db.insertEnrollmentEvent({
@@ -184,6 +201,18 @@ export async function completeTurnForEnrollment(
           claimed_until: null,
           updated_at: now.toISOString(),
         });
+        const fresh = await db.loadEnrollmentById(orgId, enrollmentId);
+        if (fresh) {
+          latestEnrollment = fresh;
+        } else {
+          latestEnrollment = {
+            ...latestEnrollment,
+            ...patch,
+            steps_taken: latestEnrollment.steps_taken + 1,
+            claimed_until: null,
+            updated_at: now.toISOString(),
+          };
+        }
         return true;
       } catch (err) {
         const isCasConflict =
@@ -298,15 +327,7 @@ export async function completeTurnForEnrollment(
     if (applied && db.enqueueJob && node.type !== "action") {
       await avancarEnrollmentAtivo(
         { db, clock, enqueueJob: db.enqueueJob },
-        {
-          ...latestEnrollment,
-          current_node_id: edge.target,
-          steps_taken: latestEnrollment.steps_taken + 1,
-          status: "active",
-          next_eval_at: now.toISOString(),
-          updated_at: now.toISOString(),
-          claimed_until: null,
-        },
+        latestEnrollment,
       );
     }
     return;
@@ -330,15 +351,7 @@ export async function completeTurnForEnrollment(
       if (nextNode && isSendMessageNode(nextNode)) {
         await avancarEnrollmentAtivo(
           { db, clock, enqueueJob: db.enqueueJob },
-          {
-            ...latestEnrollment,
-            current_node_id: edge.target,
-            steps_taken: latestEnrollment.steps_taken + 1,
-            status: "active",
-            next_eval_at: now.toISOString(),
-            updated_at: now.toISOString(),
-            claimed_until: null,
-          },
+          latestEnrollment,
         );
       }
     }
@@ -433,14 +446,25 @@ export function createPgAdminClient(
       const {rows}=await pool.query("select fn_followup_job_current($1,$2,$3,$4) current",[orgId,jobId,enrollmentId,nodeId]);
       if(!rows[0]?.current) throw new StaleServiceBoundaryError();
     },
-    async assertServiceBoundary(enrollment) { if(enrollment.revision!==undefined) revisions.set(enrollment.id,enrollment.revision); await requireCurrentServiceBoundary(pool, enrollment.service_boundary ?? null); },
+    async assertServiceBoundary(enrollment) {
+      if (enrollment.revision !== undefined) {
+        const cur = revisions.get(enrollment.id);
+        const inc = Number(enrollment.revision);
+        if (cur === undefined || inc > cur) revisions.set(enrollment.id, inc);
+      }
+      await requireCurrentServiceBoundary(pool, enrollment.service_boundary ?? null);
+    },
     async assertAgenda(enrollment){await assertAgendaEffectPg(pool,{organizationId:enrollment.organization_id,contactId:enrollment.contact_id,enrollmentId:enrollment.id,nodeId:enrollment.current_node_id});},
     async claimDueEnrollments(limit, leaseSeconds) {
       const { rows } = await pool.query(`select * from fn_claim_due_followup_enrollments($1, $2)`, [
         limit,
         leaseSeconds,
       ]);
-      for(const row of rows) revisions.set(row.id,Number(row.revision));
+      for (const row of rows) {
+        const cur = revisions.get(row.id);
+        const inc = Number(row.revision);
+        if (cur === undefined || inc > cur) revisions.set(row.id, inc);
+      }
       return rows.map(mapEnrollmentRow);
     },
     async loadEnrollmentById(orgId, id) {
@@ -448,7 +472,11 @@ export function createPgAdminClient(
         `select * from followup_enrollments where id = $1 and organization_id = $2`,
         [id, orgId],
       );
-      if(rows[0]) revisions.set(id,Number(rows[0].revision));
+      if (rows[0]) {
+        const cur = revisions.get(id);
+        const inc = Number(rows[0].revision);
+        if (cur === undefined || inc > cur) revisions.set(id, inc);
+      }
       return rows[0] ? mapEnrollmentRow(rows[0] as Record<string, unknown>) : null;
     },
     async loadFlowGraph(orgId, versionId) {

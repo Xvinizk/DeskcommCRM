@@ -1224,7 +1224,14 @@ export async function runFollowupTick(deps: TickDeps, opts?: { limit?: number })
 export function createSupabaseAdminClient(admin: SupabaseClient): AdminClient {
   const revisions=new Map<string,number>();
   return {
-    async assertServiceBoundary(enrollment) { if(enrollment.revision!==undefined) revisions.set(enrollment.id,enrollment.revision); await assertServiceBoundarySupabase(admin, enrollment.service_boundary ?? null); },
+    async assertServiceBoundary(enrollment) {
+      if (enrollment.revision !== undefined) {
+        const cur = revisions.get(enrollment.id);
+        const inc = Number(enrollment.revision);
+        if (cur === undefined || inc > cur) revisions.set(enrollment.id, inc);
+      }
+      await assertServiceBoundarySupabase(admin, enrollment.service_boundary ?? null);
+    },
     async assertAgenda(enrollment){await assertAgendaEffectSupabase(admin,{organizationId:enrollment.organization_id,contactId:enrollment.contact_id,enrollmentId:enrollment.id,nodeId:enrollment.current_node_id});},
     async claimDueEnrollments(limit, leaseSeconds) {
       const { data, error } = await admin.rpc("fn_claim_due_followup_enrollments", {
@@ -1232,7 +1239,11 @@ export function createSupabaseAdminClient(admin: SupabaseClient): AdminClient {
         p_lease_seconds: leaseSeconds,
       });
       if (error) throw new Error(error.message);
-      for(const row of data??[]) revisions.set(row.id,Number(row.revision));
+      for (const row of data ?? []) {
+        const cur = revisions.get(row.id);
+        const inc = Number(row.revision);
+        if (cur === undefined || inc > cur) revisions.set(row.id, inc);
+      }
       return (data ?? []) as EnrollmentRow[];
     },
     async loadFlowGraph(orgId, versionId) {
@@ -1451,7 +1462,9 @@ export function createSupabaseAdminClient(admin: SupabaseClient): AdminClient {
         .maybeSingle();
       if (error) throw new Error(error.message);
       if (!data) return null;
-      revisions.set(id, Number(data.revision));
+      const cur = revisions.get(id);
+      const inc = Number(data.revision);
+      if (cur === undefined || inc > cur) revisions.set(id, inc);
       return {
         id: data.id,
         organization_id: data.organization_id,
