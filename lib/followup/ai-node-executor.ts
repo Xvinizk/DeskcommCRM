@@ -676,10 +676,16 @@ export async function executeAiNodeTurn(
     }
   }
 
-  // Garante que a mensagem inbound atual esteja presente
+  // Garante que a mensagem inbound atual esteja presente exatamente uma vez
   if (input.inboundText) {
     const lastMsg = messages[messages.length - 1];
-    if (!lastMsg || lastMsg.role !== 'user' || lastMsg.content !== input.inboundText) {
+    const isAlreadyPresentAsLast =
+      lastMsg &&
+      lastMsg.role === 'user' &&
+      typeof lastMsg.content === 'string' &&
+      lastMsg.content.trim() === input.inboundText.trim();
+
+    if (!isAlreadyPresentAsLast) {
       messages.push({ role: 'user', content: input.inboundText });
     }
   } else if (messages.length === 0) {

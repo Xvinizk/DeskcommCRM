@@ -1236,6 +1236,10 @@ export interface InboundTurnDeps {
    * anti-ban observável no artefato de trace de forma determinística.
    */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * Função canônica de contexto de lead (injetável para testes / DI).
+   */
+  getLeadContextFn?: typeof getLeadContext;
 }
 
 /** Checkpoint mais recente do lead — a memória que atravessa sessões. */
@@ -4444,6 +4448,7 @@ export function createInboundTurnHandler(deps: InboundTurnDeps) {
             llmCfg: deps.llmCfg,
             registry: deps.registry,
             log: deps.log,
+            getLeadContextFn: deps.getLeadContextFn ?? getLeadContext,
             advanceEnrollmentFn: async (enrId, orgId, _nextNodeId) => {
               const supabaseAdmin = createAdminClient();
               const followupAdmin = createSupabaseAdminClient(supabaseAdmin);
