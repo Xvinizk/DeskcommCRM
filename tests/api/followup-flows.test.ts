@@ -510,6 +510,85 @@ describe("POST /api/v1/ai/followup-flows/:id/publish", () => {
     );
   });
 
+  it("CANONICAL_DRAFT_IMMUTABILITY: PATCH draft -> PUBLISH V1 -> PATCH draft V2 -> V1 permanece igual -> PUBLISH V2 -> V1 inalterado e V2 recebe mudança", async () => {
+    const POINTER_ID = "33333333-3333-4333-8333-333333333333";
+    const GRAPH_V1: FlowGraph = {
+      nodes: [trigger("t1"), end("e1")],
+      edges: [edge("edge1", "t1", "e1")],
+    };
+    const GRAPH_V2: FlowGraph = {
+      nodes: [trigger("t1"), end("e2", "converted")],
+      edges: [edge("edge2", "t1", "e2")],
+    };
+
+    const db = makeDb(
+      [{ id: POINTER_ID, organization_id: ORG_ID, status: "draft", draft_graph: null }],
+      [],
+    );
+    session("manager", db);
+
+    const { PATCH } = await import("@/app/api/v1/ai/followup-flows/[id]/route");
+    const { POST } = await import("@/app/api/v1/ai/followup-flows/[id]/publish/route");
+
+    // 1. PATCH draft com GRAPH_V1
+    const patchRes1 = await PATCH(req("PATCH", { draft_graph: GRAPH_V1 }), ctx(POINTER_ID));
+    expect(patchRes1.status).toBe(200);
+
+    // 2. PUBLISH V1
+    const pubRes1 = await POST(req("POST"), ctx(POINTER_ID));
+    expect(pubRes1.status).toBe(200);
+    const pubBody1 = (await pubRes1.json()) as { data: { active_version_id: string } };
+    const version1Id = pubBody1.data.active_version_id;
+    expect(version1Id).toBeTruthy();
+
+    // Inspeciona V1 na tabela followup_flow_versions
+    const { data: v1RowsAfterPub1 } = (await db
+      .from("followup_flow_versions")
+      .select()
+      .eq("id", version1Id)) as { data: Row[] };
+    expect(v1RowsAfterPub1[0]!.graph).toEqual(GRAPH_V1);
+
+    // 3. PATCH draft com GRAPH_V2
+    const patchRes2 = await PATCH(req("PATCH", { draft_graph: GRAPH_V2 }), ctx(POINTER_ID));
+    expect(patchRes2.status).toBe(200);
+
+    // Verifica que o pointer teve seu draft alterado para GRAPH_V2
+    const { data: pointerRows } = (await db
+      .from("followup_flow_pointers")
+      .select()
+      .eq("id", POINTER_ID)) as { data: Row[] };
+    expect(pointerRows[0]!.draft_graph).toEqual(GRAPH_V2);
+
+    // CRÍTICO: Verifica que a versão publicada V1 PERMANECE 100% IGUAL (imutável)
+    const { data: v1RowsAfterPatch2 } = (await db
+      .from("followup_flow_versions")
+      .select()
+      .eq("id", version1Id)) as { data: Row[] };
+    expect(v1RowsAfterPatch2[0]!.graph).toEqual(GRAPH_V1);
+
+    // 4. PUBLISH V2
+    const pubRes2 = await POST(req("POST"), ctx(POINTER_ID));
+    expect(pubRes2.status).toBe(200);
+    const pubBody2 = (await pubRes2.json()) as { data: { active_version_id: string } };
+    const version2Id = pubBody2.data.active_version_id;
+    expect(version2Id).toBeTruthy();
+    expect(version2Id).not.toBe(version1Id);
+
+    // Verifica que V1 CONTINUA com GRAPH_V1
+    const { data: v1RowsFinal } = (await db
+      .from("followup_flow_versions")
+      .select()
+      .eq("id", version1Id)) as { data: Row[] };
+    expect(v1RowsFinal[0]!.graph).toEqual(GRAPH_V1);
+
+    // Verifica que V2 recebeu GRAPH_V2
+    const { data: v2RowsFinal } = (await db
+      .from("followup_flow_versions")
+      .select()
+      .eq("id", version2Id)) as { data: Row[] };
+    expect(v2RowsFinal[0]!.graph).toEqual(GRAPH_V2);
+  });
+
   it("pointer de outra org → 404", async () => {
     const db = makeDb(
       [{ id: "33333333-3333-4333-8333-333333333333", organization_id: OTHER_ORG_ID, status: "draft", draft_graph: VALID_GRAPH }],

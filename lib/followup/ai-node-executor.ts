@@ -260,6 +260,7 @@ export async function resolveAiNodeAgentConfig(
  * 6. Fatos determinísticos disponíveis do sistema
  */
 export function composeAiNodeSystemPrompt(params: {
+  mode?: AiNodeConfig['mode'];
   platformCompliance?: string;
   agentSystemPrompt?: string;
   supplementaryInstruction?: string;
@@ -277,25 +278,34 @@ export function composeAiNodeSystemPrompt(params: {
     parts.push(`## Regras de Plataforma e Compliance\n${platform}`);
   }
 
-  // Camada 2: Agente publicado
-  const agentPrompt = (params.agentSystemPrompt ?? '').trim();
+  const mode = params.mode;
+  const isCustomPrompt = mode === 'custom_prompt';
+  const isExistingAgent = mode === 'existing_agent';
+  const isExistingWithSupplementary = mode === 'existing_with_supplementary';
+
+  // Camada 2: Agente publicado (somente em modos com agente; NUNCA em custom_prompt)
+  const allowAgentPrompt = !mode || isExistingAgent || isExistingWithSupplementary;
+  const agentPrompt = (allowAgentPrompt && params.agentSystemPrompt ? params.agentSystemPrompt : '').trim();
   if (agentPrompt) {
     parts.push(`## Instruções do Agente\n${agentPrompt}`);
   }
 
-  // Camada 3: Instrução complementar do Node
-  const supplementary = (params.supplementaryInstruction ?? '').trim();
+  // Camada 3: Instrução complementar do Node (somente em existing_with_supplementary)
+  const allowSupplementary = !mode || isExistingWithSupplementary;
+  const supplementary = (allowSupplementary && params.supplementaryInstruction ? params.supplementaryInstruction : '').trim();
   if (supplementary) {
     parts.push(`## Diretriz Complementar da Etapa Atual\n${supplementary}`);
   }
 
-  // Camada 4: Objetivo do Node
+  // Camada 4: Objetivo do Node (permitido em todos os modos)
   const objective = (params.objective ?? '').trim();
   if (objective) {
     parts.push(`## Objetivo do Nó\n${objective}`);
   }
 
-  const customPrompt = (params.customPrompt ?? '').trim();
+  // Instrução específica do Nó / prompt customizado (somente em custom_prompt)
+  const allowCustomPrompt = !mode || isCustomPrompt;
+  const customPrompt = (allowCustomPrompt && params.customPrompt ? params.customPrompt : '').trim();
   if (customPrompt) {
     parts.push(`## Instrução Específica do Nó\n${customPrompt}`);
   }
@@ -636,11 +646,13 @@ export async function executeAiNodeTurn(
   });
 
   const composedSystemPrompt = composeAiNodeSystemPrompt({
+    mode: nodeConfig.mode,
     platformCompliance: deps.platformCompliance,
-    agentSystemPrompt: agentConfig?.systemPrompt,
-    supplementaryInstruction: nodeConfig.supplementary_instruction,
+    agentSystemPrompt: nodeConfig.mode !== 'custom_prompt' ? agentConfig?.systemPrompt : undefined,
+    supplementaryInstruction:
+      nodeConfig.mode === 'existing_with_supplementary' ? nodeConfig.supplementary_instruction : undefined,
     objective: nodeConfig.objective,
-    customPrompt: nodeConfig.custom_prompt,
+    customPrompt: nodeConfig.mode === 'custom_prompt' ? nodeConfig.custom_prompt : undefined,
     completionCondition: nodeConfig.completion_condition,
     systemFacts,
     structuredOutputDirective: buildAiNodeStructuredOutputDirective(),
