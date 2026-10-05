@@ -44,12 +44,19 @@ interface Props {
   canWrite: boolean;
 }
 
-function formatDate(iso: string, idioma: string): string {
-  return new Date(iso).toLocaleDateString(idioma, {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-  });
+function formatDate(iso?: string | null, idioma?: string): string {
+  if (!iso) return "—";
+  try {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return "—";
+    return d.toLocaleDateString(idioma || "pt-BR", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+    });
+  } catch {
+    return "—";
+  }
 }
 
 export function FlowsList({ initialData, canWrite }: Props) {
@@ -68,7 +75,7 @@ export function FlowsList({ initialData, canWrite }: Props) {
   const restoreMutation = useRestoreFollowupFlow();
   const duplicateMutation = useDuplicateFollowupFlow();
 
-  const allFlows = data ?? [];
+  const allFlows = Array.isArray(data) ? data : [];
   const activeFlows = allFlows.filter((f) => !f.archived_at);
   const archivedFlows = allFlows.filter((f) => Boolean(f.archived_at));
 
@@ -192,9 +199,9 @@ export function FlowsList({ initialData, canWrite }: Props) {
                       </div>
 
                       <div className="rounded border border-dashed border-border p-2 text-xs text-text-muted">
-                        <p>
+                        <p suppressHydrationWarning>
                           {t("Arquivado em")}{" "}
-                          <strong>{formatDate(flow.archived_at!, tagDoIdioma)}</strong>
+                          <strong suppressHydrationWarning>{formatDate(flow.archived_at, tagDoIdioma)}</strong>
                         </p>
                         <p className="mt-0.5 text-text-secondary">
                           {t("Novas inscrições estão pausadas. Restaure para editar.")}
@@ -233,8 +240,9 @@ export function FlowsList({ initialData, canWrite }: Props) {
                           <dd className="font-mono">{flow.handoff_policy}</dd>
                         </div>
                       </dl>
-                      <p className="mt-auto pt-2 text-xs text-text-muted">
-                        Atualizado em {formatDate(flow.updated_at, tagDoIdioma)}
+                      <p suppressHydrationWarning className="mt-auto pt-2 text-xs text-text-muted">
+                        {t("Atualizado em")}{" "}
+                        <span suppressHydrationWarning>{formatDate(flow.updated_at, tagDoIdioma)}</span>
                       </p>
                     </Link>
                   )}

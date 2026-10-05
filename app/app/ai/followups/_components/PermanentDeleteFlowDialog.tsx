@@ -41,7 +41,7 @@ export function PermanentDeleteFlowDialog({
   );
   const deleteMutation = usePermanentDeleteFollowupFlow();
 
-  const isConfirmed = typedName.trim() === flowName.trim();
+  const isConfirmed = typedName.trim() === (flowName ?? "").trim();
   const hasActive = (summary?.active_enrollments ?? 0) > 0;
   const hasAgents = (summary?.agent_references ?? 0) > 0;
   const hasRunningJobs = (summary?.running_jobs ?? 0) > 0;

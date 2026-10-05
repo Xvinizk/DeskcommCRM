@@ -38,7 +38,7 @@ export function useFollowupFlows(opts?: { initialData?: FollowupFlowPointerRow[]
     queryFn: async () => {
       try {
         const res = await apiClient.get<ListResponse>("/api/v1/ai/followup-flows");
-        return res.data;
+        return Array.isArray(res.data) ? res.data : [];
       } catch (err) {
         showApiError(err);
         throw err;
