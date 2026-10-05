@@ -7864,6 +7864,15 @@ export const DICIONARIO: Traducoes = {
   "Este caso já foi respondido por outra pessoa.": { es: "Este caso ya fue respondido por otra persona." },
   "Este número já tem um roteador ativo.": { es: "Este número ya tiene un router activo." },
   "Este retorno já aconteceu ou já foi cancelado.": { es: "Este seguimiento ya ocurrió o ya fue cancelado." },
+  "Este fluxo possui contatos em execução. Cancele as execuções antes de excluí-lo.": {
+    es: "Este flujo tiene contactos en ejecución. Cancela las ejecuciones antes de eliminarlo.",
+  },
+  "Este fluxo possui histórico de execução e não pode ser excluído permanentemente.": {
+    es: "Este flujo tiene historial de ejecución y no puede eliminarse permanentemente.",
+  },
+  "Este fluxo está vinculado a um agente ativo. Desvincule-o do agente antes de excluí-lo.": {
+    es: "Este flujo está vinculado a un agente activo. Desvincúlalo del agente antes de eliminarlo.",
+  },
   "Faça login.": { es: "Inicia sesión." },
   "Faça login para continuar.": { es: "Inicia sesión para continuar." },
   "Falha ao atualizar o aviso.": { es: "Fallo al actualizar el aviso." },

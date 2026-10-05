@@ -16,6 +16,8 @@ import { ok, fail } from "@/lib/api/wrappers";
 import { audit } from "@/lib/audit";
 import { requireRole } from "@/lib/auth/require-role";
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
+import { deleteFollowupFlow } from "@/lib/followup/delete";
 import { patchFollowupFlowSchema } from "@/lib/followup/api-schemas";
 import { traduzir } from "@/lib/i18n/dicionario";
 
@@ -184,45 +186,21 @@ export async function DELETE(_req: NextRequest, ctx: RouteCtx): Promise<Response
   const t = (texto: string) => traduzir(texto, authz.user.idioma);
   const { user, org: activeOrg } = authz;
 
-  const supabase = await createClient();
-  const { data: existing, error: fetchErr } = await supabase
-    .from("followup_flow_pointers")
-    .select("id")
-    .eq("id", id)
-    .eq("organization_id", activeOrg.orgId)
-    .maybeSingle();
-  if (fetchErr) return fail("internal_error", fetchErr.message, 500, { requestId });
-  if (!existing) return fail("not_found", t("Fluxo não encontrado."), 404, { requestId });
-
-  // Enrollment referencia version_id; pointer referencia active_version_id.
-  // Soltar o relógio nessa ordem evita 23503 no Postgres.
-  const { error: enrErr } = await supabase
-    .from("followup_enrollments")
-    .delete()
-    .eq("pointer_id", id)
-    .eq("organization_id", activeOrg.orgId);
-  if (enrErr) return fail("internal_error", enrErr.message, 500, { requestId });
-
-  const { error: unpinErr } = await supabase
-    .from("followup_flow_pointers")
-    .update({ active_version_id: null, updated_at: new Date().toISOString() })
-    .eq("id", id)
-    .eq("organization_id", activeOrg.orgId);
-  if (unpinErr) return fail("internal_error", unpinErr.message, 500, { requestId });
-
-  const { error: verErr } = await supabase
-    .from("followup_flow_versions")
-    .delete()
-    .eq("pointer_id", id)
-    .eq("organization_id", activeOrg.orgId);
-  if (verErr) return fail("internal_error", verErr.message, 500, { requestId });
-
-  const { error: delErr } = await supabase
-    .from("followup_flow_pointers")
-    .delete()
-    .eq("id", id)
-    .eq("organization_id", activeOrg.orgId);
-  if (delErr) return fail("internal_error", delErr.message, 500, { requestId });
+  const admin = createAdminClient();
+  const res = await deleteFollowupFlow(admin, { orgId: activeOrg.orgId, pointerId: id });
+  if (!res.ok) {
+    if (res.code === "not_found") {
+      return fail("not_found", t("Fluxo não encontrado."), 404, { requestId });
+    }
+    if (
+      res.code === "followup_flow_active_enrollments" ||
+      res.code === "followup_flow_has_history" ||
+      res.code === "followup_flow_in_use_by_agent"
+    ) {
+      return fail(res.code, t(res.message), 409, { requestId });
+    }
+    return fail("internal_error", res.message, 500, { requestId });
+  }
 
   void audit({
     action: "followup_flow.deleted",

@@ -16,6 +16,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { fail } from "@/lib/api/wrappers";
 import { ROLE_RANK, type AuthUser, type Role } from "@/lib/auth/types";
 import type { FlowGraph, FlowNode, FlowEdge } from "@/lib/followup/graph-schema";
+import type * as SupportModule from "@/lib/impersonate/support";
 
 vi.mock("@/lib/auth/require-role", () => ({ requireRole: vi.fn() }));
 vi.mock("@/lib/supabase/server", () => ({ createClient: vi.fn() }));
@@ -60,15 +61,21 @@ const INVALID_GRAPH: FlowGraph = {
 
 type Row = Record<string, unknown>;
 
-function makeDb(pointers: Row[], versions: Row[], stages: Row[] = []) {
+function makeDb(
+  pointers: Row[],
+  versions: Row[],
+  stages: Row[] = [],
+  enrollments: Row[] = [],
+  agents: Row[] = [],
+  shares: Row[] = [],
+) {
   const tables: Record<string, Row[]> = {
     followup_flow_pointers: pointers,
     followup_flow_versions: versions,
-    followup_enrollments: [],
-    // O publish do gatilho de etapa LÊ a etapa antes de deixar publicar (etapa
-    // apagada/arquivada = fluxo `active` que nunca matricula ninguém). Sem esta
-    // tabela no mock, o caso positivo do `stage_change` não teria como existir.
+    followup_enrollments: enrollments,
     crm_stages: stages,
+    ai_agent_versions: agents,
+    followup_flow_shares: shares,
   };
 
   function builder(table: string) {
@@ -203,9 +210,64 @@ function makeDb(pointers: Row[], versions: Row[], stages: Row[] = []) {
     return b;
   }
 
-  /** Mirrors fn_publish_followup_flow_version (migration 0055): insert version
-   *  (with pointer_id) + activate pointer, atomically, or 'pointer_not_found'. */
+  /** Mirrors fn_publish_followup_flow_version e fn_delete_followup_flow */
   async function rpc(name: string, params: Record<string, unknown>) {
+    if (name === "fn_delete_followup_flow") {
+      const pointer = pointers.find((p) => p.id === params.p_pointer);
+      if (!pointer || pointer.organization_id !== params.p_org) {
+        return { data: null, error: { message: "pointer_not_found" } };
+      }
+      const hasActive = (tables.followup_enrollments ?? []).some(
+        (e) =>
+          e.pointer_id === params.p_pointer &&
+          e.organization_id === params.p_org &&
+          ["active", "waiting_reply", "paused_handoff"].includes(String(e.status)),
+      );
+      if (hasActive) {
+        return { data: null, error: { message: "flow_has_active_enrollments" } };
+      }
+      const hasHistory = (tables.followup_enrollments ?? []).some(
+        (e) =>
+          e.pointer_id === params.p_pointer &&
+          e.organization_id === params.p_org &&
+          ["completed", "cancelled", "dead"].includes(String(e.status)),
+      );
+      if (hasHistory) {
+        return { data: null, error: { message: "flow_has_history" } };
+      }
+      const publishedInUse = (tables.ai_agent_versions ?? []).some((v) => {
+        if (v.organization_id !== params.p_org || v.status !== "published") return false;
+        const f = v.followup as { enabled?: boolean; flow_pointer_ids?: string[] } | null;
+        return (
+          f?.enabled === true &&
+          Array.isArray(f.flow_pointer_ids) &&
+          f.flow_pointer_ids.includes(String(params.p_pointer))
+        );
+      });
+      if (publishedInUse) {
+        return { data: null, error: { message: "flow_in_use_by_agent" } };
+      }
+      for (const v of tables.ai_agent_versions ?? []) {
+        if (v.organization_id === params.p_org && v.status === "draft") {
+          const f = v.followup as { enabled?: boolean; flow_pointer_ids?: string[] } | null;
+          if (f && Array.isArray(f.flow_pointer_ids)) {
+            f.flow_pointer_ids = f.flow_pointer_ids.filter((p) => p !== params.p_pointer);
+          }
+        }
+      }
+      const keptVersions = versions.filter(
+        (v) => !(v.pointer_id === params.p_pointer && v.organization_id === params.p_org),
+      );
+      versions.length = 0;
+      versions.push(...keptVersions);
+
+      const idx = pointers.findIndex(
+        (p) => p.id === params.p_pointer && p.organization_id === params.p_org,
+      );
+      if (idx !== -1) pointers.splice(idx, 1);
+
+      return { data: true, error: null };
+    }
     if (name !== "fn_publish_followup_flow_version") {
       return { data: null, error: { message: `unknown rpc: ${name}` } };
     }
@@ -935,9 +997,13 @@ describe("POST /api/v1/ai/followup-flows/:id/disable", () => {
 
 describe("DELETE /api/v1/ai/followup-flows/:id", () => {
   const P1 = "33333333-3333-4333-8333-333333333333";
+  const V1 = "44444444-4444-4444-8444-444444444444";
+  const AGENT_DRAFT_ID = "66666666-6666-4666-8666-666666666666";
+  const AGENT_PUB_ID = "77777777-7777-4777-8777-777777777777";
+  const OTHER_ORG = "99999999-9999-4999-8999-999999999999";
 
-  it("manager → 200, pointer some, audit emitido", async () => {
-    const db = makeDb([{ id: P1, organization_id: ORG_ID, status: "disabled" }], []);
+  it("1. excluir fluxo draft vazio → 200, pointer some, audit emitido", async () => {
+    const db = makeDb([{ id: P1, organization_id: ORG_ID, status: "draft" }], []);
     session("manager", db);
     const { DELETE } = await import("@/app/api/v1/ai/followup-flows/[id]/route");
     const res = await DELETE(req("DELETE"), ctx(P1));
@@ -949,12 +1015,149 @@ describe("DELETE /api/v1/ai/followup-flows/:id", () => {
     );
   });
 
-  it("pointer inexistente na org → 404", async () => {
+  it("2. excluir fluxo publicado sem enrollments → 200, pointer e versions removidos", async () => {
+    const db = makeDb(
+      [{ id: P1, organization_id: ORG_ID, status: "active", active_version_id: V1 }],
+      [{ id: V1, organization_id: ORG_ID, pointer_id: P1 }],
+    );
+    session("manager", db);
+    const { DELETE } = await import("@/app/api/v1/ai/followup-flows/[id]/route");
+    const res = await DELETE(req("DELETE"), ctx(P1));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { data: { id: string } };
+    expect(body.data.id).toBe(P1);
+  });
+
+  it("3. fluxo com versão ativa → 200, ciclo quebrado e versions apagadas", async () => {
+    const db = makeDb(
+      [{ id: P1, organization_id: ORG_ID, status: "active", active_version_id: V1 }],
+      [{ id: V1, organization_id: ORG_ID, pointer_id: P1 }],
+    );
+    session("manager", db);
+    const { DELETE } = await import("@/app/api/v1/ai/followup-flows/[id]/route");
+    const res = await DELETE(req("DELETE"), ctx(P1));
+    expect(res.status).toBe(200);
+  });
+
+  it("4a. fluxo referenciado por agente em rascunho → 200, limpa ID do rascunho sem deixar órfão", async () => {
+    const draftAgent = {
+      id: AGENT_DRAFT_ID,
+      organization_id: ORG_ID,
+      status: "draft",
+      followup: { enabled: true, flow_pointer_ids: [P1, "other-pointer"] },
+    };
+    const db = makeDb(
+      [{ id: P1, organization_id: ORG_ID, status: "draft" }],
+      [],
+      [],
+      [],
+      [draftAgent],
+    );
+    session("manager", db);
+    const { DELETE } = await import("@/app/api/v1/ai/followup-flows/[id]/route");
+    const res = await DELETE(req("DELETE"), ctx(P1));
+    expect(res.status).toBe(200);
+    expect(draftAgent.followup.flow_pointer_ids).not.toContain(P1);
+    expect(draftAgent.followup.flow_pointer_ids).toContain("other-pointer");
+  });
+
+  it("4b. fluxo em uso por agente publicado ativo → 409 conflict com mensagem amigável", async () => {
+    const pubAgent = {
+      id: AGENT_PUB_ID,
+      organization_id: ORG_ID,
+      status: "published",
+      followup: { enabled: true, flow_pointer_ids: [P1] },
+    };
+    const db = makeDb(
+      [{ id: P1, organization_id: ORG_ID, status: "active", active_version_id: V1 }],
+      [{ id: V1, organization_id: ORG_ID, pointer_id: P1 }],
+      [],
+      [],
+      [pubAgent],
+    );
+    session("manager", db);
+    const { DELETE } = await import("@/app/api/v1/ai/followup-flows/[id]/route");
+    const res = await DELETE(req("DELETE"), ctx(P1));
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("followup_flow_in_use_by_agent");
+    expect(body.error.message).toContain("vinculado a um agente ativo");
+  });
+
+  it("5. fluxo com enrollment completed → 409 conflict histórico preservado", async () => {
+    const db = makeDb(
+      [{ id: P1, organization_id: ORG_ID, status: "active", active_version_id: V1 }],
+      [{ id: V1, organization_id: ORG_ID, pointer_id: P1 }],
+      [],
+      [{ id: "e1", pointer_id: P1, organization_id: ORG_ID, status: "completed" }],
+    );
+    session("manager", db);
+    const { DELETE } = await import("@/app/api/v1/ai/followup-flows/[id]/route");
+    const res = await DELETE(req("DELETE"), ctx(P1));
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("followup_flow_has_history");
+    expect(body.error.message).toContain("histórico de execução");
+  });
+
+  it("6. fluxo com enrollment cancelled → 409 conflict histórico preservado", async () => {
+    const db = makeDb(
+      [{ id: P1, organization_id: ORG_ID, status: "active", active_version_id: V1 }],
+      [{ id: V1, organization_id: ORG_ID, pointer_id: P1 }],
+      [],
+      [{ id: "e1", pointer_id: P1, organization_id: ORG_ID, status: "cancelled" }],
+    );
+    session("manager", db);
+    const { DELETE } = await import("@/app/api/v1/ai/followup-flows/[id]/route");
+    const res = await DELETE(req("DELETE"), ctx(P1));
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("followup_flow_has_history");
+  });
+
+  it("7. fluxo com enrollment active → 409 conflict bloqueia execução ativa", async () => {
+    const db = makeDb(
+      [{ id: P1, organization_id: ORG_ID, status: "active", active_version_id: V1 }],
+      [{ id: V1, organization_id: ORG_ID, pointer_id: P1 }],
+      [],
+      [{ id: "e1", pointer_id: P1, organization_id: ORG_ID, status: "active" }],
+    );
+    session("manager", db);
+    const { DELETE } = await import("@/app/api/v1/ai/followup-flows/[id]/route");
+    const res = await DELETE(req("DELETE"), ctx(P1));
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("followup_flow_active_enrollments");
+    expect(body.error.message).toContain("contatos em execução");
+  });
+
+  it("8. isolamento multi-tenant: org A nunca apaga flow da org B → 404", async () => {
+    const db = makeDb([{ id: P1, organization_id: OTHER_ORG, status: "draft" }], []);
+    session("manager", db);
+    const { DELETE } = await import("@/app/api/v1/ai/followup-flows/[id]/route");
+    const res = await DELETE(req("DELETE"), ctx(P1));
+    expect(res.status).toBe(404);
+  });
+
+  it("9. delete inexistente = 404", async () => {
     const db = makeDb([], []);
     session("manager", db);
     const { DELETE } = await import("@/app/api/v1/ai/followup-flows/[id]/route");
     const res = await DELETE(req("DELETE"), ctx("55555555-5555-4555-8555-555555555555"));
     expect(res.status).toBe(404);
+  });
+
+  it("10. segunda tentativa não gera 500 inesperado (primeira 200, segunda 404)", async () => {
+    const db = makeDb([{ id: P1, organization_id: ORG_ID, status: "draft" }], []);
+    session("manager", db);
+    const { DELETE } = await import("@/app/api/v1/ai/followup-flows/[id]/route");
+    const res1 = await DELETE(req("DELETE"), ctx(P1));
+    expect(res1.status).toBe(200);
+
+    const res2 = await DELETE(req("DELETE"), ctx(P1));
+    expect(res2.status).toBe(404);
+    const body2 = (await res2.json()) as { error: { code: string } };
+    expect(body2.error.code).toBe("not_found");
   });
 
   it("agent (< manager) → 403", async () => {
@@ -966,9 +1169,10 @@ describe("DELETE /api/v1/ai/followup-flows/:id", () => {
   });
 });
 
-// Este teste isola o handler; autoridade de suporte é exercitada na suíte própria.
 vi.mock("@/lib/impersonate/support", async (importOriginal) => ({
-  ...await importOriginal<typeof import("@/lib/impersonate/support")>(),
+  ...await importOriginal<typeof SupportModule>(),
   requireSupportWrite: vi.fn(async () => null),
   authenticatedSessionId: vi.fn(async () => "f2200000-0000-4000-8000-000000000099"),
 }));
+
+
