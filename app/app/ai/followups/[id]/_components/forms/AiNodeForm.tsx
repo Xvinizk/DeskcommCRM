@@ -45,9 +45,11 @@ interface Props {
   config: ConfigOf<"ai_node">;
   onChange: (c: ConfigOf<"ai_node">) => void;
   ramosLigados?: string[];
+  fieldErrors?: Record<string, string>;
+  activeErrorField?: string | null;
 }
 
-export function AiNodeForm({ config, onChange }: Props) {
+export function AiNodeForm({ config, onChange, ramosLigados, fieldErrors }: Props) {
   const t = useT();
   const { data: agents = [], isLoading: isLoadingAgents } = useAgentsList();
   const { etapas } = useEtapasDoFluxo();
@@ -222,6 +224,12 @@ export function AiNodeForm({ config, onChange }: Props) {
       agentError = t("Selecione uma versão válida.");
     }
   }
+  agentError =
+    agentError ||
+    fieldErrors?.["config.agent_binding.agent_id"] ||
+    fieldErrors?.["config.agent_binding"] ||
+    fieldErrors?.["agent_id"] ||
+    null;
 
   return (
     <div className="space-y-6" data-testid="ai-node-form">

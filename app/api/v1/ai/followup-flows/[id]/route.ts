@@ -19,6 +19,10 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { deleteFollowupFlow } from "@/lib/followup/delete";
 import { patchFollowupFlowSchema } from "@/lib/followup/api-schemas";
+import {
+  zodErrorToFlowIssues,
+  formatFlowIssuesToastMessage,
+} from "@/lib/followup/validation-contract";
 import { traduzir } from "@/lib/i18n/dicionario";
 
 export const dynamic = "force-dynamic";
@@ -110,9 +114,19 @@ export async function PATCH(req: NextRequest, ctx: RouteCtx): Promise<Response> 
 
   const parsed = patchFollowupFlowSchema.safeParse(raw);
   if (!parsed.success) {
-    return fail("validation_failed", t("Campos inválidos."), 422, {
+    const issues = zodErrorToFlowIssues(parsed.error, raw);
+    const rawNodes = Array.isArray((raw as { draft_graph?: { nodes?: Array<{ id: string; label?: string }> } })?.draft_graph?.nodes)
+      ? (raw as { draft_graph?: { nodes?: Array<{ id: string; label?: string }> } }).draft_graph!.nodes!
+      : [];
+    const nodeLabels = new Map<string, string>(rawNodes.map((n) => [n.id, n.label ?? ""]));
+    const toastMsg = formatFlowIssuesToastMessage(issues, nodeLabels);
+    return fail("validation_failed", t(toastMsg), 422, {
       requestId,
-      details: parsed.error.flatten(),
+      details: {
+        issues,
+        errors: issues,
+        ...parsed.error.flatten(),
+      },
     });
   }
 

@@ -33,6 +33,8 @@ interface Props {
       | ConfigOf<"message_video">
       | ConfigOf<"message_audio">
   ) => void;
+  fieldErrors?: Record<string, string>;
+  activeErrorField?: string | null;
 }
 
 const MAX_BYTES = 50 * 1024 * 1024; // 50MB
@@ -43,7 +45,7 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export function MessageMediaForm({ type, config, onChange }: Props) {
+export function MessageMediaForm({ type, config, onChange, fieldErrors }: Props) {
   const t = useT();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -310,17 +312,20 @@ export function MessageMediaForm({ type, config, onChange }: Props) {
         </Label>
 
         {!hasMedia ? (
-          <div
-            onDragOver={handleDragOver}
-            onDragLeave={handleDragLeave}
-            onDrop={handleDrop}
-            onClick={() => !isUploading && fileInputRef.current?.click()}
-            className={`flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed p-6 text-center transition-colors cursor-pointer ${
-              isDragging
-                ? "border-primary bg-primary/5"
-                : "border-border hover:border-muted-fg/50 bg-surface-raised/40"
-            } ${isUploading ? "pointer-events-none opacity-60" : ""}`}
-          >
+          <>
+            <div
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+              onClick={() => !isUploading && fileInputRef.current?.click()}
+              className={`flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed p-6 text-center transition-colors cursor-pointer ${
+                error || fieldErrors?.["config.media_url"] || fieldErrors?.["config.media_storage_path"] || fieldErrors?.["config"]
+                  ? "border-error bg-error/5 ring-1 ring-error"
+                  : isDragging
+                    ? "border-primary bg-primary/5"
+                    : "border-border hover:border-muted-fg/50 bg-surface-raised/40"
+              } ${isUploading ? "pointer-events-none opacity-60" : ""}`}
+            >
             {isUploading ? (
               <div className="flex flex-col items-center gap-2">
                 <CircleNotch className="h-8 w-8 animate-spin text-primary" />
@@ -362,7 +367,13 @@ export function MessageMediaForm({ type, config, onChange }: Props) {
               </>
             )}
           </div>
-        ) : (
+          {(error || fieldErrors?.["config.media_url"] || fieldErrors?.["config.media_storage_path"] || fieldErrors?.["config"]) && (
+            <p className="text-xs text-error-fg" data-testid="field-error-media">
+              {error || fieldErrors?.["config.media_url"] || fieldErrors?.["config.media_storage_path"] || fieldErrors?.["config"]}
+            </p>
+          )}
+        </>
+      ) : (
           <div className="rounded-lg border border-border bg-surface-raised p-3 space-y-3">
             {/* Visualização de Prévia */}
             {type === "message_image" && (

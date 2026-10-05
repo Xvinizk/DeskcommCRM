@@ -25,6 +25,7 @@ import {
   Copy,
   Trash,
   PencilSimple,
+  LinkSimple,
 } from "@/lib/ui/icons";
 import {
   useFollowupFlows,
@@ -37,6 +38,7 @@ import { FlowStatusBadge } from "./FlowStatusBadge";
 import { ModelosDialog } from "./ModelosDialog";
 import { NewFlowDialog } from "./NewFlowDialog";
 import { ImportFlowJsonDialog } from "../[id]/_components/ImportFlowJsonDialog";
+import { ImportFlowLinkDialog } from "./ImportFlowLinkDialog";
 import { PermanentDeleteFlowDialog } from "./PermanentDeleteFlowDialog";
 
 interface Props {
@@ -68,6 +70,7 @@ export function FlowsList({ initialData, canWrite }: Props) {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [modelosOpen, setModelosOpen] = useState(false);
   const [importJsonOpen, setImportJsonOpen] = useState(false);
+  const [importLinkOpen, setImportLinkOpen] = useState(false);
 
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
 
@@ -99,6 +102,17 @@ export function FlowsList({ initialData, canWrite }: Props) {
     </Button>
   );
 
+  const importLinkButton = (
+    <Button
+      onClick={() => setImportLinkOpen(true)}
+      variant="outline"
+      className="w-full sm:w-auto"
+      data-testid="btn-import-link"
+    >
+      <LinkSimple size={14} aria-hidden className="mr-2" /> {t("Importar por link")}
+    </Button>
+  );
+
   const dialogos = canWrite && (
     <>
       <NewFlowDialog open={dialogOpen} onOpenChange={setDialogOpen} />
@@ -108,6 +122,7 @@ export function FlowsList({ initialData, canWrite }: Props) {
         nomesExistentes={allFlows.map((f) => f.name)}
       />
       <ImportFlowJsonDialog open={importJsonOpen} onOpenChange={setImportJsonOpen} />
+      <ImportFlowLinkDialog open={importLinkOpen} onOpenChange={setImportLinkOpen} />
       {deleteTarget && (
         <PermanentDeleteFlowDialog
           flowId={deleteTarget.id}
@@ -155,6 +170,7 @@ export function FlowsList({ initialData, canWrite }: Props) {
             {modelosButton}
             {newFlowButton}
             {importJsonButton}
+            {importLinkButton}
           </div>
         )}
       </div>
