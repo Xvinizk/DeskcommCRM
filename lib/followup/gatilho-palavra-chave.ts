@@ -105,6 +105,7 @@ export async function avaliarGatilhoPalavraChave(
   type QueryBuilder = {
     eq?: (col: string, val: unknown) => QueryBuilder;
     not?: (col: string, op: string, val: unknown) => QueryBuilder;
+    is?: (col: string, val: unknown) => QueryBuilder;
     then?: (resolve: (val: unknown) => void) => void;
   };
 
@@ -127,6 +128,9 @@ export async function avaliarGatilhoPalavraChave(
   }
   if (typeof query?.not === "function") {
     query = query.not("active_version_id", "is", null);
+  }
+  if (typeof query?.is === "function") {
+    query = query.is("archived_at", null);
   }
 
   const { data: rawPointers, error: fetchErr } = ((await (query as unknown as Promise<unknown>)) as {

@@ -58,12 +58,21 @@ export async function enrollFollowupFlow(
 
   const { data: pointer, error: pointerErr } = await supabase
     .from("followup_flow_pointers")
-    .select("id, name, status, active_version_id")
+    .select("id, name, status, active_version_id, archived_at")
     .eq("organization_id", organizationId)
     .eq("id", pointerId)
     .maybeSingle();
   if (pointerErr) return { ok: false, code: "internal_error", message: pointerErr.message, status: 500 };
   if (!pointer) return { ok: false, code: "not_found", message: "Fluxo não encontrado.", status: 404 };
+
+  if (pointer.archived_at) {
+    return {
+      ok: false,
+      code: "followup_flow_archived",
+      message: "Fluxo arquivado não aceita novas inscrições.",
+      status: 422,
+    };
+  }
 
   if (pointer.status !== "active" || !pointer.active_version_id) {
     return {

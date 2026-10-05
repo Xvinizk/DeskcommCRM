@@ -11175,7 +11175,41 @@ export const DICIONARIO: Traducoes = {
 
   // ConversationHeader
   "Disparar um fluxo de automação ou follow-up para este contato": { es: "Disparar un flujo de automatización o seguimiento para este contacto" },
+
+  // Follow-up Flows — Arquivar e Excluir Permanentemente
+  "Fluxo arquivado.": { es: "Flujo archivado." },
+  "Fluxo restaurado.": { es: "Flujo restaurado." },
+  "Fluxo excluído permanentemente.": { es: "Flujo eliminado permanentemente." },
+  "Este fluxo possui contatos em execução. Cancele essas execuções antes de excluí-lo.": {
+    es: "Este flujo tiene contactos en ejecución. Cancele estas ejecuciones antes de eliminarlo.",
+  },
+  "Este fluxo possui contatos em execução. Cancele essas execuções antes de excluí-lo permanentemente.": {
+    es: "Este flujo tiene contactos en ejecución. Cancele estas ejecuciones antes de eliminarlo permanentemente.",
+  },
+  "Este fluxo possui histórico de execução e não pode ser excluído diretamente. Use a exclusão permanente.": {
+    es: "Este flujo tiene historial de ejecución y no se puede eliminar directamente. Utilice la eliminación permanente.",
+  },
+  "Este fluxo está sendo usado por um agente publicado. Remova o fluxo do agente antes de excluí-lo.": {
+    es: "Este flujo está siendo utilizado por un agente publicado. Elimine el flujo del agente antes de eliminarlo.",
+  },
+  "Existem tarefas em execução associadas a este fluxo no momento. Aguarde a conclusão antes de excluí-lo.": {
+    es: "Hay tareas en ejecución asociadas a este flujo en este momento. Espere a que finalicen antes de eliminarlo.",
+  },
+  "Existem tarefas em execução associadas a este fluxo no momento. Aguarde a conclusão antes de excluí-lo permanentemente.": {
+    es: "Hay tareas en ejecución asociadas a este flujo en este momento. Espere a que finalicen antes de eliminarlo permanentemente.",
+  },
+  "O nome digitado não confere exatamente com o nome do fluxo.": {
+    es: "El nombre ingresado no coincide exactamente con el nombre del flujo.",
+  },
+  "Fluxo arquivado não aceita novas inscrições.": {
+    es: "El flujo archivado no acepta nuevas inscripciones.",
+  },
+  "Excluir permanentemente": { es: "Eliminar permanentemente" },
+  "Arquivados": { es: "Archivados" },
+  "Ativos": { es: "Activos" },
+  "Arquivado em": { es: "Archivado el" },
 };
+
 
 /**
  * Traduz, ou devolve o próprio texto.

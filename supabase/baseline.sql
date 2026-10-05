@@ -36377,101 +36377,228 @@ alter table public.followup_enrollments
 
 comment on column public.followup_enrollments.ai_node_session is
   'Estado transiente de execução do nó IA (turn_count, last_inbound_at, agent_id, etc.). Fonte da verdade canônica do nó no enrollment.';
--- 0387: Exclusão segura e atômica de fluxos de follow-up (Pointers, Versões, Compartilhamento)
-create or replace function public.fn_delete_followup_flow(
+-- 0387/0388: Follow-up flows: suporte a arquivamento e exclusão permanente transacional
+alter table public.followup_flow_pointers
+  add column if not exists archived_at timestamptz;
+
+create index if not exists idx_followup_flow_pointers_archived
+  on public.followup_flow_pointers (organization_id, archived_at);
+
+create or replace function public.fn_followup_flow_deletion_summary(
   p_org uuid,
   p_pointer uuid
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_name text;
+  v_versions int := 0;
+  v_active int := 0;
+  v_completed int := 0;
+  v_cancelled int := 0;
+  v_other int := 0;
+  v_events int := 0;
+  v_agents int := 0;
+  v_running_jobs int := 0;
+  v_pending_jobs int := 0;
+begin
+  select name into v_name
+  from public.followup_flow_pointers
+  where id = p_pointer and organization_id = p_org;
+
+  if not found then
+    return null;
+  end if;
+
+  select count(*) into v_versions
+  from public.followup_flow_versions
+  where organization_id = p_org and pointer_id = p_pointer;
+
+  select
+    count(*) filter (where status in ('active', 'waiting_reply', 'dormente', 'paused_handoff', 'paused_manual')),
+    count(*) filter (where status = 'completed'),
+    count(*) filter (where status = 'cancelled'),
+    count(*) filter (where status not in ('active', 'waiting_reply', 'dormente', 'paused_handoff', 'paused_manual', 'completed', 'cancelled'))
+  into v_active, v_completed, v_cancelled, v_other
+  from public.followup_enrollments
+  where organization_id = p_org and pointer_id = p_pointer;
+
+  select count(*) into v_events
+  from public.followup_enrollment_events fee
+  join public.followup_enrollments fe on fe.id = fee.enrollment_id
+  where fe.organization_id = p_org and fe.pointer_id = p_pointer;
+
+  select count(*) into v_agents
+  from public.ai_agents a
+  join public.ai_agent_versions v on v.id = a.published_version_id
+  where a.organization_id = p_org
+    and a.archived_at is null
+    and (
+      v.followup->'flow_pointer_ids' @> to_jsonb(p_pointer::text)
+      or v.followup->>'flow_pointer_id' = p_pointer::text
+    );
+
+  select
+    count(*) filter (where status = 'running' or (locked_at is not null and locked_at > now() - interval '5 minutes')),
+    count(*) filter (where status = 'pending')
+  into v_running_jobs, v_pending_jobs
+  from public.job_queue
+  where organization_id = p_org
+    and (
+      payload->>'pointer_id' = p_pointer::text
+      or payload->>'enrollment_id' in (
+        select id::text from public.followup_enrollments where pointer_id = p_pointer and organization_id = p_org
+      )
+    );
+
+  return jsonb_build_object(
+    'flow_name', v_name,
+    'versions_count', v_versions,
+    'active_enrollments', v_active,
+    'completed_enrollments', v_completed,
+    'cancelled_enrollments', v_cancelled,
+    'other_historical_enrollments', v_other,
+    'total_events_count', v_events,
+    'agent_references', v_agents,
+    'running_jobs', v_running_jobs,
+    'pending_jobs', v_pending_jobs,
+    'can_delete', (v_active = 0 and v_agents = 0 and v_running_jobs = 0)
+  );
+end;
+$$;
+
+revoke all on function public.fn_followup_flow_deletion_summary(uuid, uuid) from public, anon, authenticated;
+grant execute on function public.fn_followup_flow_deletion_summary(uuid, uuid) to service_role;
+
+drop function if exists public.fn_delete_followup_flow(uuid, uuid);
+
+create or replace function public.fn_delete_followup_flow(
+  p_org uuid,
+  p_pointer uuid,
+  p_purge_history boolean default false
 )
 returns boolean
 language plpgsql
 security definer
-set search_path = public
+set search_path = public, pg_temp
 as $$
 declare
-  v_pointer record;
-  v_has_active_enrollments boolean;
-  v_has_history boolean;
-  v_in_use_by_published_agent boolean;
+  v_active_count int;
+  v_running_jobs int;
 begin
-  select id, organization_id, active_version_id
-    into v_pointer
-  from public.followup_flow_pointers
-  where id = p_pointer and organization_id = p_org
-  for update;
-
-  if not found then
-    raise exception 'pointer_not_found' using errcode = 'P0001';
+  if not exists (
+    select 1
+    from public.followup_flow_pointers
+    where id = p_pointer and organization_id = p_org
+  ) then
+    raise exception 'pointer_not_found' using errcode = 'P0002';
   end if;
 
-  -- 1. Verifica contatos em execução
-  select exists (
-    select 1 from public.followup_enrollments
-    where pointer_id = p_pointer
-      and organization_id = p_org
-      and status in ('active', 'waiting_reply', 'paused_handoff')
-  ) into v_has_active_enrollments;
+  select count(*) into v_active_count
+  from public.followup_enrollments
+  where organization_id = p_org
+    and pointer_id = p_pointer
+    and status in ('active', 'waiting_reply', 'dormente', 'paused_handoff', 'paused_manual');
 
-  if v_has_active_enrollments then
-    raise exception 'flow_has_active_enrollments' using errcode = 'P0002';
+  if v_active_count > 0 then
+    raise exception 'flow_has_active_enrollments' using errcode = 'P0001';
   end if;
 
-  -- 2. Verifica histórico de execuções finalizadas
-  select exists (
-    select 1 from public.followup_enrollments
-    where pointer_id = p_pointer
-      and organization_id = p_org
-      and status in ('completed', 'cancelled', 'dead')
-  ) into v_has_history;
-
-  if v_has_history then
-    raise exception 'flow_has_history' using errcode = 'P0003';
+  if exists (
+    select 1
+    from public.ai_agents a
+    join public.ai_agent_versions v on v.id = a.published_version_id
+    where a.organization_id = p_org
+      and a.archived_at is null
+      and (
+        v.followup->'flow_pointer_ids' @> to_jsonb(p_pointer::text)
+        or v.followup->>'flow_pointer_id' = p_pointer::text
+      )
+  ) then
+    raise exception 'flow_in_use_by_agent' using errcode = 'P0003';
   end if;
 
-  -- 3. Verifica se algum agente publicado usa este fluxo
-  select exists (
-    select 1 from public.ai_agent_versions
+  if not p_purge_history then
+    if exists (
+      select 1
+      from public.followup_enrollments
+      where organization_id = p_org and pointer_id = p_pointer
+    ) then
+      raise exception 'flow_has_history' using errcode = 'P0004';
+    end if;
+  else
+    select count(*) into v_running_jobs
+    from public.job_queue
     where organization_id = p_org
-      and status = 'published'
-      and (followup->'enabled')::boolean = true
-      and followup->'flow_pointer_ids' ? p_pointer::text
-  ) into v_in_use_by_published_agent;
+      and (status = 'running' or (locked_at is not null and locked_at > now() - interval '5 minutes'))
+      and (
+        payload->>'pointer_id' = p_pointer::text
+        or payload->>'enrollment_id' in (
+          select id::text from public.followup_enrollments where pointer_id = p_pointer and organization_id = p_org
+        )
+      );
 
-  if v_in_use_by_published_agent then
-    raise exception 'flow_in_use_by_agent' using errcode = 'P0004';
+    if v_running_jobs > 0 then
+      raise exception 'flow_jobs_in_progress' using errcode = 'P0005';
+    end if;
+
+    update public.job_queue
+    set status = 'dead',
+        last_error = 'flow_permanently_deleted'
+    where organization_id = p_org
+      and status = 'pending'
+      and (
+        payload->>'pointer_id' = p_pointer::text
+        or payload->>'enrollment_id' in (
+          select id::text from public.followup_enrollments where pointer_id = p_pointer and organization_id = p_org
+        )
+      );
   end if;
 
-  -- 4. Limpa referências em rascunhos de agentes da organização (status='draft' é mutável)
   update public.ai_agent_versions
   set followup = jsonb_set(
     followup,
     '{flow_pointer_ids}',
-    coalesce(
-      (
-        select jsonb_agg(elem)
-        from jsonb_array_elements(followup->'flow_pointer_ids') elem
-        where elem #>> '{}' <> p_pointer::text
-      ),
-      '[]'::jsonb
+    (
+      select coalesce(jsonb_agg(elem), '[]'::jsonb)
+      from jsonb_array_elements_text(followup->'flow_pointer_ids') as elem
+      where elem <> p_pointer::text
     )
   )
   where organization_id = p_org
     and status = 'draft'
-    and followup->'flow_pointer_ids' ? p_pointer::text;
+    and (
+      followup->'flow_pointer_ids' @> to_jsonb(p_pointer::text)
+      or followup->>'flow_pointer_id' = p_pointer::text
+    );
 
-  -- 5. Exclui compartilhamentos do pointer
-  delete from public.followup_flow_shares
-  where pointer_id = p_pointer and organization_id = p_org;
+  update public.appointment_recovery_receipts
+  set pointer_id = null,
+      enrollment_id = null
+  where organization_id = p_org
+    and (
+      pointer_id = p_pointer
+      or enrollment_id in (
+        select id from public.followup_enrollments where pointer_id = p_pointer and organization_id = p_org
+      )
+    );
 
-  -- 6. Quebra active_version_id para evitar ciclo de FK
   update public.followup_flow_pointers
   set active_version_id = null
   where id = p_pointer and organization_id = p_org;
 
-  -- 7. Exclui versões do fluxo
+  delete from public.followup_enrollments
+  where pointer_id = p_pointer and organization_id = p_org;
+
   delete from public.followup_flow_versions
   where pointer_id = p_pointer and organization_id = p_org;
 
-  -- 8. Exclui o pointer
+  delete from public.followup_flow_shares
+  where pointer_id = p_pointer;
+
   delete from public.followup_flow_pointers
   where id = p_pointer and organization_id = p_org;
 
@@ -36479,8 +36606,9 @@ begin
 end;
 $$;
 
-revoke all on function public.fn_delete_followup_flow(uuid, uuid) from public, anon, authenticated;
-grant execute on function public.fn_delete_followup_flow(uuid, uuid) to service_role;
+revoke all on function public.fn_delete_followup_flow(uuid, uuid, boolean) from public, anon, authenticated;
+grant execute on function public.fn_delete_followup_flow(uuid, uuid, boolean) to service_role;
+
 
 
 -- ---- módulos instalados são reaplicados, depois de toda tabela do núcleo (migration 0340) ----

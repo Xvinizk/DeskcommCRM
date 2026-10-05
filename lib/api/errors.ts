@@ -87,6 +87,9 @@ export const ApiErrorCodes = {
   followup_flow_active_enrollments: "followup_flow_active_enrollments",
   followup_flow_has_history: "followup_flow_has_history",
   followup_flow_in_use_by_agent: "followup_flow_in_use_by_agent",
+  followup_flow_jobs_in_progress: "followup_flow_jobs_in_progress",
+  followup_flow_archived: "followup_flow_archived",
+  confirmation_mismatch: "confirmation_mismatch",
 
   // 422 — semântica
   unprocessable_entity: "unprocessable_entity",

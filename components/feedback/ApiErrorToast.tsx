@@ -128,11 +128,14 @@ const COPY: Record<string, { variant: Variant; msg?: string }> = {
   // frase genérica alcança.
   credential_in_use: { variant: "warning" },
 
-  // ---- Follow-up (exclusão segura de fluxo) ----
+  // ---- Follow-up (exclusão segura e permanente de fluxo) ----
   // Recusas rotineiras informativas: a rota envia o motivo específico interpolado.
   followup_flow_active_enrollments: { variant: "warning" },
   followup_flow_has_history: { variant: "warning" },
   followup_flow_in_use_by_agent: { variant: "warning" },
+  followup_flow_jobs_in_progress: { variant: "warning" },
+  followup_flow_archived: { variant: "warning" },
+  confirmation_mismatch: { variant: "warning" },
 };
 
 /**

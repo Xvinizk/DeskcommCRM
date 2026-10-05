@@ -239,7 +239,9 @@ export function createSupabaseGatilhoEtapaDb(admin: SupabaseClient): GatilhoEtap
         .select("id, organization_id, active_version_id, trigger_config")
         .eq("organization_id", orgId)
         .eq("status", "active")
-        .not("active_version_id", "is", null);
+        .not("active_version_id", "is", null)
+        .is("archived_at", null);
+
       if (error) throw new Error(error.message);
 
       const pointers: PointerDeEtapa[] = [];
