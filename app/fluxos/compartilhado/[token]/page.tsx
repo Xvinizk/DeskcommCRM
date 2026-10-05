@@ -1,11 +1,7 @@
 import type { Metadata } from "next";
-import Link from "next/link";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
-import { Card } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { XCircle } from "@/lib/ui/icons";
-import { SharedFlowClient } from "./_components/SharedFlowClient";
+import { SharedFlowClient, SharedFlowUnavailable } from "./_components/SharedFlowClient";
 import type { SharedFlowSnapshot } from "@/lib/followup/sharing/sanitize";
 
 export const dynamic = "force-dynamic";
@@ -56,28 +52,7 @@ export default async function SharedFlowPage({ params }: Props) {
     .maybeSingle();
 
   if (!share) {
-    return (
-      <div className="flex min-h-screen flex-col items-center justify-center p-4">
-        <Card className="max-w-md p-8 text-center space-y-4 border border-border shadow-xl">
-          <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-error/10 text-error">
-            <XCircle size={32} weight="fill" />
-          </div>
-          <div>
-            <h1 className="text-xl font-bold text-text">Fluxo Indisponível</h1>
-            <p className="mt-1 text-sm text-text-muted">
-              Este link de compartilhamento foi desativado, expirou ou não existe.
-            </p>
-          </div>
-          <div className="pt-2">
-            <Link href="/app">
-              <Button variant="outline" className="w-full">
-                Ir para o CRM
-              </Button>
-            </Link>
-          </div>
-        </Card>
-      </div>
-    );
+    return <SharedFlowUnavailable />;
   }
 
   const snapshot = share.snapshot as unknown as SharedFlowSnapshot;

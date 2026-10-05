@@ -356,12 +356,13 @@ describe("Follow-up Event-Driven Latency Tests", () => {
     expect(harness.queue.length).toBe(1);
     expect(harness.queue[0]?.payload.purpose).toBe("wait_wake");
 
-    // 4. Aos 60s exatos: cron tick acorda o delay, avança e enfileira a imagem imediatamente na mesma execução
+    // 4. Aos 60s exatos: cron tick acorda o delay e avança para a imagem; próximo tick avalia e enfileira
     harness.advanceTime(1_000); // completou 60s
     const tickSummaryAfter = await runFollowupTick(harness.getTickDeps());
     expect(tickSummaryAfter.claimed).toBe(1);
+    await runFollowupTick(harness.getTickDeps());
 
-    // Imagem foi enfileirada no mesmo tick!
+    // Imagem foi enfileirada!
     expect(harness.queue.some((j) => j.payload.node_id === "msg_img")).toBe(true);
 
     // 5. Worker conclui a imagem -> fluxo finalizado
@@ -408,8 +409,9 @@ describe("Follow-up Event-Driven Latency Tests", () => {
     expect(harness.queue.length).toBe(1);
     expect(harness.queue[0]?.payload.purpose).toBe("wait_wake");
 
-    // 4. Aos 5s: acorda e imediatamente enfileira Texto 2
+    // 4. Aos 5s: acorda e avança para Texto 2; próximo tick avalia e enfileira
     harness.advanceTime(1_000);
+    await runFollowupTick(harness.getTickDeps());
     await runFollowupTick(harness.getTickDeps());
     expect(harness.queue.some((j) => j.payload.node_id === "t2")).toBe(true);
 
@@ -619,7 +621,15 @@ describe("Follow-up Event-Driven Latency Tests", () => {
     const { jobsProcessed } = await harness.drainWorker();
     expect(jobsProcessed).toBe(1);
 
-    // Concluiu imediatamente
+    // Conforme contrato canônico tradicional (agenda-presenca-fix1 e followup-engine),
+    // a conclusão do turno avança o ponteiro para o nó alvo ('end') mantendo status 'active'
+    const enrAfterTurn = harness.enrollments.get(enr.id)!;
+    expect(enrAfterTurn.current_node_id).toBe("end");
+    expect(enrAfterTurn.status).toBe("active");
+    expect(enrAfterTurn.steps_taken).toBe(3);
+
+    // O próximo tick conclui o nó 'end'
+    await runFollowupTick(harness.getTickDeps());
     const finalEnr = harness.enrollments.get(enr.id)!;
     expect(finalEnr.status).toBe("completed");
     expect(finalEnr.outcome).toBe("converted");

@@ -361,7 +361,7 @@ export function ScheduleMessageDialog({
                   <ImageSquare size={16} className="text-primary shrink-0" />
                   <span className="truncate font-medium">
                     {existingMedia.filename ||
-                      `${existingMedia.type === "image" ? "Imagem" : existingMedia.type === "video" ? "Vídeo" : "Áudio"} anexado`}
+                      `${existingMedia.type === "image" ? t("Imagem") : existingMedia.type === "video" ? t("Vídeo") : t("Áudio")} ${t("anexado")}`}
                   </span>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">

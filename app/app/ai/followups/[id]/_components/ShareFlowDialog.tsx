@@ -25,6 +25,8 @@ import {
   MusicNote,
 } from "@/lib/ui/icons";
 import { useT } from "@/hooks/i18n/useT";
+import { useTagDeIdioma } from "@/hooks/i18n/useLocaleDeData";
+import { copyToClipboard } from "@/lib/clipboard";
 
 interface Props {
   flowId: string;
@@ -47,6 +49,7 @@ interface ShareData {
 
 export function ShareFlowDialog({ flowId, flowName, open, onOpenChange }: Props) {
   const t = useT();
+  const tagDeIdioma = useTagDeIdioma();
   const [loading, setLoading] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
   const [shareData, setShareData] = useState<ShareData | null>(null);
@@ -119,7 +122,7 @@ export function ShareFlowDialog({ flowId, flowName, open, onOpenChange }: Props)
 
   const handleCopy = () => {
     if (!shareUrl) return;
-    void navigator.clipboard.writeText(shareUrl);
+    void copyToClipboard(shareUrl);
     setCopied(true);
     toast.success(t("Link copiado para a área de transferência!"));
     setTimeout(() => setCopied(false), 2000);
@@ -158,7 +161,7 @@ export function ShareFlowDialog({ flowId, flowName, open, onOpenChange }: Props)
                 {shareData.snapshot_date && (
                   <span className="text-[11px] text-text-muted">
                     {t("Atualizado em")}{" "}
-                    {new Date(shareData.snapshot_date).toLocaleDateString("pt-BR", {
+                    {new Date(shareData.snapshot_date).toLocaleDateString(tagDeIdioma, {
                       day: "2-digit",
                       month: "2-digit",
                       year: "numeric",

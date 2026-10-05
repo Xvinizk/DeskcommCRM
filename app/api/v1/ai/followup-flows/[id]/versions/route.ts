@@ -110,7 +110,7 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<Response> {
       activeOrg.orgId,
     ));
 
-  const backupLabel = parsed.data.label || `Backup de ${new Date().toLocaleString("pt-BR")}`;
+  const backupLabel = parsed.data.label || `Backup de ${new Date().toISOString()}`;
 
   const { data: inserted, error: insertErr } = await admin
     .from("followup_flow_versions")

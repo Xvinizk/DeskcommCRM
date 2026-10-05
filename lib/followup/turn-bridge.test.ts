@@ -122,7 +122,7 @@ describe("completeTurnForEnrollment — 'sent' (action)", () => {
     await completeTurnForEnrollment(db, "org-1", "enr-1", "a1", { kind: "sent" }, clock);
 
     expect(insertEnrollmentEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ event_type: "action_sent", idempotency_key: "a1:4" }),
+      expect.objectContaining({ event_type: "action_sent", idempotency_key: "a1:4:action_sent" }),
     );
     expect(updateEnrollment).toHaveBeenCalledWith(
       "enr-1",
@@ -135,7 +135,7 @@ describe("completeTurnForEnrollment — 'sent' (action)", () => {
     const { db, updateEnrollment } = fakeDb({
       enrollment: enrollment(),
       graph: ACTION_GRAPH,
-      existingEvents: new Set(["a1:4"]),
+      existingEvents: new Set(["a1:4:action_sent"]),
     });
 
     await completeTurnForEnrollment(db, "org-1", "enr-1", "a1", { kind: "sent" }, clock);
@@ -161,7 +161,7 @@ describe("completeTurnForEnrollment — 'sent' (action)", () => {
     await completeTurnForEnrollment(db, "org-1", "enr-1", "mt1", { kind: "sent" }, clock);
 
     expect(insertEnrollmentEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ event_type: "action_sent", idempotency_key: "mt1:4" }),
+      expect.objectContaining({ event_type: "action_sent", idempotency_key: "mt1:4:action_sent" }),
     );
     expect(updateEnrollment).toHaveBeenCalledWith(
       "enr-1",
@@ -183,7 +183,7 @@ describe("completeTurnForEnrollment — 'sent' (action)", () => {
     await completeTurnForEnrollment(db, "org-1", "enr-1", "mi1", { kind: "sent" }, clock);
 
     expect(insertEnrollmentEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ event_type: "action_sent", idempotency_key: "mi1:4" }),
+      expect.objectContaining({ event_type: "action_sent", idempotency_key: "mi1:4:action_sent" }),
     );
     expect(updateEnrollment).toHaveBeenCalledWith(
       "enr-1",
@@ -205,7 +205,7 @@ describe("completeTurnForEnrollment — 'sent' (action)", () => {
     await completeTurnForEnrollment(db, "org-1", "enr-1", "mv1", { kind: "sent" }, clock);
 
     expect(insertEnrollmentEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ event_type: "action_sent", idempotency_key: "mv1:4" }),
+      expect.objectContaining({ event_type: "action_sent", idempotency_key: "mv1:4:action_sent" }),
     );
     expect(updateEnrollment).toHaveBeenCalledWith(
       "enr-1",
@@ -227,7 +227,7 @@ describe("completeTurnForEnrollment — 'sent' (action)", () => {
     await completeTurnForEnrollment(db, "org-1", "enr-1", "ma1", { kind: "sent" }, clock);
 
     expect(insertEnrollmentEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ event_type: "action_sent", idempotency_key: "ma1:4" }),
+      expect.objectContaining({ event_type: "action_sent", idempotency_key: "ma1:4:action_sent" }),
     );
     expect(updateEnrollment).toHaveBeenCalledWith(
       "enr-1",
@@ -377,7 +377,7 @@ describe("completeTurnForEnrollment — 'planned' (acionamento, no trigger)", ()
       },
     });
     expect(insertEnrollmentEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ event_type: "timing_plan_decidido", idempotency_key: "t1:4" }),
+      expect.objectContaining({ event_type: "timing_plan_decidido", idempotency_key: "t1:4:timing_plan_decidido" }),
     );
   });
 

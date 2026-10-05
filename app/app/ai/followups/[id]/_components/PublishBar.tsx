@@ -27,6 +27,7 @@ import { showApiError } from "@/components/feedback/ApiErrorToast";
 import { ApiError } from "@/lib/api/types";
 import type { FlowGraph } from "@/lib/followup/graph-schema";
 import type { PublishValidationError } from "@/lib/followup/validate-publish";
+import type { FlowValidationIssue } from "@/lib/followup/validation-contract";
 import { useT } from "@/hooks/i18n/useT";
 import {
   useDisableFollowupFlow,
@@ -63,6 +64,7 @@ interface Props {
   onSaved: (graph: FlowGraph) => void;
   onPublishErrors: (errorsByNode: Record<string, string[]>) => void;
   onPublishSuccess: () => void;
+  onValidationIssues?: (issues: FlowValidationIssue[]) => void;
   onAutoFit?: () => void;
   canAutoFit?: boolean;
   autosaving?: boolean;
@@ -85,6 +87,7 @@ export function PublishBar({
   onSaved,
   onPublishErrors,
   onPublishSuccess,
+  onValidationIssues,
   onAutoFit,
   canAutoFit = false,
   autosaving = false,
@@ -105,30 +108,69 @@ export function PublishBar({
   const handoffPolicy = useUpdateHandoffPolicy(flowId);
 
   const onSave = () => {
-    save.mutate(graph, { onSuccess: () => onSaved(graph) });
+    save.mutate(graph, {
+      onSuccess: () => onSaved(graph),
+      onError: (err) => {
+        if (err instanceof ApiError && (err.code === "validation_failed" || err.status === 422)) {
+          const issues: FlowValidationIssue[] =
+            (err.details?.issues as FlowValidationIssue[] | undefined) ??
+            (err.details?.errors as FlowValidationIssue[] | undefined) ??
+            [];
+          if (issues.length > 0) {
+            onValidationIssues?.(issues);
+            const byNode: Record<string, string[]> = {};
+            for (const i of issues) {
+              if (i.node_id) (byNode[i.node_id] ??= []).push(i.message);
+            }
+            onPublishErrors(byNode);
+          }
+        }
+      },
+    });
   };
 
   const onPublish = async () => {
     try {
       await save.mutateAsync(graph);
       onSaved(graph);
-    } catch {
+    } catch (saveErr) {
+      if (saveErr instanceof ApiError && (saveErr.code === "validation_failed" || saveErr.status === 422)) {
+        const issues: FlowValidationIssue[] =
+          (saveErr.details?.issues as FlowValidationIssue[] | undefined) ??
+          (saveErr.details?.errors as FlowValidationIssue[] | undefined) ??
+          [];
+        if (issues.length > 0) {
+          onValidationIssues?.(issues);
+          const byNode: Record<string, string[]> = {};
+          for (const i of issues) {
+            if (i.node_id) (byNode[i.node_id] ??= []).push(i.message);
+          }
+          onPublishErrors(byNode);
+        }
+      }
       return; // save's own onError already toasted — don't attempt publish on a failed save
     }
 
     publish.mutate(undefined, {
       onSuccess: () => onPublishSuccess(),
       onError: (err) => {
-        if (err instanceof ApiError && err.code === "validation_failed") {
-          const errors = (err.details?.errors as PublishValidationError[] | undefined) ?? [];
+        if (err instanceof ApiError && (err.code === "validation_failed" || err.status === 422)) {
+          const issues: FlowValidationIssue[] =
+            (err.details?.issues as FlowValidationIssue[] | undefined) ??
+            (err.details?.errors as FlowValidationIssue[] | undefined) ??
+            [];
           const byNode: Record<string, string[]> = {};
           const flowLevel: string[] = [];
-          for (const e of errors) {
+          for (const e of issues) {
             if (e.node_id) (byNode[e.node_id] ??= []).push(e.message);
             else flowLevel.push(e.message);
           }
           onPublishErrors(byNode);
-          toast.error(t("Fluxo reprovado na validação — corrija os nós destacados."), {
+          if (issues.length > 0) {
+            onValidationIssues?.(issues);
+          }
+          const toastMsg = err.message || t("Fluxo reprovado na validação — corrija os nós destacados.");
+          toast.error(toastMsg, {
             description: flowLevel.length > 0 ? flowLevel.join(" ") : undefined,
           });
           return;
@@ -225,6 +267,7 @@ export function PublishBar({
             size="sm"
             disabled={!dirty || busy}
             onClick={onSave}
+            data-testid="save-button"
           >
             {save.isPending ? t("Salvando…") : t("Salvar")}
           </Button>

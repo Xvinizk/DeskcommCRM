@@ -172,6 +172,18 @@ export const PONTOS_DE_IA: readonly PontoDeIa[] = [
   },
   // ─────────────────────────── Atender o cliente ───────────────────────────
   {
+    id: "ai_node",
+    rotulo: "Atendimento por nó de fluxo (Node IA)",
+    oQueFaz:
+      "Conduz a conversa dentro de uma etapa de fluxo inteligente, seguindo o objetivo definido ou as instruções do agente vinculado.",
+    papel: "atender",
+    exige: { tools: true },
+    emissor: "lib/followup/ai-node-executor.ts",
+    sintomaDeFalha:
+      "A conversa para na etapa do fluxo inteligente e o cliente não recebe a resposta esperada no WhatsApp.",
+    registraEm: "llm_calls",
+  },
+  {
     id: "agent_turn",
     rotulo: "Responder o cliente",
     oQueFaz:

@@ -3,7 +3,7 @@ import type { JobClaim } from "@/lib/agent-engine/queue/claim";
 import { assertAgendaEffectSupabase } from "@/lib/agenda/efeito";
 import { AgendaDeferredError } from "@/lib/agenda/protecao-followup";
 import type { ServiceBoundary } from "@/lib/atendimento/fronteira";
-import { isFollowupCasRecusado, parseServiceBoundary, StaleServiceBoundaryError } from "@/lib/atendimento/fronteira";
+import { EnrollmentRevisionStaleError, isFollowupCasRecusado, parseServiceBoundary, StaleServiceBoundaryError } from "@/lib/atendimento/fronteira";
 import { assertServiceBoundarySupabase } from "@/lib/atendimento/origem";
 
 export function deterministicUuid(seed: string): string {
@@ -763,7 +763,7 @@ export async function avancarEnrollmentAtivo(
   enrollment: EnrollmentRow,
 ): Promise<void> {
   const summary: TickSummary = { claimed: 0, advanced: 0, scheduled: 0, failed: 0, dead: 0 };
-  await processEnrollment(deps, enrollment, summary);
+  await processEnrollment(deps, enrollment, summary, undefined, true);
 }
 
 async function processEnrollment(
@@ -771,12 +771,19 @@ async function processEnrollment(
   initialEnrollment: EnrollmentRow,
   summary: TickSummary,
   inboundBodyOverride?: string,
+  cascade = false,
 ): Promise<void> {
   const { db, clock } = deps;
   let currentEnrollment = initialEnrollment;
   let currentInboundBody = inboundBodyOverride;
 
-  while (currentEnrollment.steps_taken <= MAX_STEPS) {
+  while (true) {
+    if (currentEnrollment.steps_taken > MAX_STEPS) {
+      await markDead(db, clock, currentEnrollment, "max_steps");
+      summary.dead++;
+      return;
+    }
+
     try { await db.assertServiceBoundary?.(currentEnrollment); await db.assertAgenda?.(currentEnrollment); }
     catch (error) {
       if(error instanceof AgendaDeferredError){
@@ -813,12 +820,6 @@ async function processEnrollment(
         });
       }
       await db.updateEnrollment(currentEnrollment.id, currentEnrollment.organization_id, { status: "cancelled", cancel_reason: "Atendimento encerrado ou substituído", claimed_until: null, completed_at: clock().toISOString() });
-      return;
-    }
-
-    if (currentEnrollment.steps_taken > MAX_STEPS) {
-      await markDead(db, clock, currentEnrollment, "max_steps");
-      summary.dead++;
       return;
     }
 
@@ -1163,7 +1164,7 @@ async function processEnrollment(
       node.type === "match_reply" && wokeEarly ? (lastInboundBody ?? "").trim() || null : null,
     );
 
-    if (!applied || result.kind !== "advance") {
+    if (!applied || result.kind !== "advance" || !cascade) {
       break;
     }
 
@@ -1223,7 +1224,14 @@ export async function runFollowupTick(deps: TickDeps, opts?: { limit?: number })
 export function createSupabaseAdminClient(admin: SupabaseClient): AdminClient {
   const revisions=new Map<string,number>();
   return {
-    async assertServiceBoundary(enrollment) { if(!revisions.has(enrollment.id) && enrollment.revision!==undefined) revisions.set(enrollment.id,enrollment.revision); await assertServiceBoundarySupabase(admin, enrollment.service_boundary ?? null); },
+    async assertServiceBoundary(enrollment) {
+      if (enrollment.revision !== undefined) {
+        const cur = revisions.get(enrollment.id);
+        const inc = Number(enrollment.revision);
+        if (cur === undefined || inc > cur) revisions.set(enrollment.id, inc);
+      }
+      await assertServiceBoundarySupabase(admin, enrollment.service_boundary ?? null);
+    },
     async assertAgenda(enrollment){await assertAgendaEffectSupabase(admin,{organizationId:enrollment.organization_id,contactId:enrollment.contact_id,enrollmentId:enrollment.id,nodeId:enrollment.current_node_id});},
     async claimDueEnrollments(limit, leaseSeconds) {
       const { data, error } = await admin.rpc("fn_claim_due_followup_enrollments", {
@@ -1231,7 +1239,11 @@ export function createSupabaseAdminClient(admin: SupabaseClient): AdminClient {
         p_lease_seconds: leaseSeconds,
       });
       if (error) throw new Error(error.message);
-      for(const row of data??[]) revisions.set(row.id,Number(row.revision));
+      for (const row of data ?? []) {
+        const cur = revisions.get(row.id);
+        const inc = Number(row.revision);
+        if (cur === undefined || inc > cur) revisions.set(row.id, inc);
+      }
       return (data ?? []) as EnrollmentRow[];
     },
     async loadFlowGraph(orgId, versionId) {
@@ -1310,18 +1322,18 @@ export function createSupabaseAdminClient(admin: SupabaseClient): AdminClient {
       return { inserted: true };
     },
     async applyEnrollmentStep(id,orgId,patch,event){
-      const revision=revisions.get(id);if(revision===undefined) throw new StaleServiceBoundaryError();
+      const revision=revisions.get(id);if(revision===undefined) throw new EnrollmentRevisionStaleError();
       const {data,error}=await admin.rpc("fn_followup_apply_step",{p_org:orgId,p_id:id,p_revision:revision,p_patch:patch,p_event:event});
       if(error?.code==="23505") return false;
-      if(isFollowupCasRecusado(error)) throw new StaleServiceBoundaryError();
+      if(isFollowupCasRecusado(error)) throw new EnrollmentRevisionStaleError();
       if(error) throw error;revisions.set(id,Number(data));
       return true;
     },
     async updateEnrollment(id, orgId, patch) {
       const revision=revisions.get(id);
-      if(revision===undefined) throw new StaleServiceBoundaryError();
+      if(revision===undefined) throw new EnrollmentRevisionStaleError();
       const {data,error}=await admin.rpc("fn_followup_patch",{p_org:orgId,p_id:id,p_revision:revision,p_patch:patch});
-      if(isFollowupCasRecusado(error)) throw new StaleServiceBoundaryError();
+      if(isFollowupCasRecusado(error)) throw new EnrollmentRevisionStaleError();
       if(error) throw new Error(error.message);
       revisions.set(id,Number(data));
     },
@@ -1450,7 +1462,9 @@ export function createSupabaseAdminClient(admin: SupabaseClient): AdminClient {
         .maybeSingle();
       if (error) throw new Error(error.message);
       if (!data) return null;
-      revisions.set(id, Number(data.revision));
+      const cur = revisions.get(id);
+      const inc = Number(data.revision);
+      if (cur === undefined || inc > cur) revisions.set(id, inc);
       return {
         id: data.id,
         organization_id: data.organization_id,

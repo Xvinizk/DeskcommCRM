@@ -231,11 +231,11 @@ describe("completeTurnForEnrollment — nó action, ciclo completo", () => {
     await runFollowupTick(makeTickDeps(jobs), { limit: 5 }); // enqueue: steps_taken 0→1
 
     // simula outro worker já tendo concluído o MESMO passo (mesma idempotency_key
-    // `a1:1` que completeTurnForEnrollment vai tentar gravar) — corrida real entre
+    // `a1:1:action_sent` que completeTurnForEnrollment vai tentar gravar) — corrida real entre
     // 2 tentativas do mesmo job.
     await pool.query(
       `insert into followup_enrollment_events (organization_id, enrollment_id, node_id, event_type, payload, idempotency_key)
-       values ($1, $2, 'a1', 'action_sent', '{}', 'a1:1')`,
+       values ($1, $2, 'a1', 'action_sent', '{}', 'a1:1:action_sent')`,
       [org, enrollmentId],
     );
 
@@ -246,7 +246,7 @@ describe("completeTurnForEnrollment — nó action, ciclo completo", () => {
     expect(after.steps_taken).toBe(1);
 
     const { rows: events } = await pool.query(
-      `select count(*) as n from followup_enrollment_events where enrollment_id = $1 and idempotency_key = 'a1:1'`,
+      `select count(*) as n from followup_enrollment_events where enrollment_id = $1 and idempotency_key = 'a1:1:action_sent'`,
       [enrollmentId],
     );
     expect(Number(events[0].n)).toBe(1); // só o evento simulado — completeTurnForEnrollment não duplicou

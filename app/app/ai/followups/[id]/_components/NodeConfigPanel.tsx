@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { FlowNode } from "@/lib/followup/graph-schema";
 import type { RFNode, RFNodeData } from "@/lib/followup/graph-mappers";
-import { Trash } from "@/lib/ui/icons";
+import { Trash, Warning } from "@/lib/ui/icons";
 import { useT } from "@/hooks/i18n/useT";
 
 import { ActionForm } from "./forms/ActionForm";
@@ -34,18 +34,18 @@ interface Props {
   onDelete: () => void;
   /** Ramos deste nó que já têm aresta — quem sabe isso é o canvas, que é dono do grafo. */
   ramosLigados?: string[];
+  fieldErrors?: Record<string, string>;
+  activeErrorField?: string | null;
 }
 
-/**
- * Casca do formulário de configuração: cabeçalho, rótulo do nó e o formulário
- * do tipo. Cada tipo mora em `forms/` — um arquivo por formulário, para que
- * duas pessoas mexendo em nós diferentes não disputem o mesmo arquivo.
- *
- * A regra que os formulários seguem: o campo só grava no nó vivo (`onChange`)
- * quando o candidato passa no schema — senão mostra erro inline e o canvas
- * mantém a última config válida (nunca um valor pela metade rio acima).
- */
-export function NodeConfigPanel({ node, onChange, onDelete, ramosLigados }: Props) {
+export function NodeConfigPanel({
+  node,
+  onChange,
+  onDelete,
+  ramosLigados,
+  fieldErrors,
+  activeErrorField,
+}: Props) {
   const t = useT();
   const type = node.type as FlowNode["type"];
   const visual = NODE_VISUALS[type];
@@ -76,6 +76,26 @@ export function NodeConfigPanel({ node, onChange, onDelete, ramosLigados }: Prop
           {t("Alterações aplicam no rascunho ao digitar — salve na barra de publicação.")}
         </p>
       </div>
+
+      {fieldErrors && Object.keys(fieldErrors).length > 0 && (
+        <div
+          className="rounded-lg border border-error/40 bg-error/10 p-3 text-xs text-error-fg space-y-1.5"
+          data-testid="node-config-errors-summary"
+        >
+          <div className="flex items-center gap-1.5 font-semibold text-error">
+            <Warning size={14} weight="bold" />
+            <span>{t("Problemas encontrados neste nó:")}</span>
+          </div>
+          <ul className="list-disc pl-4 space-y-1">
+            {Object.entries(fieldErrors).map(([field, msg]) => (
+              <li key={field}>
+                <span className="font-medium text-text">{field.replace(/^config\./, "")}: </span>
+                <span>{msg}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       <div className="space-y-2">
         <Label htmlFor="node-label">{t("Rótulo")}</Label>
@@ -130,7 +150,12 @@ export function NodeConfigPanel({ node, onChange, onDelete, ramosLigados }: Prop
           <EndForm config={node.data.config as ConfigOf<"end">} onChange={(config) => onChange({ config })} />
         )}
         {type === "message_text" && (
-          <MessageTextForm config={node.data.config as ConfigOf<"message_text">} onChange={(config) => onChange({ config })} />
+          <MessageTextForm
+            config={node.data.config as ConfigOf<"message_text">}
+            onChange={(config) => onChange({ config })}
+            fieldErrors={fieldErrors}
+            activeErrorField={activeErrorField}
+          />
         )}
         {(type === "message_image" || type === "message_video" || type === "message_audio") && (
           <MessageMediaForm
@@ -142,6 +167,8 @@ export function NodeConfigPanel({ node, onChange, onDelete, ramosLigados }: Prop
                 | ConfigOf<"message_audio">
             }
             onChange={(config) => onChange({ config })}
+            fieldErrors={fieldErrors}
+            activeErrorField={activeErrorField}
           />
         )}
         {type === "typing" && (
@@ -161,6 +188,8 @@ export function NodeConfigPanel({ node, onChange, onDelete, ramosLigados }: Prop
             config={node.data.config as ConfigOf<"ai_node">}
             onChange={(config) => onChange({ config })}
             ramosLigados={ramosLigados}
+            fieldErrors={fieldErrors}
+            activeErrorField={activeErrorField}
           />
         )}
       </div>

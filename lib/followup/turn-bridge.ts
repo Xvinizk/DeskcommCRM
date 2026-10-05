@@ -1,6 +1,6 @@
 import type {JobClaim} from "@/lib/agent-engine/queue/claim";
 import { assertAgendaEffectPg } from "@/lib/agenda/efeito";
-import { isFollowupCasRecusado, parseServiceBoundary, StaleServiceBoundaryError } from "@/lib/atendimento/fronteira";
+import { EnrollmentRevisionStaleError, isFollowupCasRecusado, parseServiceBoundary, StaleServiceBoundaryError } from "@/lib/atendimento/fronteira";
 import { requireCurrentServiceBoundary } from "@/lib/atendimento/fronteira-server";
 /**
  * Ponte engine ⇄ job_queue (Task 5.1, onda 5). Traduz o RESULTADO de um turno
@@ -119,64 +119,140 @@ export async function completeTurnForEnrollment(
   if (!node) throw new Error("node_not_found");
 
   const now = clock();
-  const idemKey = `${node.id}:${enrollment.steps_taken}`;
+
+  let latestEnrollment = enrollment;
 
   const applyStep = async (
     eventType: string,
     payload: Record<string, unknown>,
     patch: EnrollmentPatch,
   ): Promise<boolean> => {
-    await db.assertServiceBoundary?.(enrollment);
-    if(result.kind === "planned" || result.kind === "classified") await db.assertAgenda?.(enrollment);
-    if(db.applyEnrollmentStep){
-      const ok = await db.applyEnrollmentStep(enrollmentId,orgId,{...patch,steps_taken:enrollment.steps_taken+1,claimed_until:null,updated_at:now.toISOString()},
-        {...(jobId?{job_id:jobId,job_claim:jobClaim}:{}),node_id:node.id,event_type:eventType,payload,idempotency_key:idemKey});
-      return ok !== false;
+    const maxRetries = 3;
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      if (db.loadEnrollmentEvents) {
+        const events = await db.loadEnrollmentEvents(enrollmentId);
+        const alreadyDone = events.some(
+          (e) => e.node_id === node.id && e.event_type === eventType,
+        );
+        if (alreadyDone) {
+          const fresh = await db.loadEnrollmentById(orgId, enrollmentId);
+          if (fresh) latestEnrollment = fresh;
+          return true;
+        }
+      }
+
+      const stepIdemKey = `${node.id}:${latestEnrollment.steps_taken}:${eventType}`;
+      await db.assertServiceBoundary?.(latestEnrollment);
+      if (result.kind === "planned" || result.kind === "classified") {
+        await db.assertAgenda?.(latestEnrollment);
+      }
+
+      try {
+        if (db.applyEnrollmentStep) {
+          const ok = await db.applyEnrollmentStep(
+            enrollmentId,
+            orgId,
+            {
+              ...patch,
+              steps_taken: latestEnrollment.steps_taken + 1,
+              claimed_until: null,
+              updated_at: now.toISOString(),
+            },
+            {
+              ...(jobId ? { job_id: jobId, job_claim: jobClaim } : {}),
+              node_id: node.id,
+              event_type: eventType,
+              payload,
+              idempotency_key: stepIdemKey,
+            },
+          );
+          if (ok !== false) {
+            const fresh = await db.loadEnrollmentById(orgId, enrollmentId);
+            if (fresh) {
+              latestEnrollment = fresh;
+            } else {
+              latestEnrollment = {
+                ...latestEnrollment,
+                ...patch,
+                steps_taken: latestEnrollment.steps_taken + 1,
+                claimed_until: null,
+                updated_at: now.toISOString(),
+              };
+            }
+            return true;
+          }
+          return false;
+        }
+
+        const { inserted } = await db.insertEnrollmentEvent({
+          organization_id: orgId,
+          enrollment_id: enrollmentId,
+          node_id: node.id,
+          event_type: eventType,
+          payload,
+          idempotency_key: stepIdemKey,
+        });
+        if (!inserted) return false; // replay — a 1ª aplicação já progrediu o enrollment
+
+        await db.assertServiceBoundary?.(latestEnrollment);
+        await db.updateEnrollment(enrollmentId, orgId, {
+          ...patch,
+          steps_taken: latestEnrollment.steps_taken + 1,
+          claimed_until: null,
+          updated_at: now.toISOString(),
+        });
+        const fresh = await db.loadEnrollmentById(orgId, enrollmentId);
+        if (fresh) {
+          latestEnrollment = fresh;
+        } else {
+          latestEnrollment = {
+            ...latestEnrollment,
+            ...patch,
+            steps_taken: latestEnrollment.steps_taken + 1,
+            claimed_until: null,
+            updated_at: now.toISOString(),
+          };
+        }
+        return true;
+      } catch (err) {
+        const isCasConflict =
+          err instanceof EnrollmentRevisionStaleError ||
+          isFollowupCasRecusado(err as { code?: string; message?: string });
+
+        if (isCasConflict && attempt < maxRetries - 1) {
+          const fresh = await db.loadEnrollmentById(orgId, enrollmentId);
+          if (!fresh) return false;
+          if (
+            fresh.current_node_id !== nodeId ||
+            !["active", "waiting_reply", "dormente"].includes(fresh.status)
+          ) {
+            return false;
+          }
+          await db.assertServiceBoundary?.(fresh);
+          if (result.kind === "planned" || result.kind === "classified") {
+            await db.assertAgenda?.(fresh);
+          }
+          latestEnrollment = fresh;
+          continue;
+        }
+        throw err;
+      }
     }
-    const { inserted } = await db.insertEnrollmentEvent({
-      organization_id: orgId,
-      enrollment_id: enrollmentId,
-      node_id: node.id,
-      event_type: eventType,
-      payload,
-      idempotency_key: idemKey,
-    });
-    if (!inserted) return false; // replay — a 1ª aplicação já progrediu o enrollment
-    await db.assertServiceBoundary?.(enrollment);
-    await db.updateEnrollment(enrollmentId, orgId, {
-      ...patch,
-      steps_taken: enrollment.steps_taken + 1,
-      claimed_until: null,
-      updated_at: now.toISOString(),
-    });
-    return true;
+    return false;
   };
 
-  if(result.kind === "skipped"){
-    await applyStep("turn_skipped",{reason:result.reason},{status:"cancelled",cancel_reason:result.reason,completed_at:now.toISOString(),next_eval_at:null});
+  if (result.kind === "skipped") {
+    await applyStep(
+      "turn_skipped",
+      { reason: result.reason },
+      { status: "cancelled", cancel_reason: result.reason, completed_at: now.toISOString(), next_eval_at: null },
+    );
     return;
   }
 
   if (result.kind === "deferred") {
     // ESTACIONAR, e não avançar nem completar: o envio ainda vai acontecer, no
     // job que o turno já re-agendou para `until`.
-    //
-    // Três escolhas aqui, e cada uma conserta um pedaço do mesmo defeito:
-    //
-    // 1. `steps_taken` NÃO sobe, e a chave do evento NÃO é a do passo. O passo
-    //    continua devendo a sua conclusão (`action_sent`/`turn_skipped`) com a
-    //    chave `${node}:${steps}`; gastar essa chave aqui faria o motor ler o
-    //    adiamento como "a ação já aconteceu" — no `match_reply` de confirmação
-    //    isso vira ler a resposta de uma pergunta que nunca saiu.
-    // 2. A chave carrega o JOB, porque a unidade de idempotência é ele: o mesmo
-    //    job retentado depois de um crash grava o mesmo adiamento (23505, no-op),
-    //    e o job re-agendado que adia DE NOVO grava um adiamento novo — que é
-    //    exatamente a prova de vida que o dead-man precisa ver.
-    // 3. `next_eval_at` vai para a abertura da janela. É o que faz o motor
-    //    simplesmente não acordar durante a espera, em vez de gastar rechecks
-    //    nela. No `match_reply` soma-se a carência: a pergunta só sai em
-    //    `until`, e o lead precisa da carência INTEIRA depois disso para
-    //    responder — acordar em `until` leria silêncio como "não respondeu".
     const carencia = node.type === "match_reply" ? node.config.grace_timeout_ms : 0;
     const voltaEm = new Date(result.until.getTime() + carencia);
     const patch: EnrollmentPatch = {
@@ -184,27 +260,52 @@ export async function completeTurnForEnrollment(
       claimed_until: null,
       updated_at: now.toISOString(),
     };
-    const evento = {
-      node_id: node.id,
-      event_type: EVENTO_ACAO_ADIADA,
-      payload: { until: result.until.toISOString(), next_eval_at: voltaEm.toISOString(), reason: result.reason },
-      idempotency_key: `${node.id}:${enrollment.steps_taken}:adiado:${jobId ?? result.until.toISOString()}`,
-    };
-    await db.assertServiceBoundary?.(enrollment);
-    if (db.applyEnrollmentStep) {
-      await db.applyEnrollmentStep(enrollmentId, orgId, patch, {
-        ...(jobId ? { job_id: jobId, job_claim: jobClaim } : {}),
-        ...evento,
-      });
-      return;
+    const maxRetries = 3;
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      const evento = {
+        node_id: node.id,
+        event_type: EVENTO_ACAO_ADIADA,
+        payload: { until: result.until.toISOString(), next_eval_at: voltaEm.toISOString(), reason: result.reason },
+        idempotency_key: `${node.id}:${latestEnrollment.steps_taken}:adiado:${jobId ?? result.until.toISOString()}`,
+      };
+      await db.assertServiceBoundary?.(latestEnrollment);
+      try {
+        if (db.applyEnrollmentStep) {
+          await db.applyEnrollmentStep(enrollmentId, orgId, patch, {
+            ...(jobId ? { job_id: jobId, job_claim: jobClaim } : {}),
+            ...evento,
+          });
+          return;
+        }
+        const { inserted } = await db.insertEnrollmentEvent({
+          organization_id: orgId,
+          enrollment_id: enrollmentId,
+          ...evento,
+        });
+        if (!inserted) return; // replay — este adiamento já foi registrado
+        await db.updateEnrollment(enrollmentId, orgId, patch);
+        return;
+      } catch (err) {
+        const isCasConflict =
+          err instanceof EnrollmentRevisionStaleError ||
+          isFollowupCasRecusado(err as { code?: string; message?: string });
+
+        if (isCasConflict && attempt < maxRetries - 1) {
+          const fresh = await db.loadEnrollmentById(orgId, enrollmentId);
+          if (!fresh) return;
+          if (
+            fresh.current_node_id !== nodeId ||
+            !["active", "waiting_reply", "dormente"].includes(fresh.status)
+          ) {
+            return;
+          }
+          await db.assertServiceBoundary?.(fresh);
+          latestEnrollment = fresh;
+          continue;
+        }
+        throw err;
+      }
     }
-    const { inserted } = await db.insertEnrollmentEvent({
-      organization_id: orgId,
-      enrollment_id: enrollmentId,
-      ...evento,
-    });
-    if (!inserted) return; // replay — este adiamento já foi registrado
-    await db.updateEnrollment(enrollmentId, orgId, patch);
     return;
   }
 
@@ -223,18 +324,10 @@ export async function completeTurnForEnrollment(
       {},
       { current_node_id: edge.target, status: "active", next_eval_at: now.toISOString() },
     );
-    if (applied && db.enqueueJob) {
+    if (applied && db.enqueueJob && node.type !== "action") {
       await avancarEnrollmentAtivo(
         { db, clock, enqueueJob: db.enqueueJob },
-        {
-          ...enrollment,
-          current_node_id: edge.target,
-          steps_taken: enrollment.steps_taken + 1,
-          status: "active",
-          next_eval_at: now.toISOString(),
-          updated_at: now.toISOString(),
-          claimed_until: null,
-        },
+        latestEnrollment,
       );
     }
     return;
@@ -254,18 +347,13 @@ export async function completeTurnForEnrollment(
       { current_node_id: edge.target, status: "active", next_eval_at: now.toISOString() },
     );
     if (applied && db.enqueueJob) {
-      await avancarEnrollmentAtivo(
-        { db, clock, enqueueJob: db.enqueueJob },
-        {
-          ...enrollment,
-          current_node_id: edge.target,
-          steps_taken: enrollment.steps_taken + 1,
-          status: "active",
-          next_eval_at: now.toISOString(),
-          updated_at: now.toISOString(),
-          claimed_until: null,
-        },
-      );
+      const nextNode = graph.nodes.find((n) => n.id === edge.target);
+      if (nextNode && isSendMessageNode(nextNode)) {
+        await avancarEnrollmentAtivo(
+          { db, clock, enqueueJob: db.enqueueJob },
+          latestEnrollment,
+        );
+      }
     }
     return;
   }
@@ -284,7 +372,7 @@ export async function completeTurnForEnrollment(
   });
   const edge = selectEdge(graph.edges, node.id, { type: "always" });
   if (!edge) throw new Error(`trigger node "${node.id}" sem aresta 'always' de saída`);
-  const applied = await applyStep(
+  await applyStep(
     "timing_plan_decidido",
     // O plano inteiro no evento (não só um ponteiro pra coluna): a timeline do
     // enrollment precisa ser legível sozinha, com o motivo de cada espera.
@@ -296,21 +384,6 @@ export async function completeTurnForEnrollment(
       timing_plan: plano,
     },
   );
-  if (applied && db.enqueueJob) {
-    await avancarEnrollmentAtivo(
-      { db, clock, enqueueJob: db.enqueueJob },
-      {
-        ...enrollment,
-        current_node_id: edge.target,
-        steps_taken: enrollment.steps_taken + 1,
-        status: "active",
-        next_eval_at: now.toISOString(),
-        updated_at: now.toISOString(),
-        claimed_until: null,
-        timing_plan: plano,
-      },
-    );
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -373,14 +446,25 @@ export function createPgAdminClient(
       const {rows}=await pool.query("select fn_followup_job_current($1,$2,$3,$4) current",[orgId,jobId,enrollmentId,nodeId]);
       if(!rows[0]?.current) throw new StaleServiceBoundaryError();
     },
-    async assertServiceBoundary(enrollment) { if(!revisions.has(enrollment.id)&&enrollment.revision!==undefined) revisions.set(enrollment.id,enrollment.revision); await requireCurrentServiceBoundary(pool, enrollment.service_boundary ?? null); },
+    async assertServiceBoundary(enrollment) {
+      if (enrollment.revision !== undefined) {
+        const cur = revisions.get(enrollment.id);
+        const inc = Number(enrollment.revision);
+        if (cur === undefined || inc > cur) revisions.set(enrollment.id, inc);
+      }
+      await requireCurrentServiceBoundary(pool, enrollment.service_boundary ?? null);
+    },
     async assertAgenda(enrollment){await assertAgendaEffectPg(pool,{organizationId:enrollment.organization_id,contactId:enrollment.contact_id,enrollmentId:enrollment.id,nodeId:enrollment.current_node_id});},
     async claimDueEnrollments(limit, leaseSeconds) {
       const { rows } = await pool.query(`select * from fn_claim_due_followup_enrollments($1, $2)`, [
         limit,
         leaseSeconds,
       ]);
-      for(const row of rows) revisions.set(row.id,Number(row.revision));
+      for (const row of rows) {
+        const cur = revisions.get(row.id);
+        const inc = Number(row.revision);
+        if (cur === undefined || inc > cur) revisions.set(row.id, inc);
+      }
       return rows.map(mapEnrollmentRow);
     },
     async loadEnrollmentById(orgId, id) {
@@ -388,7 +472,11 @@ export function createPgAdminClient(
         `select * from followup_enrollments where id = $1 and organization_id = $2`,
         [id, orgId],
       );
-      if(rows[0]) revisions.set(id,Number(rows[0].revision));
+      if (rows[0]) {
+        const cur = revisions.get(id);
+        const inc = Number(rows[0].revision);
+        if (cur === undefined || inc > cur) revisions.set(id, inc);
+      }
       return rows[0] ? mapEnrollmentRow(rows[0] as Record<string, unknown>) : null;
     },
     async loadFlowGraph(orgId, versionId) {
@@ -455,19 +543,18 @@ export function createPgAdminClient(
       }
     },
     async applyEnrollmentStep(id,orgId,patch,event){
-      const revision=revisions.get(id);if(revision===undefined) throw new StaleServiceBoundaryError();
+      const revision=revisions.get(id);if(revision===undefined) throw new EnrollmentRevisionStaleError();
       try{const {rows}=await pool.query("select fn_followup_apply_step($1,$2,$3,$4,$5) revision",[orgId,id,revision,patch,event]);revisions.set(id,Number(rows[0].revision));}
-      catch(error){if((error as {code?:string}).code==="23505") return false;if(isFollowupCasRecusado(error as {code?:string;message?:string})) throw new StaleServiceBoundaryError();throw error;}
+      catch(error){if((error as {code?:string}).code==="23505") return false;if(isFollowupCasRecusado(error as {code?:string;message?:string})) throw new EnrollmentRevisionStaleError();throw error;}
       return true;
     },
     async updateEnrollment(id, orgId, patch) {
       const revision=revisions.get(id);
-      if(revision===undefined) throw new StaleServiceBoundaryError();
+      if(revision===undefined) throw new EnrollmentRevisionStaleError();
       try {
         const {rows}=await pool.query<{revision:number}>("select fn_followup_patch($1,$2,$3,$4) as revision",[orgId,id,revision,patch]);
         revisions.set(id,Number(rows[0]!.revision));
-      } catch(error){if(isFollowupCasRecusado(error as {code?:string;message?:string})) throw new StaleServiceBoundaryError();throw error;}
-
+      } catch(error){if(isFollowupCasRecusado(error as {code?:string;message?:string})) throw new EnrollmentRevisionStaleError();throw error;}
     },
     async loadFlowPointerName(orgId, pointerId) {
       const { rows } = await pool.query<{ name: string }>(

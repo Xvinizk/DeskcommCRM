@@ -20,7 +20,9 @@ export interface FollowupFlowDetailRow {
   updated_at: string;
   versions_count: number;
   previous_version_id: string | null;
+  archived_at?: string | null;
 }
+
 
 interface SingleResponse {
   data: FollowupFlowDetailRow;

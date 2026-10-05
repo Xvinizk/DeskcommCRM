@@ -37,6 +37,10 @@ export const PUBLISH_ERROR_CODES = [
   'ai_node_agent_unpublished',
   'ai_node_pinned_version_invalid',
   'ai_node_missing_instruction',
+  'ai_node_incompatible_custom_prompt',
+  'ai_node_incompatible_supplementary_instruction',
+  'ai_node_incompatible_agent_binding',
+  'ai_node_incompatible_agent_name',
 ] as const;
 export type PublishErrorCode = (typeof PUBLISH_ERROR_CODES)[number];
 
@@ -574,6 +578,55 @@ export function validateFlowForPublish(
     }
 
     const cfg = node.config;
+
+    // Compatibilidade estrita de campos por mode (Fail-Closed)
+    if (cfg.mode === 'existing_agent') {
+      if (cfg.custom_prompt && cfg.custom_prompt.trim().length > 0) {
+        errors.push({
+          node_id: node.id,
+          code: 'ai_node_incompatible_custom_prompt',
+          message: `Nó IA "${node.label || node.id}" no modo "Agente Existente" não permite custom_prompt.`,
+        });
+      }
+      if (cfg.supplementary_instruction && cfg.supplementary_instruction.trim().length > 0) {
+        errors.push({
+          node_id: node.id,
+          code: 'ai_node_incompatible_supplementary_instruction',
+          message: `Nó IA "${node.label || node.id}" no modo "Agente Existente" não permite supplementary_instruction. Use o modo "Agente com Instrução Complementar".`,
+        });
+      }
+    } else if (cfg.mode === 'custom_prompt') {
+      if (cfg.supplementary_instruction && cfg.supplementary_instruction.trim().length > 0) {
+        errors.push({
+          node_id: node.id,
+          code: 'ai_node_incompatible_supplementary_instruction',
+          message: `Nó IA "${node.label || node.id}" no modo "Prompt Personalizado" não permite supplementary_instruction.`,
+        });
+      }
+      if (cfg.agent_binding && (cfg.agent_binding.agent_id || cfg.agent_binding.version_strategy)) {
+        errors.push({
+          node_id: node.id,
+          code: 'ai_node_incompatible_agent_binding',
+          message: `Nó IA "${node.label || node.id}" no modo "Prompt Personalizado" não permite vínculo com agente (agent_binding).`,
+        });
+      }
+      if (cfg.agent_name && cfg.agent_name.trim().length > 0) {
+        errors.push({
+          node_id: node.id,
+          code: 'ai_node_incompatible_agent_name',
+          message: `Nó IA "${node.label || node.id}" no modo "Prompt Personalizado" não permite agent_name residual.`,
+        });
+      }
+    } else if (cfg.mode === 'existing_with_supplementary') {
+      if (cfg.custom_prompt && cfg.custom_prompt.trim().length > 0) {
+        errors.push({
+          node_id: node.id,
+          code: 'ai_node_incompatible_custom_prompt',
+          message: `Nó IA "${node.label || node.id}" no modo "Agente com Instrução Complementar" não permite custom_prompt.`,
+        });
+      }
+    }
+
     if (cfg.mode === 'existing_agent' || cfg.mode === 'existing_with_supplementary') {
       const binding = cfg.agent_binding;
       if (!binding?.agent_id) {
