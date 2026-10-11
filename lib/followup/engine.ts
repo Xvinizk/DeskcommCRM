@@ -38,6 +38,7 @@ import {
   isSendMessageNode,
   computeAiNodeTimeoutMs,
   normalizeAiNodeTimeout,
+  FLOW_MAX_RUNTIME_STEPS,
   type FlowGraph,
   type FlowNode,
   type ReplySaveTo,
@@ -72,7 +73,12 @@ import {
 import { interpolarDestino, persistirRespostaFollowupSupabase, aplicarTagsFollowupSupabase, moverEtapaFollowupSupabase } from "./persistir-resposta";
 import { sinalizarPresenca } from "@/lib/messaging/presenca";
 
-const MAX_STEPS = 80;
+/**
+ * Reexporta a constante canônica de limite de runtime.
+ * Invariante canônico: FLOW_MAX_RUNTIME_STEPS >= FLOW_MAX_STATIC_PATH_STEPS
+ */
+export { FLOW_MAX_RUNTIME_STEPS };
+
 const CLAIM_LEASE_SECONDS = 120;
 const DEFAULT_CLAIM_LIMIT = 20;
 const MAX_ERROR_LEN = 300;
@@ -778,7 +784,7 @@ async function processEnrollment(
   let currentInboundBody = inboundBodyOverride;
 
   while (true) {
-    if (currentEnrollment.steps_taken > MAX_STEPS) {
+    if (currentEnrollment.steps_taken > FLOW_MAX_RUNTIME_STEPS) {
       await markDead(db, clock, currentEnrollment, "max_steps");
       summary.dead++;
       return;

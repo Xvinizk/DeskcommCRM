@@ -1,5 +1,6 @@
 import type { FlowGraph, FlowEdge, FlowNode } from './graph-schema';
-import { branchIdForCondition, nodeBranches } from './graph-schema';
+import { branchIdForCondition, nodeBranches, FLOW_MAX_STATIC_PATH_STEPS } from './graph-schema';
+export { FLOW_MAX_STATIC_PATH_STEPS } from './graph-schema';
 import { rotuloDoRamo } from './rotulo-do-ramo';
 import type { NomesDeValor } from './vocabulario';
 import type { AgenteCitado } from './agentes-citados';
@@ -74,7 +75,6 @@ export interface ContextoDoPublish {
 
 const LONG_WAIT_THRESHOLD_MS = 86_400_000; // 24h
 const MIN_CYCLE_WAIT_MS = 300_000; // 5min
-const MAX_PATH_STEPS = 30;
 
 function waitMs(config: Extract<FlowNode, { type: 'wait' }>['config']): number {
   return config.mode === 'fixed' ? config.duration_ms : config.max_ms;
@@ -206,9 +206,10 @@ function analyzeCondensedPaths(
   nodes: FlowNode[],
   nodesById: Map<string, FlowNode>,
   outEdges: Map<string, FlowEdge[]>
-): { longWaitNodeIds: Set<string>; maxStepsExceeded: boolean } {
+): { longWaitNodeIds: Set<string>; maxStepsExceeded: boolean; longestPathSteps: number } {
   const longWaitNodeIds = new Set<string>();
   let maxStepsExceeded = false;
+  let longestPathSteps = 0;
 
   const components = stronglyConnectedComponents(
     nodes.map((n) => n.id),
@@ -238,7 +239,7 @@ function analyzeCondensedPaths(
   }
 
   const startComp = componentIndexById.get(startId);
-  if (startComp === undefined) return { longWaitNodeIds, maxStepsExceeded };
+  if (startComp === undefined) return { longWaitNodeIds, maxStepsExceeded, longestPathSteps };
 
   const arriveWait = new Map<number, number>([[startComp, 0]]);
   const arriveSteps = new Map<number, number>([[startComp, 0]]);
@@ -253,7 +254,8 @@ function analyzeCondensedPaths(
     const totalWait = arrivedWait + waitWeight[idx]!;
     const totalSteps = arrivedSteps + stepWeight[idx]!;
 
-    if (totalSteps > MAX_PATH_STEPS) maxStepsExceeded = true;
+    if (totalSteps > longestPathSteps) longestPathSteps = totalSteps;
+    if (totalSteps > FLOW_MAX_STATIC_PATH_STEPS) maxStepsExceeded = true;
 
     for (const id of components[idx]!) {
       const node = nodesById.get(id);
@@ -274,7 +276,7 @@ function analyzeCondensedPaths(
     }
   }
 
-  return { longWaitNodeIds, maxStepsExceeded };
+  return { longWaitNodeIds, maxStepsExceeded, longestPathSteps };
 }
 
 function byId(a: { id: string }, b: { id: string }): number {
@@ -439,7 +441,7 @@ export function validateFlowForPublish(
       }
     }
 
-    const { longWaitNodeIds, maxStepsExceeded } = analyzeCondensedPaths(
+    const { longWaitNodeIds, maxStepsExceeded, longestPathSteps } = analyzeCondensedPaths(
       startTrigger.id,
       nodes,
       nodesById,
@@ -456,7 +458,7 @@ export function validateFlowForPublish(
       errors.push({
         node_id: null,
         code: 'max_steps_exceeded',
-        message: `O caminho mais longo a partir do trigger excede ${MAX_PATH_STEPS} passos.`,
+        message: `O caminho mais longo deste fluxo possui ${longestPathSteps} passos. O limite atual é ${FLOW_MAX_STATIC_PATH_STEPS}.`,
       });
     }
   }
@@ -723,4 +725,17 @@ export function validateFlowForPublish(
   });
 
   return { ok: false, errors };
+}
+
+/**
+ * Calcula a profundidade máxima (caminho mais longo em número de nós) a partir do trigger.
+ * Útil para observabilidade e logs de publicação.
+ */
+export function calculateFlowLongestPath(graph: FlowGraph): number {
+  const triggers = graph.nodes.filter((n) => n.type === 'trigger');
+  if (triggers.length === 0) return 0;
+  const nodesById = new Map(graph.nodes.map((n) => [n.id, n]));
+  const outEdges = buildOutEdges(graph.edges);
+  const { longestPathSteps } = analyzeCondensedPaths(triggers[0]!.id, graph.nodes, nodesById, outEdges);
+  return longestPathSteps;
 }

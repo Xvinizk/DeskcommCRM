@@ -16,12 +16,13 @@ import type { NextRequest } from "next/server";
 
 import { ok, fail } from "@/lib/api/wrappers";
 import { audit } from "@/lib/audit";
+import { logger } from "@/lib/logger";
 import { requireRole } from "@/lib/auth/require-role";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { carregaEtapasCitadas } from "@/lib/followup/etapas-citadas";
 import { carregaAgentesCitados } from "@/lib/followup/agentes-citados";
 import { env } from "@/lib/env";
-import { validateFlowForPublish } from "@/lib/followup/validate-publish";
+import { validateFlowForPublish, calculateFlowLongestPath } from "@/lib/followup/validate-publish";
 import { publishFollowupFlowVersion } from "@/lib/followup/publish";
 import type { FlowGraph } from "@/lib/followup/graph-schema";
 import {
@@ -246,6 +247,15 @@ export async function POST(_req: NextRequest, ctx: RouteCtx): Promise<Response> 
       .eq("id", id)
       .eq("organization_id", activeOrg.orgId);
   }
+
+  logger.info("[followup-flow.publish] fluxo publicado com sucesso", {
+    flow_id: id,
+    organization_id: activeOrg.orgId,
+    longest_path_steps: calculateFlowLongestPath(graph),
+    node_count: graph.nodes.length,
+    edge_count: graph.edges.length,
+    requestId,
+  });
 
   const { data: updatedPointer, error: reloadErr } = await admin
     .from("followup_flow_pointers")

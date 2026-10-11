@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { validateFlowForPublish } from './validate-publish';
-import type { FlowGraph, FlowNode, FlowEdge } from './graph-schema';
+import { validateFlowForPublish, FLOW_MAX_STATIC_PATH_STEPS, calculateFlowLongestPath } from './validate-publish';
+import { flowGraphSchema, type FlowGraph, type FlowNode, type FlowEdge } from './graph-schema';
 
 const pos = { x: 0, y: 0 };
 const TEMPLATE_ID = '00000000-0000-4000-8000-000000000000';
@@ -250,38 +250,251 @@ describe('validateFlowForPublish', () => {
     }
   });
 
-  it('does not flag max_steps_exceeded for a path of exactly 30 nodes', () => {
-    const waitNodes: FlowNode[] = [];
-    const edges: FlowEdge[] = [];
-    let prev = 't1';
-    for (let i = 1; i <= 28; i++) {
-      const id = `w${i}`;
-      waitNodes.push(wait(id, { mode: 'fixed', duration_ms: 300_000 }));
-      edges.push(edge(prev, id, always()));
-      prev = id;
+  describe('FLOW_MAX_STATIC_PATH_STEPS (100 passos) — Auditoria e Suíte Completa', () => {
+    function makeLinearFlow(stepCount: number): FlowGraph {
+      const waitNodes: FlowNode[] = [];
+      const edges: FlowEdge[] = [];
+      let prev = 't1';
+      for (let i = 1; i <= stepCount - 2; i++) {
+        const id = `w${i}`;
+        waitNodes.push(wait(id, { mode: 'fixed', duration_ms: 300_000 }));
+        edges.push(edge(prev, id, always()));
+        prev = id;
+      }
+      edges.push(edge(prev, 'e1', always()));
+      return graph([trigger('t1'), ...waitNodes, end('e1')], edges);
     }
-    edges.push(edge(prev, 'e1', always()));
-    const g = graph([trigger('t1'), ...waitNodes, end('e1')], edges); // 1 + 28 + 1 = 30 nodes
-    expect(validateFlowForPublish(g).ok).toBe(true);
-  });
 
-  it('flags max_steps_exceeded for a path of exactly 31 nodes', () => {
-    const waitNodes: FlowNode[] = [];
-    const edges: FlowEdge[] = [];
-    let prev = 't1';
-    for (let i = 1; i <= 29; i++) {
-      const id = `w${i}`;
-      waitNodes.push(wait(id, { mode: 'fixed', duration_ms: 300_000 }));
-      edges.push(edge(prev, id, always()));
-      prev = id;
-    }
-    edges.push(edge(prev, 'e1', always()));
-    const g = graph([trigger('t1'), ...waitNodes, end('e1')], edges); // 1 + 29 + 1 = 31 nodes
-    const result = validateFlowForPublish(g);
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.errors.map((e) => e.code)).toEqual(['max_steps_exceeded']);
-    }
+    it('1. fluxo com 29 passos = PASS', () => {
+      const g = makeLinearFlow(29);
+      const res = validateFlowForPublish(g);
+      expect(res.ok).toBe(true);
+      expect(calculateFlowLongestPath(g)).toBe(29);
+    });
+
+    it('2. fluxo com 30 passos = PASS', () => {
+      const g = makeLinearFlow(30);
+      const res = validateFlowForPublish(g);
+      expect(res.ok).toBe(true);
+      expect(calculateFlowLongestPath(g)).toBe(30);
+    });
+
+    it('3. fluxo com 31 passos = PASS após mudança (ultrapassava limite antigo de 30)', () => {
+      const g = makeLinearFlow(31);
+      const res = validateFlowForPublish(g);
+      expect(res.ok).toBe(true);
+      expect(calculateFlowLongestPath(g)).toBe(31);
+    });
+
+    it('4. fluxo com 50 passos = PASS', () => {
+      const g = makeLinearFlow(50);
+      const res = validateFlowForPublish(g);
+      expect(res.ok).toBe(true);
+      expect(calculateFlowLongestPath(g)).toBe(50);
+    });
+
+    it('5. fluxo com 99 passos = PASS', () => {
+      const g = makeLinearFlow(99);
+      const res = validateFlowForPublish(g);
+      expect(res.ok).toBe(true);
+      expect(calculateFlowLongestPath(g)).toBe(99);
+    });
+
+    it('6. fluxo com 100 passos = PASS no limite exato', () => {
+      const g = makeLinearFlow(100);
+      const res = validateFlowForPublish(g);
+      expect(res.ok).toBe(true);
+      expect(calculateFlowLongestPath(g)).toBe(100);
+    });
+
+    it('7. fluxo com 101 passos = FAIL com mensagem aprimorada e node_id null', () => {
+      const g = makeLinearFlow(101);
+      const res = validateFlowForPublish(g);
+      expect(res.ok).toBe(false);
+      if (!res.ok) {
+        expect(res.errors.map((e) => e.code)).toEqual(['max_steps_exceeded']);
+        expect(res.errors[0]?.node_id).toBeNull();
+        expect(res.errors[0]?.message).toBe(
+          `O caminho mais longo deste fluxo possui 101 passos. O limite atual é ${FLOW_MAX_STATIC_PATH_STEPS}.`
+        );
+      }
+    });
+
+    it('8. branch curta + branch longa usa maior caminho', () => {
+      const t = trigger('t1');
+      const cond = condition('c1');
+      const eCond = edge('t1', 'c1', always());
+
+      // Branch curta: c1 -> w_short -> end_short (4 passos no total: t1, c1, w_short, end_short)
+      const wShort = wait('w_short', { mode: 'fixed', duration_ms: 300_000 });
+      const endShort = end('e_short');
+      const eShort1 = edge('c1', 'w_short', condResult(true));
+      const eShort2 = edge('w_short', 'e_short', always());
+
+      // Branch longa: c1 -> w_long_1 .. w_long_40 -> end_long (43 passos no total: t1, c1, 40 waits, end_long)
+      const longWaits: FlowNode[] = [];
+      const longEdges: FlowEdge[] = [];
+      let prevLong = 'c1';
+      for (let i = 1; i <= 40; i++) {
+        const id = `wl_${i}`;
+        longWaits.push(wait(id, { mode: 'fixed', duration_ms: 300_000 }));
+        longEdges.push(edge(prevLong, id, i === 1 ? condResult(false) : always()));
+        prevLong = id;
+      }
+      const endLong = end('e_long');
+      longEdges.push(edge(prevLong, 'e_long', always()));
+
+      const g = graph(
+        [t, cond, wShort, endShort, ...longWaits, endLong],
+        [eCond, eShort1, eShort2, ...longEdges]
+      );
+      const res = validateFlowForPublish(g);
+      expect(res.ok).toBe(true);
+      expect(calculateFlowLongestPath(g)).toBe(43); // 1 trigger + 1 cond + 40 waits + 1 end
+    });
+
+    it('9. múltiplas branches calculadas corretamente escolhendo o caminho crítico', () => {
+      const t = trigger('t1');
+      const cls = classify('cls1', ['a', 'b', 'c']);
+      const eCls = edge('t1', 'cls1', always());
+
+      const createBranch = (name: string, count: number, outcome: 'converted' | 'exhausted') => {
+        const wNodes: FlowNode[] = [];
+        const eList: FlowEdge[] = [];
+        let p = 'cls1';
+        for (let i = 1; i <= count; i++) {
+          const id = `${name}_${i}`;
+          wNodes.push(wait(id, { mode: 'fixed', duration_ms: 300_000 }));
+          eList.push(edge(p, id, i === 1 ? classMatch(name) : always()));
+          p = id;
+        }
+        const eNode = end(`end_${name}`, outcome);
+        eList.push(edge(p, eNode.id, always()));
+        return { wNodes, eList, eNode };
+      };
+
+      const bA = createBranch('a', 10, 'converted'); // 1 + 1 + 10 + 1 = 13 passos
+      const bB = createBranch('b', 30, 'exhausted'); // 1 + 1 + 30 + 1 = 33 passos
+      const bC = createBranch('c', 60, 'converted'); // 1 + 1 + 60 + 1 = 63 passos
+      const noReply = end('e_no_reply');
+      const eNoReply = edge('cls1', 'e_no_reply', classMatch('no_reply'));
+      const alwaysFb = end('e_always');
+      const eAlways = edge('cls1', 'e_always', always());
+
+      const g = graph(
+        [t, cls, ...bA.wNodes, bA.eNode, ...bB.wNodes, bB.eNode, ...bC.wNodes, bC.eNode, noReply, alwaysFb],
+        [eCls, ...bA.eList, ...bB.eList, ...bC.eList, eNoReply, eAlways]
+      );
+      const res = validateFlowForPublish(g);
+      expect(res.ok).toBe(true);
+      expect(calculateFlowLongestPath(g)).toBe(63); // caminho crítico da branch 'c'
+    });
+
+    it('10. ciclo inválido continua bloqueado', () => {
+      const t = trigger('t1');
+      const a1 = actionTemplate('a1');
+      const a2 = actionTemplate('a2');
+      const e1 = end('e1');
+      const g = graph(
+        [t, a1, a2, e1],
+        [
+          edge('t1', 'a1', always()),
+          edge('a1', 'a2', always()),
+          edge('a2', 'a1', always()), // ciclo sem espera >= 5min
+          edge('a2', 'e1', always()),
+        ]
+      );
+      const res = validateFlowForPublish(g);
+      expect(res.ok).toBe(false);
+      if (!res.ok) {
+        expect(res.errors.map((e) => e.code)).toContain('cycle_without_wait');
+      }
+    });
+
+    it('11. flow sem end continua bloqueado', () => {
+      const t = trigger('t1');
+      const w1 = wait('w1', { mode: 'fixed', duration_ms: 300_000 });
+      const w2 = wait('w2', { mode: 'fixed', duration_ms: 300_000 });
+      const e1 = end('e1');
+      const g = graph(
+        [t, w1, w2, e1],
+        [
+          edge('t1', 'w1', always()),
+          edge('w1', 'w2', always()), // w2 não vai a lugar nenhum nem a end
+          edge('w1', 'e1', always()),
+        ]
+      );
+      const res = validateFlowForPublish(g);
+      expect(res.ok).toBe(false);
+      if (!res.ok) {
+        expect(res.errors.map((e) => e.code)).toContain('no_end_path');
+        const err = res.errors.find((e) => e.code === 'no_end_path');
+        expect(err?.node_id).toBe('w2');
+      }
+    });
+
+    it('12. Node IA dentro de fluxo longo publica', () => {
+      const waitNodes: FlowNode[] = [];
+      const edges: FlowEdge[] = [];
+      let prev = 't1';
+      for (let i = 1; i <= 50; i++) {
+        const id = `w_pre_${i}`;
+        waitNodes.push(wait(id, { mode: 'fixed', duration_ms: 300_000 }));
+        edges.push(edge(prev, id, always()));
+        prev = id;
+      }
+      const aiNode: FlowNode = {
+        id: 'ai_1',
+        type: 'ai_node',
+        label: 'Node IA Consultor',
+        position: pos,
+        config: {
+          mode: 'custom_prompt',
+          objective: 'Qualificar lead para plano premium',
+          custom_prompt: 'Pergunte o faturamento mensal do cliente.',
+          max_turns: 5,
+        },
+      };
+      edges.push(edge(prev, 'ai_1', always()));
+      prev = 'ai_1';
+      for (let i = 1; i <= 20; i++) {
+        const id = `w_post_${i}`;
+        waitNodes.push(wait(id, { mode: 'fixed', duration_ms: 300_000 }));
+        edges.push(edge(prev, id, always()));
+        prev = id;
+      }
+      edges.push(edge(prev, 'e1', always()));
+      const g = graph([trigger('t1'), ...waitNodes, aiNode, end('e1')], edges); // total: 1 + 50 + 1 + 20 + 1 = 73 nós
+      const res = validateFlowForPublish(g, { aiNodeEnabled: true });
+      expect(res.ok).toBe(true);
+      expect(calculateFlowLongestPath(g)).toBe(73);
+    });
+
+    it('13. Performance com 100 nodes — publish validation, serialization, save schema', () => {
+      const g = makeLinearFlow(100);
+
+      // Publish validation time
+      const tVal0 = performance.now();
+      const valRes = validateFlowForPublish(g);
+      const tValElapsed = performance.now() - tVal0;
+      expect(valRes.ok).toBe(true);
+      expect(tValElapsed).toBeLessThan(100);
+
+      // Serialization time
+      const tSer0 = performance.now();
+      const json = JSON.stringify(g);
+      const parsed = JSON.parse(json);
+      const tSerElapsed = performance.now() - tSer0;
+      expect(parsed.nodes.length).toBe(100);
+      expect(tSerElapsed).toBeLessThan(50);
+
+      // Save time (flowGraphSchema safeParse)
+      const tSave0 = performance.now();
+      const schemaRes = flowGraphSchema.safeParse(g);
+      const tSaveElapsed = performance.now() - tSave0;
+      expect(schemaRes.success).toBe(true);
+      expect(tSaveElapsed).toBeLessThan(100);
+    });
   });
 
   // Regression for the old per-path DFS: a width-2 "diamond" DAG re-converges

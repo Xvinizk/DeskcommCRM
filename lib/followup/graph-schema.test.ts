@@ -11,6 +11,8 @@ import {
   flowNodeSchema,
   flowEdgeSchema,
   flowGraphSchema,
+  FLOW_MAX_GRAPH_NODES,
+  FLOW_MAX_GRAPH_EDGES,
   FALLBACK_BRANCH_ID,
   NO_REPLY_BRANCH_ID,
   CONDITION_TRUE_BRANCH_ID,
@@ -998,8 +1000,8 @@ describe('graph-schema', () => {
       expect(result.success).toBe(false);
     });
 
-    it('rejects graph with > 60 nodes', () => {
-      const nodes = Array.from({ length: 61 }, (_, i) => ({
+    it('rejects graph with > FLOW_MAX_GRAPH_NODES nodes', () => {
+      const nodes = Array.from({ length: FLOW_MAX_GRAPH_NODES + 1 }, (_, i) => ({
         id: `n${i}`,
         type: 'trigger' as const,
         label: `Node ${i}`,
@@ -1013,7 +1015,7 @@ describe('graph-schema', () => {
       expect(result.success).toBe(false);
     });
 
-    it('rejects graph with > 120 edges', () => {
+    it('rejects graph with > FLOW_MAX_GRAPH_EDGES edges', () => {
       const nodes = [
         {
           id: 'trigger-1',
@@ -1030,7 +1032,7 @@ describe('graph-schema', () => {
           config: { outcome: 'converted' as const },
         },
       ];
-      const edges = Array.from({ length: 121 }, (_, i) => ({
+      const edges = Array.from({ length: FLOW_MAX_GRAPH_EDGES + 1 }, (_, i) => ({
         id: `edge${i}`,
         source: 'trigger-1',
         target: 'end-1',

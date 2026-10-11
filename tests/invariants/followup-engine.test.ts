@@ -3,7 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import pg from "pg";
 
 import { runFollowupTick, type AdminClient, type FollowupJobRequest, type TickDeps } from "@/lib/followup/engine";
-import { flowGraphSchema, type FlowGraph } from "@/lib/followup/graph-schema";
+import { flowGraphSchema, FLOW_MAX_RUNTIME_STEPS, type FlowGraph } from "@/lib/followup/graph-schema";
 import { MAX_ACTION_RECHECKS, type EnrollmentEventRef, type EnrollmentRow } from "@/lib/followup/node-handlers";
 import { completeTurnForEnrollment, createPgAdminClient } from "@/lib/followup/turn-bridge";
 import { persistirRespostaFollowupPg } from "@/lib/followup/persistir-resposta";
@@ -562,7 +562,7 @@ describe("runFollowupTick — backoff progride e esgota em 'dead' + inbox item",
 // ---- 6. max_steps ---------------------------------------------------------
 
 describe("runFollowupTick — max_steps", () => {
-  it("steps_taken > 80 mata o enrollment sem sequer carregar o grafo", async () => {
+  it("steps_taken > FLOW_MAX_RUNTIME_STEPS mata o enrollment sem sequer carregar o grafo", async () => {
     const org = "aaaaaaa5-0000-4000-8000-000000000001";
     await seedOrg(org);
     const contactId = await seedContact(org);
@@ -573,7 +573,7 @@ describe("runFollowupTick — max_steps", () => {
       versionId,
       contactId,
       currentNodeId: "t1",
-      stepsTaken: 81,
+      stepsTaken: FLOW_MAX_RUNTIME_STEPS + 1,
     });
 
     const jobs: FollowupJobRequest[] = [];

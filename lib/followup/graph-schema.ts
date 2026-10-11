@@ -770,10 +770,24 @@ export type FlowEdgeCondition = FlowEdge['condition'];
  * grafo que só quebra adiante, no meio de um disparo. Sem migração de
  * rascunho — decisão registrada na issue #699.
  */
+export const FLOW_MAX_STATIC_PATH_STEPS = 100;
+export const FLOW_MAX_GRAPH_NODES = 200;
+export const FLOW_MAX_GRAPH_EDGES = 400;
+
+/**
+ * Limite máximo de execução real (odômetro steps_taken) de um enrollment.
+ * Atua como dead-man switch contra loops infinitos e reentrâncias contínuas.
+ *
+ * Invariante canônico: FLOW_MAX_RUNTIME_STEPS >= FLOW_MAX_STATIC_PATH_STEPS
+ * Margem de segurança: suporta caminhos estáticos de até 100 passos mais
+ * transições de wait/wake, typing, match_reply e voltas de repeat.
+ */
+export const FLOW_MAX_RUNTIME_STEPS = 200;
+
 export const flowGraphSchema = z
   .strictObject({
-    nodes: z.array(flowNodeSchema).min(2).max(60),
-    edges: z.array(flowEdgeSchema).max(120),
+    nodes: z.array(flowNodeSchema).min(2).max(FLOW_MAX_GRAPH_NODES),
+    edges: z.array(flowEdgeSchema).max(FLOW_MAX_GRAPH_EDGES),
   })
   .superRefine((grafo, ctx) => {
     const idsDeNo = new Set<string>();
