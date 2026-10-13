@@ -1105,7 +1105,7 @@ async function processEnrollment(
     }
     const textoInbound = currentInboundBody?.trim() ?? "";
     if (
-      textoInbound &&
+      (textoInbound || (currentInboundBody !== undefined && node.type === "match_reply" && node.config.advance_on_any_reply)) &&
       (node.type === "match_reply" || node.type === "wait" || node.type === "delay" || node.type === "typing")
     ) {
       wokeEarly = true;
@@ -1125,14 +1125,17 @@ async function processEnrollment(
     ) {
       // Sempre no contato inteiro: a captação e o WhatsApp podem ser conversas
       // diferentes, e filtrar pela conversation_id do enrollment esconde o SIM.
-      lastInboundBody =
-        (await db.loadLastInboundBody(
-          currentEnrollment.organization_id,
-          currentEnrollment.contact_id,
-          null,
-          currentEnrollment.updated_at,
-        )) ?? "";
-      if (node.type === "match_reply" && lastInboundBody.trim()) {
+      const loadedInbound = await db.loadLastInboundBody(
+        currentEnrollment.organization_id,
+        currentEnrollment.contact_id,
+        null,
+        currentEnrollment.updated_at,
+      );
+      lastInboundBody = loadedInbound ?? "";
+      if (
+        node.type === "match_reply" &&
+        (lastInboundBody.trim().length > 0 || (node.config.advance_on_any_reply && loadedInbound !== null))
+      ) {
         wokeEarly = true;
       }
     }
@@ -1292,7 +1295,7 @@ export function createSupabaseAdminClient(admin: SupabaseClient): AdminClient {
       const ids = await idsDoContatoEGemeos(admin, orgId, contactId);
       let q = admin
         .from("messages")
-        .select("body")
+        .select("body, media_url, type")
         .eq("organization_id", orgId)
         .in("contact_id", ids)
         .eq("direction", "inbound");
@@ -1300,7 +1303,11 @@ export function createSupabaseAdminClient(admin: SupabaseClient): AdminClient {
       if (naoAntesDe) q = q.gte("sent_at", naoAntesDe);
       const { data, error } = await q.order("sent_at", { ascending: false }).limit(1).maybeSingle();
       if (error) throw new Error(error.message);
-      return typeof data?.body === "string" ? data.body : null;
+      if (!data) return null;
+      if (typeof data.body === "string" && data.body.trim().length > 0) return data.body;
+      if (typeof data.media_url === "string" && data.media_url.trim().length > 0) return data.media_url;
+      if (typeof data.type === "string" && data.type !== "text") return `[${data.type}]`;
+      return typeof data.body === "string" ? data.body : null;
     },
     async loadEnrollmentEvents(enrollmentId) {
       const { data, error } = await admin

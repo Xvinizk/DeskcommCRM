@@ -15,6 +15,7 @@ import {
   FLOW_MAX_GRAPH_EDGES,
   FALLBACK_BRANCH_ID,
   NO_REPLY_BRANCH_ID,
+  ANY_REPLY_BRANCH_ID,
   CONDITION_TRUE_BRANCH_ID,
   CONDITION_FALSE_BRANCH_ID,
   RESERVED_BRANCH_IDS,
@@ -714,10 +715,41 @@ describe('graph-schema', () => {
       ).toBe(false);
       expect(
         matchReplyConfigSchema.safeParse({
+          branches: [{ id: ANY_REPLY_BRANCH_ID, label: 'X', op: 'contains', pattern: 'x' }],
+          grace_timeout_ms: 900_000,
+        }).success,
+      ).toBe(false);
+      expect(
+        matchReplyConfigSchema.safeParse({
           branches: [{ id: 'br_a', label: 'A', op: 'regex', pattern: 'x' }],
           grace_timeout_ms: 900_000,
         }).success,
       ).toBe(false);
+    });
+
+    it('match_reply: advance_on_any_reply defaults to false and relaxes min branches when true', () => {
+      const parsedDefault = matchReplyConfigSchema.parse({
+        branches: [{ id: 'br_sim', label: 'Sim', op: 'contains', pattern: 'sim' }],
+        grace_timeout_ms: 900_000,
+      });
+      expect(parsedDefault.advance_on_any_reply).toBe(false);
+
+      const parsedAny = matchReplyConfigSchema.safeParse({
+        advance_on_any_reply: true,
+        branches: [],
+        grace_timeout_ms: 900_000,
+      });
+      expect(parsedAny.success).toBe(true);
+      if (parsedAny.success) {
+        expect(parsedAny.data.advance_on_any_reply).toBe(true);
+      }
+
+      const rejectedEmpty = matchReplyConfigSchema.safeParse({
+        advance_on_any_reply: false,
+        branches: [],
+        grace_timeout_ms: 900_000,
+      });
+      expect(rejectedEmpty.success).toBe(false);
     });
 
     it('accepts action node', () => {
@@ -1373,7 +1405,7 @@ describe('graph-schema', () => {
         { type: 'ai_classify', config: { classes: ['Interessado'], grace_timeout_ms: 900_000, target: 'last_reply' } },
         {
           type: 'match_reply',
-          config: { branches: [{ id: 'br_sim', label: 'Sim', op: 'eq', pattern: 'sim' }], grace_timeout_ms: 900_000 },
+          config: { advance_on_any_reply: false, branches: [{ id: 'br_sim', label: 'Sim', op: 'eq', pattern: 'sim' }], grace_timeout_ms: 900_000 },
         },
         { type: 'repeat', config: { max_count: 12 } },
       ];
@@ -1632,6 +1664,26 @@ describe('graph-schema', () => {
         expect(branches[0]!.condition).toEqual({ type: 'branch', branch_id: 'br_sim' });
         expect(branches[2]!.condition).toEqual({ type: 'branch', branch_id: NO_REPLY_BRANCH_ID });
         expect(branches.at(-1)!.condition).toEqual({ type: 'always' });
+      });
+
+      it('match_reply: advance_on_any_reply returns only Respondeu and Sem resposta', () => {
+        const node = flowNodeSchema.parse({
+          id: 'mr_any',
+          type: 'match_reply',
+          label: 'Qualquer resposta',
+          position: { x: 0, y: 0 },
+          config: {
+            advance_on_any_reply: true,
+            branches: [],
+            grace_timeout_ms: 900_000,
+          },
+        });
+        const branches = nodeBranches(node);
+        expect(branches.map((b) => b.id)).toEqual([ANY_REPLY_BRANCH_ID, NO_REPLY_BRANCH_ID]);
+        expect(branches[0]!.label).toBe('Respondeu');
+        expect(branches[0]!.condition).toEqual({ type: 'branch', branch_id: ANY_REPLY_BRANCH_ID });
+        expect(branches[1]!.label).toBe('Sem resposta');
+        expect(branches[1]!.condition).toEqual({ type: 'branch', branch_id: NO_REPLY_BRANCH_ID });
       });
     });
 

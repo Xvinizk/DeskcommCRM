@@ -1,5 +1,5 @@
 import type { FlowGraph, FlowEdge, FlowNode } from './graph-schema';
-import { branchIdForCondition, nodeBranches, FLOW_MAX_STATIC_PATH_STEPS } from './graph-schema';
+import { ANY_REPLY_BRANCH_ID, branchIdForCondition, nodeBranches, FLOW_MAX_STATIC_PATH_STEPS } from './graph-schema';
 export { FLOW_MAX_STATIC_PATH_STEPS } from './graph-schema';
 import { rotuloDoRamo } from './rotulo-do-ramo';
 import type { NomesDeValor } from './vocabulario';
@@ -312,7 +312,10 @@ function cobrirRamos(
       node_id: node.id,
       code: 'missing_branch_edge',
       branch_id: branch.id,
-      message: `Nó "${node.id}": a saída "${rotuloDoRamo(branch, nomes)}" não está ligada a nada.`,
+      message:
+        branch.id === ANY_REPLY_BRANCH_ID
+          ? "A saída 'Respondeu' precisa estar conectada."
+          : `Nó "${node.id}": a saída "${rotuloDoRamo(branch, nomes)}" não está ligada a nada.`,
     });
   }
 }

@@ -767,7 +767,7 @@ describe('validateFlowForPublish — cobertura por ramo num match_reply', () => 
       type: 'match_reply',
       label: id,
       position: pos,
-      config: { branches: RAMOS, grace_timeout_ms: 900_000 },
+      config: { advance_on_any_reply: false, branches: RAMOS, grace_timeout_ms: 900_000 },
     };
   }
 

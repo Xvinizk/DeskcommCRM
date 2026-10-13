@@ -74,6 +74,9 @@ export function isSendMessageNode(node: { type: string }): boolean {
 export const FALLBACK_BRANCH_ID = 'else';
 /** `ai_classify` grace timeout expired without a classification. */
 export const NO_REPLY_BRANCH_ID = 'no_reply';
+/** Saída do `match_reply` quando `advance_on_any_reply` está ativado e o contato respondeu. */
+export const ANY_REPLY_BRANCH_ID = 'any_reply';
+export const ANY_REPLY_LABEL = 'Respondeu';
 /** The two outputs of a `condition` node evaluating its checks together (`branching: 'combined'`). */
 export const CONDITION_TRUE_BRANCH_ID = 'true';
 export const CONDITION_FALSE_BRANCH_ID = 'false';
@@ -101,6 +104,7 @@ export const AI_NODE_BRANCH_IDS = [
 export const RESERVED_BRANCH_IDS = [
   FALLBACK_BRANCH_ID,
   NO_REPLY_BRANCH_ID,
+  ANY_REPLY_BRANCH_ID,
   CONDITION_TRUE_BRANCH_ID,
   CONDITION_FALSE_BRANCH_ID,
   REPEAT_BODY_BRANCH_ID,
@@ -218,10 +222,15 @@ export type IfExists = z.infer<typeof ifExistsSchema>;
  */
 export const matchReplyConfigSchema = z
   .strictObject({
-    branches: z.array(matchReplyBranchSchema).min(1).max(8),
+    branches: z.array(matchReplyBranchSchema).max(8).default([]),
     grace_timeout_ms: z.number().int().min(900_000),
     save_to: replySaveToSchema.optional(),
     if_exists: ifExistsSchema.optional(),
+    advance_on_any_reply: z.boolean().optional().default(false),
+  })
+  .refine((c) => c.advance_on_any_reply || c.branches.length >= 1, {
+    message: "branches must have at least 1 rule when advance_on_any_reply is false",
+    path: ["branches"],
   })
   .refine((c) => new Set(c.branches.map((b) => b.id)).size === c.branches.length, {
     message: "branches[].id must be unique within the node",
@@ -988,6 +997,24 @@ export function nodeBranches(node: BranchableNode): FlowBranch[] {
     }
 
     case 'match_reply': {
+      if (node.config.advance_on_any_reply) {
+        return [
+          {
+            id: ANY_REPLY_BRANCH_ID,
+            label: ANY_REPLY_LABEL,
+            check: null,
+            kind: 'match',
+            condition: { type: 'branch', branch_id: ANY_REPLY_BRANCH_ID },
+          },
+          {
+            id: NO_REPLY_BRANCH_ID,
+            label: NO_REPLY_LABEL,
+            check: null,
+            kind: 'match',
+            condition: { type: 'branch', branch_id: NO_REPLY_BRANCH_ID },
+          },
+        ];
+      }
       const classBranches: FlowBranch[] = node.config.branches.map((b) => ({
         id: b.id,
         label: b.label,

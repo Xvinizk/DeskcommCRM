@@ -47,6 +47,8 @@ import {
   AI_NODE_HANDOFF_BRANCH_ID,
   AI_NODE_MAX_TURNS_BRANCH_ID,
   AI_NODE_TIMEOUT_BRANCH_ID,
+  ANY_REPLY_BRANCH_ID,
+  ANY_REPLY_LABEL,
   CONDITION_FALSE_BRANCH_ID,
   CONDITION_TRUE_BRANCH_ID,
   FALLBACK_BRANCH_ID,
@@ -392,6 +394,7 @@ export const FRASE_DE_OUTROS_CASOS = "nos outros casos";
 export const RAMOS_RESERVADOS_EM_FRASE: Record<RamoReservado, string> = {
   [FALLBACK_BRANCH_ID]: "caminho normal",
   [NO_REPLY_BRANCH_ID]: "quando ninguém responde",
+  [ANY_REPLY_BRANCH_ID]: "quando o contato responder qualquer mensagem",
   [CONDITION_TRUE_BRANCH_ID]: "quando a condição é verdadeira",
   [CONDITION_FALSE_BRANCH_ID]: "quando a condição é falsa",
   [REPEAT_BODY_BRANCH_ID]: "quando ainda falta uma volta",
@@ -455,6 +458,7 @@ export function fraseDaRegraSemNome(
 export const RAMOS_RESERVADOS: Record<RamoReservado, string> = {
   [FALLBACK_BRANCH_ID]: conditionLabel({ type: "always" }),
   [NO_REPLY_BRANCH_ID]: conditionLabel({ type: "class_match", value: NO_REPLY_BRANCH_ID }),
+  [ANY_REPLY_BRANCH_ID]: ANY_REPLY_LABEL,
   [CONDITION_TRUE_BRANCH_ID]: conditionLabel({ type: "cond_result", value: true }),
   [CONDITION_FALSE_BRANCH_ID]: conditionLabel({ type: "cond_result", value: false }),
   [REPEAT_BODY_BRANCH_ID]: "Próxima volta",

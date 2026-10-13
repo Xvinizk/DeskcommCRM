@@ -66,7 +66,7 @@ async function ultimoInboundDoContato(
 ): Promise<InboundResolvido> {
   const { data, error } = await admin
     .from("messages")
-    .select("body, sent_at")
+    .select("body, media_url, type, sent_at")
     .eq("organization_id", orgId)
     .in("contact_id", contactIds)
     .eq("direction", "inbound")
@@ -74,7 +74,11 @@ async function ultimoInboundDoContato(
     .limit(1)
     .maybeSingle();
   if (error) throw new Error(error.message);
-  const texto = typeof data?.body === "string" ? data.body.trim() : "";
+  const texto =
+    (typeof data?.body === "string" && data.body.trim()) ||
+    (typeof data?.media_url === "string" && data.media_url.trim()) ||
+    (typeof data?.type === "string" && data.type !== "text" ? `[${data.type}]` : "") ||
+    "";
   const enviadaEm = typeof data?.sent_at === "string" ? data.sent_at : null;
   return { texto, enviadaEm };
 }
