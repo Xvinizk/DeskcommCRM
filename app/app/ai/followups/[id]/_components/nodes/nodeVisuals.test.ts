@@ -104,10 +104,32 @@ describe("nenhum card fala a língua do banco", () => {
     expect(
       describeNodeConfig(
         "match_reply",
-        { branches: [{ id: "br_sim", label: "Sim", op: "contains", pattern: "sim" }], grace_timeout_ms: 900_000 },
+        { advance_on_any_reply: false, branches: [{ id: "br_sim", label: "Sim", op: "contains", pattern: "sim" }], grace_timeout_ms: 900_000 },
         es,
       ),
     ).toBe("1 regla · espera 15 min");
+  });
+
+  it("descreve match_reply quando advance_on_any_reply está ativado", () => {
+    expect(
+      describeNodeConfig(
+        "match_reply",
+        { advance_on_any_reply: true, branches: [], grace_timeout_ms: 3_600_000 },
+        pt,
+      ),
+    ).toBe("Qualquer resposta · espera 60 min");
+    expect(
+      describeNodeConfig(
+        "match_reply",
+        {
+          advance_on_any_reply: true,
+          branches: [],
+          grace_timeout_ms: 3_600_000,
+          save_to: { kind: "contact_name" },
+        },
+        pt,
+      ),
+    ).toBe("Qualquer resposta · espera 60 min · grava resposta");
   });
 });
 

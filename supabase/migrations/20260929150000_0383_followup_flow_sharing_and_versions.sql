@@ -37,7 +37,14 @@ alter table public.followup_flow_shares enable row level security;
 
 drop policy if exists tenant_isolation_followup_flow_shares_all on public.followup_flow_shares;
 create policy tenant_isolation_followup_flow_shares_all on public.followup_flow_shares
-  for all using (organization_id in (select fn_user_org_ids()));
+  for all using (
+    organization_id in (select fn_user_org_ids())
+    and public.fn_role_at_least(organization_id, 'agent')
+  )
+  with check (
+    organization_id in (select fn_user_org_ids())
+    and public.fn_role_at_least(organization_id, 'agent')
+  );
 
 create index if not exists idx_followup_flow_shares_token
   on public.followup_flow_shares (token) where status = 'active';

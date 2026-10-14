@@ -1,7 +1,6 @@
 "use client";
 
 import { useT } from "@/hooks/i18n/useT";
-
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -14,7 +13,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { matchReplyConfigSchema, type IfExists, type MatchReplyBranch, type ReplySaveTo } from "@/lib/followup/graph-schema";
+import { Switch } from "@/components/ui/switch";
+import {
+  matchReplyConfigSchema,
+  type IfExists,
+  type MatchReplyBranch,
+  type ReplySaveTo,
+} from "@/lib/followup/graph-schema";
 import { ESPERA_PELA_RESPOSTA, SE_INFORMACAO_JA_EXISTIR } from "@/lib/followup/vocabulario";
 import { camposDoFunil } from "@/lib/leads/campos-do-funil";
 import { Plus, Trash } from "@/lib/ui/icons";
@@ -37,7 +42,10 @@ export function MatchReplyForm({
   onChange: (c: ConfigOf<"match_reply">) => void;
 }) {
   const t = useT();
-  const [branches, setBranches] = useState(config.branches);
+  const [advanceOnAnyReply, setAdvanceOnAnyReply] = useState<boolean>(
+    Boolean(config.advance_on_any_reply),
+  );
+  const [branches, setBranches] = useState<MatchReplyBranch[]>(config.branches ?? []);
   const [graceMin, setGraceMin] = useState(msToMin(config.grace_timeout_ms));
   const [saveTo, setSaveTo] = useState<ReplySaveTo | undefined>(config.save_to);
   const [ifExists, setIfExists] = useState<IfExists>(config.if_exists ?? "overwrite");
@@ -47,12 +55,14 @@ export function MatchReplyForm({
   const camposUnicos = [...new Map(campos.map((c) => [c.key, c])).values()];
 
   const commit = (next: {
+    advanceOnAnyReply: boolean;
     branches: MatchReplyBranch[];
     graceMin: number;
     saveTo?: ReplySaveTo;
     ifExists: IfExists;
   }) => {
     const candidate = {
+      advance_on_any_reply: next.advanceOnAnyReply,
       branches: next.branches,
       grace_timeout_ms: minToMs(next.graceMin),
       ...(next.saveTo ? { save_to: next.saveTo, if_exists: next.ifExists } : {}),
@@ -69,76 +79,101 @@ export function MatchReplyForm({
   const atualizar = (index: number, patch: Partial<MatchReplyBranch>) => {
     const next = branches.map((b, i) => (i === index ? { ...b, ...patch } : b));
     setBranches(next);
-    commit({ branches: next, graceMin, saveTo, ifExists });
+    commit({ advanceOnAnyReply, branches: next, graceMin, saveTo, ifExists });
   };
 
   return (
-    <div className="space-y-3">
-      <div className="space-y-2">
-        <Label>{t("Regras de texto")}</Label>
-        {branches.map((branch, index) => (
-          <div key={branch.id} className="space-y-2 rounded-md border border-border p-2">
-            <Input
-              aria-label={`Rótulo da regra ${index + 1}`}
-              value={branch.label}
-              onChange={(e) => atualizar(index, { label: e.target.value })}
-              placeholder={t("Rótulo")}
-            />
-            <div className="flex gap-2">
-              <Select
-                value={branch.op}
-                onValueChange={(v) => atualizar(index, { op: v as MatchReplyBranch["op"] })}
-              >
-                <SelectTrigger aria-label={`Comparação da regra ${index + 1}`}>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="contains">{t("Contém")}</SelectItem>
-                  <SelectItem value="eq">{t("É igual a")}</SelectItem>
-                </SelectContent>
-              </Select>
-              <Input
-                aria-label={`Texto da regra ${index + 1}`}
-                value={branch.pattern}
-                onChange={(e) => atualizar(index, { pattern: e.target.value })}
-                placeholder="texto a casar"
-              />
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                aria-label={`Remover regra ${index + 1}`}
-                disabled={branches.length <= 1}
-                onClick={() => {
-                  const next = branches.filter((_, i) => i !== index);
-                  setBranches(next);
-                  commit({ branches: next, graceMin, saveTo, ifExists });
-                }}
-              >
-                <Trash size={14} aria-hidden />
-              </Button>
-            </div>
-          </div>
-        ))}
-        {branches.length < 8 && (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              const usados = new Set(branches.map((b) => b.id));
-              const next = [
-                ...branches,
-                { id: novoId(usados), label: "Nova regra", op: "contains" as const, pattern: "ok" },
-              ];
-              setBranches(next);
-              commit({ branches: next, graceMin, saveTo, ifExists });
-            }}
-          >
-            <Plus size={14} aria-hidden className="mr-1" /> Adicionar regra
-          </Button>
-        )}
+    <div className="space-y-4">
+      <div className="flex items-center justify-between rounded-md border border-border p-3 bg-surface-muted/30">
+        <div className="space-y-0.5 pr-2">
+          <Label htmlFor="match-reply-any-toggle" className="text-sm font-medium cursor-pointer">
+            {t("Continuar com qualquer resposta")}
+          </Label>
+          <p className="text-xs text-text-muted">
+            {t(
+              "Quando ativado, qualquer mensagem recebida do contato faz o fluxo continuar, independentemente do conteúdo.",
+            )}
+          </p>
+        </div>
+        <Switch
+          id="match-reply-any-toggle"
+          data-testid="match-reply-any-toggle"
+          checked={advanceOnAnyReply}
+          onCheckedChange={(checked) => {
+            setAdvanceOnAnyReply(checked);
+            commit({ advanceOnAnyReply: checked, branches, graceMin, saveTo, ifExists });
+          }}
+        />
       </div>
+
+      {!advanceOnAnyReply && (
+        <div className="space-y-2">
+          <Label>{t("Regras de texto")}</Label>
+          {branches.map((branch, index) => (
+            <div key={branch.id} className="space-y-2 rounded-md border border-border p-2">
+              <Input
+                aria-label={`Rótulo da regra ${index + 1}`}
+                value={branch.label}
+                onChange={(e) => atualizar(index, { label: e.target.value })}
+                placeholder={t("Rótulo")}
+              />
+              <div className="flex gap-2">
+                <Select
+                  value={branch.op}
+                  onValueChange={(v) => atualizar(index, { op: v as MatchReplyBranch["op"] })}
+                >
+                  <SelectTrigger aria-label={`Comparação da regra ${index + 1}`}>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="contains">{t("Contém")}</SelectItem>
+                    <SelectItem value="eq">{t("É igual a")}</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Input
+                  aria-label={`Texto da regra ${index + 1}`}
+                  value={branch.pattern}
+                  onChange={(e) => atualizar(index, { pattern: e.target.value })}
+                  placeholder="texto a casar"
+                />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  aria-label={`Remover regra ${index + 1}`}
+                  disabled={branches.length <= 1}
+                  onClick={() => {
+                    const next = branches.filter((_, i) => i !== index);
+                    setBranches(next);
+                    commit({ advanceOnAnyReply, branches: next, graceMin, saveTo, ifExists });
+                  }}
+                >
+                  <Trash size={14} aria-hidden />
+                </Button>
+              </div>
+            </div>
+          ))}
+          {branches.length < 8 && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                const usados = new Set(branches.map((b) => b.id));
+                const next = [
+                  ...branches,
+                  { id: novoId(usados), label: "Nova regra", op: "contains" as const, pattern: "ok" },
+                ];
+                setBranches(next);
+                commit({ advanceOnAnyReply, branches: next, graceMin, saveTo, ifExists });
+              }}
+            >
+              <Plus size={14} aria-hidden className="mr-1" /> Adicionar regra
+            </Button>
+          )}
+        </div>
+      )}
+
       <div className="space-y-2">
         <Label htmlFor="match-reply-grace">{t(ESPERA_PELA_RESPOSTA.rotulo)}</Label>
         <Input
@@ -149,11 +184,12 @@ export function MatchReplyForm({
           onChange={(e) => {
             const v = Number(e.target.value);
             setGraceMin(v);
-            commit({ branches, graceMin: v, saveTo, ifExists });
+            commit({ advanceOnAnyReply, branches, graceMin: v, saveTo, ifExists });
           }}
         />
         <p className="text-xs text-text-muted">{ESPERA_PELA_RESPOSTA.ajuda(t)}</p>
       </div>
+
       <div className="space-y-2">
         <Label htmlFor="match-reply-save">{t("Gravar a resposta em")}</Label>
         <Select
@@ -173,7 +209,7 @@ export function MatchReplyForm({
             else if (v === "__livre__") next = { kind: "lead_custom", key: "campo_{{volta}}" };
             else next = { kind: "lead_custom", key: v };
             setSaveTo(next);
-            commit({ branches, graceMin, saveTo: next, ifExists });
+            commit({ advanceOnAnyReply, branches, graceMin, saveTo: next, ifExists });
           }}
         >
           <SelectTrigger id="match-reply-save">
@@ -187,7 +223,9 @@ export function MatchReplyForm({
                 {c.label} ({c.key})
               </SelectItem>
             ))}
-            <SelectItem value="__livre__">{t("Chave livre (use")} {t("{{volta}}")} {t("no laço)")}</SelectItem>
+            <SelectItem value="__livre__">
+              {t("Chave livre (use")} {t("{{volta}}")} {t("no laço)")}
+            </SelectItem>
           </SelectContent>
         </Select>
         {saveTo?.kind === "lead_custom" && !camposUnicos.some((c) => c.key === saveTo.key) && (
@@ -197,7 +235,7 @@ export function MatchReplyForm({
             onChange={(e) => {
               const next: ReplySaveTo = { kind: "lead_custom", key: e.target.value };
               setSaveTo(next);
-              commit({ branches, graceMin, saveTo: next, ifExists });
+              commit({ advanceOnAnyReply, branches, graceMin, saveTo: next, ifExists });
             }}
           />
         )}
@@ -209,7 +247,7 @@ export function MatchReplyForm({
               onValueChange={(v) => {
                 const next = v as IfExists;
                 setIfExists(next);
-                commit({ branches, graceMin, saveTo, ifExists: next });
+                commit({ advanceOnAnyReply, branches, graceMin, saveTo, ifExists: next });
               }}
             >
               <SelectTrigger id="match-reply-if-exists">
@@ -225,9 +263,28 @@ export function MatchReplyForm({
           </div>
         )}
         <p className="text-xs text-text-muted">
-          {t("Crie os campos em Configurações → Funis. A resposta só grava quando o contato responde (não no timeout).")}
+          {t(
+            "Crie os campos em Configurações → Funis. A resposta só grava quando o contato responde (não no timeout).",
+          )}
         </p>
       </div>
+
+      {advanceOnAnyReply && (
+        <div className="space-y-1.5 rounded-md bg-surface-muted/50 p-2.5 text-xs text-text-muted border border-border/50">
+          <span className="font-semibold text-text">{t("Saídas:")}</span>
+          <ul className="list-disc pl-4 space-y-0.5">
+            <li>
+              <span className="font-medium text-text">{t("Respondeu")}</span> —{" "}
+              {t("quando o contato responder qualquer mensagem")}
+            </li>
+            <li>
+              <span className="font-medium text-text">{t("Sem resposta")}</span> —{" "}
+              {t("quando o tempo limite expirar")}
+            </li>
+          </ul>
+        </div>
+      )}
+
       {error && <p className="text-xs text-error-fg">{error}</p>}
     </div>
   );

@@ -103,6 +103,7 @@ export function montarEscada(spec: EscadaSpec): FlowGraph {
       label: "Espera a resposta",
       position: { x: x(), y: 0 },
       config: {
+        advance_on_any_reply: false,
         branches: [{ id: "topou", label: spec.sim.rotulo, op: "contains", pattern: spec.sim.padrao }],
         grace_timeout_ms: spec.prazoDeRespostaMs,
       },

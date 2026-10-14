@@ -83,10 +83,18 @@ export function NodeCard({
         "w-56 rounded-md border border-l-4 border-border bg-surface shadow-sm transition-shadow",
         visual.borderClassName,
         selected && "ring-2 ring-accent-500 ring-offset-1 ring-offset-bg",
-        hasError && "border-error ring-2 ring-error ring-offset-1 ring-offset-bg",
+        hasError &&
+          "border-error ring-2 ring-error ring-offset-1 ring-offset-bg shadow-[0_0_12px_rgba(239,68,68,0.25)]",
       )}
       data-testid={`node-card-${id}`}
-      title={hasError ? errors!.join("; ") : undefined}
+      title={
+        hasError
+          ? errors!
+              .map((e) => (typeof e === "string" ? e : (e as any)?.message ?? ""))
+              .filter(Boolean)
+              .join("; ")
+          : undefined
+      }
     >
       {showTarget && <Handle type="target" position={Position.Top} />}
       <div className="flex items-center gap-2 px-3 py-2">
@@ -99,21 +107,35 @@ export function NodeCard({
           <Icon size={14} aria-hidden />
         </span>
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-medium text-text" title={label}>
-            {label}
-          </p>
+          <div className="flex items-center justify-between gap-1">
+            <p className="truncate text-sm font-medium text-text" title={label}>
+              {label}
+            </p>
+            {hasError && (
+              <span
+                className="inline-flex shrink-0 items-center gap-0.5 rounded bg-error/15 px-1.5 py-0.5 text-[10px] font-semibold text-error"
+                data-testid={`node-badge-error-${id}`}
+              >
+                <Warning size={10} weight="fill" />
+                <span>{t("Erro")}</span>
+              </span>
+            )}
+          </div>
           <p className="line-clamp-2 break-words text-xs text-text-muted" title={subtitle}>
             {subtitle}
           </p>
         </div>
       </div>
       {hasError && (
-        <p
-          className="border-t border-error/30 px-3 py-1.5 text-xs leading-snug text-error-fg"
+        <div
+          className="flex items-start gap-1 border-t border-error/30 bg-error/5 px-3 py-1.5 text-xs leading-snug text-error-fg"
           data-testid={`node-error-${id}`}
         >
-          {errors![0]}
-        </p>
+          <Warning size={12} weight="fill" className="mt-0.5 shrink-0 text-error" />
+          <span className="line-clamp-3">
+            {typeof errors![0] === "string" ? errors![0] : (errors![0] as any)?.message}
+          </span>
+        </div>
       )}
       {branchRows !== null && (
         <ul className="border-t border-border" data-testid={`node-branches-${id}`}>

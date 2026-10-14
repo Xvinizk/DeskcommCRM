@@ -79,6 +79,9 @@ export function DeleteFollowupFlowButton({
                     setOpen(false);
                     if (redirectToList) router.push("/app/ai/followups");
                   },
+                  onError: () => {
+                    setOpen(false);
+                  },
                 });
               }}
             >

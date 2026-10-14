@@ -16,14 +16,20 @@ import type { NextRequest } from "next/server";
 
 import { ok, fail } from "@/lib/api/wrappers";
 import { audit } from "@/lib/audit";
+import { logger } from "@/lib/logger";
 import { requireRole } from "@/lib/auth/require-role";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { carregaEtapasCitadas } from "@/lib/followup/etapas-citadas";
 import { carregaAgentesCitados } from "@/lib/followup/agentes-citados";
 import { env } from "@/lib/env";
-import { validateFlowForPublish } from "@/lib/followup/validate-publish";
+import { validateFlowForPublish, calculateFlowLongestPath } from "@/lib/followup/validate-publish";
 import { publishFollowupFlowVersion } from "@/lib/followup/publish";
 import type { FlowGraph } from "@/lib/followup/graph-schema";
+import {
+  publishErrorsToFlowIssues,
+  formatFlowIssuesToastMessage,
+  type FlowValidationIssue,
+} from "@/lib/followup/validation-contract";
 import { traduzir } from "@/lib/i18n/dicionario";
 
 export const dynamic = "force-dynamic";
@@ -81,16 +87,18 @@ export async function POST(_req: NextRequest, ctx: RouteCtx): Promise<Response> 
   ]);
 
   if (!pointer.draft_graph) {
+    const issues: FlowValidationIssue[] = [
+      {
+        node_id: null,
+        code: "no_trigger",
+        message: t("draft_graph ausente — monte o fluxo antes de publicar."),
+      },
+    ];
     return fail("validation_failed", t("Fluxo não tem rascunho pronto para publicar."), 422, {
       requestId,
       details: {
-        errors: [
-          {
-            node_id: null,
-            code: "no_trigger",
-            message: t("draft_graph ausente — monte o fluxo antes de publicar."),
-          },
-        ],
+        issues,
+        errors: issues,
       },
     });
   }
@@ -112,11 +120,20 @@ export async function POST(_req: NextRequest, ctx: RouteCtx): Promise<Response> 
         ? tc.keywords.map((k) => (typeof k === "string" ? k.trim() : "")).filter(Boolean)
         : [];
       if (kwList.length === 0) {
+        const issues: FlowValidationIssue[] = [
+          {
+            node_id: triggerNode.id,
+            node_type: "trigger",
+            field: "config.keywords",
+            code: "trigger_keywords_missing",
+            message: t("Informe pelo menos uma palavra-chave para o gatilho antes de publicar."),
+          },
+        ];
         return fail(
-          "trigger_keywords_missing",
+          "validation_failed",
           t("Informe pelo menos uma palavra-chave para o gatilho antes de publicar."),
           422,
-          { requestId },
+          { requestId, details: { issues, errors: issues } },
         );
       }
       activeTriggerConfig = {
@@ -198,9 +215,15 @@ export async function POST(_req: NextRequest, ctx: RouteCtx): Promise<Response> 
     agentes: agentesCitados.agentes,
   });
   if (!validation.ok) {
-    return fail("validation_failed", t("Fluxo reprovado na validação de publish."), 422, {
+    const issues = publishErrorsToFlowIssues(validation.errors, graph.nodes);
+    const nodeLabels = new Map(graph.nodes.map((n) => [n.id, n.label]));
+    const toastMsg = formatFlowIssuesToastMessage(issues, nodeLabels);
+    return fail("validation_failed", t(toastMsg), 422, {
       requestId,
-      details: { errors: validation.errors },
+      details: {
+        issues,
+        errors: validation.errors,
+      },
     });
   }
 
@@ -224,6 +247,15 @@ export async function POST(_req: NextRequest, ctx: RouteCtx): Promise<Response> 
       .eq("id", id)
       .eq("organization_id", activeOrg.orgId);
   }
+
+  logger.info("[followup-flow.publish] fluxo publicado com sucesso", {
+    flow_id: id,
+    organization_id: activeOrg.orgId,
+    longest_path_steps: calculateFlowLongestPath(graph),
+    node_count: graph.nodes.length,
+    edge_count: graph.edges.length,
+    requestId,
+  });
 
   const { data: updatedPointer, error: reloadErr } = await admin
     .from("followup_flow_pointers")

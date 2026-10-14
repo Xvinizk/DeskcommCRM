@@ -74,6 +74,9 @@ export function isSendMessageNode(node: { type: string }): boolean {
 export const FALLBACK_BRANCH_ID = 'else';
 /** `ai_classify` grace timeout expired without a classification. */
 export const NO_REPLY_BRANCH_ID = 'no_reply';
+/** Saída do `match_reply` quando `advance_on_any_reply` está ativado e o contato respondeu. */
+export const ANY_REPLY_BRANCH_ID = 'any_reply';
+export const ANY_REPLY_LABEL = 'Respondeu';
 /** The two outputs of a `condition` node evaluating its checks together (`branching: 'combined'`). */
 export const CONDITION_TRUE_BRANCH_ID = 'true';
 export const CONDITION_FALSE_BRANCH_ID = 'false';
@@ -101,6 +104,7 @@ export const AI_NODE_BRANCH_IDS = [
 export const RESERVED_BRANCH_IDS = [
   FALLBACK_BRANCH_ID,
   NO_REPLY_BRANCH_ID,
+  ANY_REPLY_BRANCH_ID,
   CONDITION_TRUE_BRANCH_ID,
   CONDITION_FALSE_BRANCH_ID,
   REPEAT_BODY_BRANCH_ID,
@@ -218,10 +222,15 @@ export type IfExists = z.infer<typeof ifExistsSchema>;
  */
 export const matchReplyConfigSchema = z
   .strictObject({
-    branches: z.array(matchReplyBranchSchema).min(1).max(8),
+    branches: z.array(matchReplyBranchSchema).max(8).default([]),
     grace_timeout_ms: z.number().int().min(900_000),
     save_to: replySaveToSchema.optional(),
     if_exists: ifExistsSchema.optional(),
+    advance_on_any_reply: z.boolean().optional().default(false),
+  })
+  .refine((c) => c.advance_on_any_reply || c.branches.length >= 1, {
+    message: "branches must have at least 1 rule when advance_on_any_reply is false",
+    path: ["branches"],
   })
   .refine((c) => new Set(c.branches.map((b) => b.id)).size === c.branches.length, {
     message: "branches[].id must be unique within the node",
@@ -360,43 +369,60 @@ export const messageTextConfigSchema = z.strictObject({
   body: z.string().min(1).max(4000),
 });
 
+function stripLegacyMedia<T>(raw: T): T {
+  if (raw && typeof raw === "object" && "media" in raw) {
+    const { media: _discarded, ...rest } = raw as Record<string, unknown>;
+    return rest as T;
+  }
+  return raw;
+}
+
 export const messageImageConfigSchema = z
-  .strictObject({
-    media_url: z.string().url().max(2000).optional(),
-    media_storage_path: z.string().min(1).max(500).optional(),
-    media_type: z.literal("image").optional(),
-    media_mime: z.string().max(100).optional(),
-    media_filename: z.string().max(255).optional(),
-    media_size_bytes: z.number().int().nonnegative().optional(),
-    caption: z.string().max(1000).optional(),
-  })
+  .preprocess(
+    stripLegacyMedia,
+    z.strictObject({
+      media_url: z.string().url().max(2000).optional(),
+      media_storage_path: z.string().min(1).max(500).optional(),
+      media_type: z.literal("image").optional(),
+      media_mime: z.string().max(100).optional(),
+      media_filename: z.string().max(255).optional(),
+      media_size_bytes: z.number().int().nonnegative().optional(),
+      caption: z.string().max(1000).optional(),
+    }),
+  )
   .refine((d) => Boolean(d.media_storage_path || d.media_url), {
     message: "media_storage_path or media_url is required",
   });
 
 export const messageVideoConfigSchema = z
-  .strictObject({
-    media_url: z.string().url().max(2000).optional(),
-    media_storage_path: z.string().min(1).max(500).optional(),
-    media_type: z.literal("video").optional(),
-    media_mime: z.string().max(100).optional(),
-    media_filename: z.string().max(255).optional(),
-    media_size_bytes: z.number().int().nonnegative().optional(),
-    caption: z.string().max(1000).optional(),
-  })
+  .preprocess(
+    stripLegacyMedia,
+    z.strictObject({
+      media_url: z.string().url().max(2000).optional(),
+      media_storage_path: z.string().min(1).max(500).optional(),
+      media_type: z.literal("video").optional(),
+      media_mime: z.string().max(100).optional(),
+      media_filename: z.string().max(255).optional(),
+      media_size_bytes: z.number().int().nonnegative().optional(),
+      caption: z.string().max(1000).optional(),
+    }),
+  )
   .refine((d) => Boolean(d.media_storage_path || d.media_url), {
     message: "media_storage_path or media_url is required",
   });
 
 export const messageAudioConfigSchema = z
-  .strictObject({
-    media_url: z.string().url().max(2000).optional(),
-    media_storage_path: z.string().min(1).max(500).optional(),
-    media_type: z.literal("audio").optional(),
-    media_mime: z.string().max(100).optional(),
-    media_filename: z.string().max(255).optional(),
-    media_size_bytes: z.number().int().nonnegative().optional(),
-  })
+  .preprocess(
+    stripLegacyMedia,
+    z.strictObject({
+      media_url: z.string().url().max(2000).optional(),
+      media_storage_path: z.string().min(1).max(500).optional(),
+      media_type: z.literal("audio").optional(),
+      media_mime: z.string().max(100).optional(),
+      media_filename: z.string().max(255).optional(),
+      media_size_bytes: z.number().int().nonnegative().optional(),
+    }),
+  )
   .refine((d) => Boolean(d.media_storage_path || d.media_url), {
     message: "media_storage_path or media_url is required",
   });
@@ -770,10 +796,24 @@ export type FlowEdgeCondition = FlowEdge['condition'];
  * grafo que só quebra adiante, no meio de um disparo. Sem migração de
  * rascunho — decisão registrada na issue #699.
  */
+export const FLOW_MAX_STATIC_PATH_STEPS = 100;
+export const FLOW_MAX_GRAPH_NODES = 200;
+export const FLOW_MAX_GRAPH_EDGES = 400;
+
+/**
+ * Limite máximo de execução real (odômetro steps_taken) de um enrollment.
+ * Atua como dead-man switch contra loops infinitos e reentrâncias contínuas.
+ *
+ * Invariante canônico: FLOW_MAX_RUNTIME_STEPS >= FLOW_MAX_STATIC_PATH_STEPS
+ * Margem de segurança: suporta caminhos estáticos de até 100 passos mais
+ * transições de wait/wake, typing, match_reply e voltas de repeat.
+ */
+export const FLOW_MAX_RUNTIME_STEPS = 200;
+
 export const flowGraphSchema = z
   .strictObject({
-    nodes: z.array(flowNodeSchema).min(2).max(60),
-    edges: z.array(flowEdgeSchema).max(120),
+    nodes: z.array(flowNodeSchema).min(2).max(FLOW_MAX_GRAPH_NODES),
+    edges: z.array(flowEdgeSchema).max(FLOW_MAX_GRAPH_EDGES),
   })
   .superRefine((grafo, ctx) => {
     const idsDeNo = new Set<string>();
@@ -974,6 +1014,24 @@ export function nodeBranches(node: BranchableNode): FlowBranch[] {
     }
 
     case 'match_reply': {
+      if (node.config.advance_on_any_reply) {
+        return [
+          {
+            id: ANY_REPLY_BRANCH_ID,
+            label: ANY_REPLY_LABEL,
+            check: null,
+            kind: 'match',
+            condition: { type: 'branch', branch_id: ANY_REPLY_BRANCH_ID },
+          },
+          {
+            id: NO_REPLY_BRANCH_ID,
+            label: NO_REPLY_LABEL,
+            check: null,
+            kind: 'match',
+            condition: { type: 'branch', branch_id: NO_REPLY_BRANCH_ID },
+          },
+        ];
+      }
       const classBranches: FlowBranch[] = node.config.branches.map((b) => ({
         id: b.id,
         label: b.label,

@@ -425,7 +425,7 @@ export async function acquireAiNodeInboundTurn(
       `INSERT INTO followup_enrollment_events (
          organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (enrollment_id, idempotency_key) DO NOTHING
+       ON CONFLICT (enrollment_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
        RETURNING id`,
       [
         input.organizationId,
@@ -835,7 +835,7 @@ export async function completeAiNodeInboundTurn(
       `INSERT INTO followup_enrollment_events (
          organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (enrollment_id, idempotency_key) DO UPDATE
+       ON CONFLICT (enrollment_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO UPDATE
          SET payload = followup_enrollment_events.payload
        RETURNING id`,
       [
@@ -959,7 +959,7 @@ export async function recordAiNodeReplySent(
       `INSERT INTO followup_enrollment_events (
          organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (enrollment_id, idempotency_key) DO NOTHING
+       ON CONFLICT (enrollment_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
        RETURNING id`,
       [
         input.organizationId,
@@ -1058,7 +1058,7 @@ export async function recordAiNodeReplyGenerated(
       `INSERT INTO followup_enrollment_events (
          organization_id, enrollment_id, node_id, event_type, payload, idempotency_key, created_at
        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (enrollment_id, idempotency_key) DO NOTHING
+       ON CONFLICT (enrollment_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
        RETURNING id`,
       [
         input.organizationId,

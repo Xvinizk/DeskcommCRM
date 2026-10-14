@@ -17,6 +17,12 @@ export class StaleServiceBoundaryError extends Error {
     this.name = "StaleServiceBoundaryError";
   }
 }
+export class EnrollmentRevisionStaleError extends Error {
+  constructor(message = "enrollment_revision_stale") {
+    super(message);
+    this.name = "EnrollmentRevisionStaleError";
+  }
+}
 /** `followup_stale` deixou de ser 40001 (serialization_failure): o cliente retentava para sempre. */
 export function isFollowupCasRecusado(error: { code?: string; message?: string } | null | undefined): boolean {
   return error?.code === "40001" || error?.message === "followup_stale";

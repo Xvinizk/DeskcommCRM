@@ -10,7 +10,7 @@ import {
   type EnrollmentRow,
   type LeadFacts,
 } from "./node-handlers";
-import type { FlowEdge, FlowNode } from "./graph-schema";
+import { ANY_REPLY_BRANCH_ID, type FlowEdge, type FlowNode } from "./graph-schema";
 
 const NOW = new Date("2026-07-21T12:00:00.000Z");
 const clock = () => NOW;
@@ -832,7 +832,7 @@ describe("processNode — match_reply", () => {
       type: "match_reply",
       label: "Casar",
       position: { x: 0, y: 0 },
-      config: { branches: RAMOS, grace_timeout_ms: 900_000, ...extra },
+      config: { advance_on_any_reply: false, branches: RAMOS, grace_timeout_ms: 900_000, ...extra },
     };
   }
 
@@ -1008,6 +1008,61 @@ describe("processNode — match_reply", () => {
       lastInboundBody: "sim",
     });
     expect(result).toMatchObject({ kind: "advance", next_node_id: "no-sim" });
+  });
+
+  describe("advance_on_any_reply", () => {
+    const anyEdges = [
+      edge({ source: "mr1", target: "no-respondeu", condition: { type: "branch", branch_id: ANY_REPLY_BRANCH_ID } }),
+      edge({ source: "mr1", target: "no-sem-resposta", condition: { type: "branch", branch_id: "no_reply" } }),
+    ];
+
+    it("wokeEarly com advance_on_any_reply segue sempre para Respondeu independentemente do texto", () => {
+      for (const text of ["sim", "não", "qualquer coisa", "👍", "https://cdn.example.com/foto.jpg", ""]) {
+        const result = processNode({
+          node: matchNode({ advance_on_any_reply: true, branches: [] }),
+          edges: anyEdges,
+          enrollment: enrollment(),
+          lead: lead(),
+          clock,
+          waitElapsed: true,
+          wokeEarly: true,
+          lastInboundBody: text,
+        });
+        expect(result).toMatchObject({ kind: "advance", next_node_id: "no-respondeu" });
+      }
+    });
+
+    it("timeout (waitElapsed sem wokeEarly) com advance_on_any_reply segue para Sem resposta", () => {
+      const result = processNode({
+        node: matchNode({ advance_on_any_reply: true, branches: [] }),
+        edges: anyEdges,
+        enrollment: enrollment(),
+        lead: lead(),
+        clock,
+        waitElapsed: true,
+        wokeEarly: false,
+      });
+      expect(result).toMatchObject({ kind: "advance", next_node_id: "no-sem-resposta" });
+    });
+
+    it("destino já preenchido com if_exists: 'skip' e advance_on_any_reply usa branch Respondeu", () => {
+      const node = matchNode({
+        advance_on_any_reply: true,
+        branches: [],
+        save_to: { kind: "contact_name" },
+        if_exists: "skip",
+      });
+      const result = processNode({
+        node,
+        edges: anyEdges,
+        enrollment: enrollment(),
+        lead: lead({ contact_name: "Fulano" }),
+        clock,
+        waitElapsed: false,
+        wokeEarly: false,
+      });
+      expect(result).toMatchObject({ kind: "advance", next_node_id: "no-respondeu" });
+    });
   });
 });
 

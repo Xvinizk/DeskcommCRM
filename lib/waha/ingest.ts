@@ -100,7 +100,7 @@ async function ehEcoDeEnvioNosso(
     // Sem `external_id` = ainda não confirmada pelo canal = ainda em voo. É esta
     // a janela exata em que o eco é indistinguível de digitação humana.
     .is("external_id", null)
-    .in("status", ["queued", "sending"])
+    .in("status", ["queued", "sending", "failed"])
     .gte("created_at", desde)
     .limit(20);
 

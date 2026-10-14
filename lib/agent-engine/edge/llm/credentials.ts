@@ -274,6 +274,31 @@ export interface LlmResolveOverride {
   credentialId?: string | null;
 }
 
+/**
+ * Lê os knobs de provider e default_model de organizations.settings->'llm'.
+ * Não exige e nem valida credenciais — serve para informar o resolvedor de pontos/bindings
+ * sobre o padrão da organização antes de saber qual provider foi efetivamente escolhido.
+ */
+export async function loadOrgLlmSettings(
+  db: pg.Pool,
+  organizationId: string,
+): Promise<{ provider: string; defaultModel: string | null }> {
+  let rows: LinhaDeConfig[];
+  try {
+    ({ rows } = await db.query<LinhaDeConfig>(SQL_CONFIG_LEGADO, [organizationId]));
+  } catch (err) {
+    throw new Error(`erro ao ler config LLM da organização: ${causaDoBanco(err)}`);
+  }
+  if (rows.length === 0) {
+    throw new Error('organização inexistente ao resolver config LLM');
+  }
+  const settings = llmSettingsSchema.parse(rows[0]?.llm ?? {});
+  return {
+    provider: settings.provider,
+    defaultModel: settings.default_model,
+  };
+}
+
 export async function resolveOrgLlmConfig(
   db: pg.Pool,
   cfg: LlmEdgeConfig,

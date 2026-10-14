@@ -26,7 +26,7 @@ import { scrubMessage } from '@/lib/sentry/scrub';
 
 import type { Logger } from '../../obs/logger';
 import { decidirParaOSeam } from './binding-do-ponto';
-import { resolveOrgLlmConfig, type LlmEdgeConfig, type LlmResolveOverride, type OrcamentoDaOrg } from './credentials';
+import { resolveOrgLlmConfig, loadOrgLlmSettings, type LlmEdgeConfig, type LlmResolveOverride, type OrcamentoDaOrg } from './credentials';
 import {
   AVISO_CORPO,
   AVISO_TITULO,
@@ -528,9 +528,10 @@ export async function runModelCall(db: pg.Pool, cfg: LlmEdgeConfig, input: RunMo
   const registry = deps.registry ?? createDefaultRegistry({ deepseekThinking: cfg.deepseekThinking });
   const purpose = input.purpose ?? 'agent_turn';
 
-  // A config da org é lida ANTES da decisão porque o resolvedor precisa dela
-  // como último degrau da precedência (o padrão, quando ninguém mais opinou).
-  const padrao = await resolveOrgLlmConfig(db, cfg, input.tenantId, input.llmOverride);
+  // A config padrão da org é lida para servir de base à resolução de precedência
+  // (o último degrau da escada), sem validar ou exigir credenciais antes de o seam
+  // decidir se a chamada usará o padrão ou um binding/override com outro provider.
+  const padraoOrg = await loadOrgLlmSettings(db, input.tenantId);
 
   // O painel de provedores entra AQUI, e é o que faz `purpose` deixar de ser
   // só um rótulo de custo e virar decisão. Sem binding configurado, `decisao`
@@ -544,35 +545,20 @@ export async function runModelCall(db: pg.Pool, cfg: LlmEdgeConfig, input: RunMo
       input.llmOverride === undefined
         ? null
         : {
-            provider: input.llmOverride.provider ?? padrao.provider,
+            provider: input.llmOverride.provider ?? padraoOrg.provider,
             credentialId: input.llmOverride.credentialId ?? null,
             model: input.model,
           },
-    padraoDaOrganizacao: { provider: padrao.provider, defaultModel: padrao.defaultModel },
+    padraoDaOrganizacao: { provider: padraoOrg.provider, defaultModel: padraoOrg.defaultModel },
   }, deps.log ? { log: deps.log } : {});
 
-  // Só re-resolve a credencial quando a decisão aponta para OUTRA que não a já
-  // carregada — decifrar duas vezes a mesma chave é custo puro no caminho
-  // quente, e cada decifragem é mais um instante com plaintext em memória.
-  //
-  // A condição olha para o QUE FOI DECIDIDO, nunca para o rótulo da origem. Ela
-  // já foi `decisao.origem === 'binding' && (…)`, e amarrar a correção a um
-  // rótulo é o que permite decisão e execução divergirem: qualquer ramo que
-  // devolvesse um provider fora do já resolvido saía com a chave do outro —
-  // silenciosamente, porque `factory` usa `config.provider` e não
-  // `decisao.provider`. `padrao` foi resolvido com `input.llmOverride`, então
-  // comparar contra ele é comparar contra o que de fato está carregado.
-  const credencialJaCarregada = input.llmOverride?.credentialId ?? null;
-  const precisaOutraCredencial =
-    decisao.provider !== padrao.provider ||
-    (decisao.credentialId !== null && decisao.credentialId !== credencialJaCarregada);
-
-  const config = precisaOutraCredencial
-    ? await resolveOrgLlmConfig(db, cfg, input.tenantId, {
-        provider: decisao.provider,
-        credentialId: decisao.credentialId,
-      })
-    : padrao;
+  // Com o provider e credencial efetivamente decididos (por override do agente,
+  // por binding do ponto, ou por fallback da organização), resolve e valida a
+  // credencial correspondente uma única vez.
+  const config = await resolveOrgLlmConfig(db, cfg, input.tenantId, {
+    provider: decisao.provider,
+    credentialId: decisao.credentialId,
+  });
 
   const model = decisao.modelId;
   if (model === null || model === undefined) {

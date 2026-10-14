@@ -10,22 +10,31 @@ import type { ConfigOf } from "./shared";
 export function MessageTextForm({
   config,
   onChange,
+  fieldErrors,
+  activeErrorField,
 }: {
   config: ConfigOf<"message_text">;
   onChange: (c: ConfigOf<"message_text">) => void;
+  fieldErrors?: Record<string, string>;
+  activeErrorField?: string | null;
 }) {
   const t = useT();
   const [body, setBody] = useState(config.body ?? "");
-  const [error, setError] = useState<string | null>(null);
+  const [localError, setLocalError] = useState<string | null>(null);
+
+  const externalError = fieldErrors?.["config.body"] || fieldErrors?.["body"];
+  const displayError = localError || externalError;
+  const isInvalid = Boolean(displayError);
 
   const commit = (newBody: string) => {
     setBody(newBody);
     const parsed = messageTextConfigSchema.safeParse({ body: newBody });
     if (!parsed.success) {
-      setError(parsed.error.issues[0]?.message ?? t("Mensagem inválida."));
+      setLocalError(parsed.error.issues[0]?.message ?? t("Mensagem inválida."));
+      onChange({ body: newBody });
       return;
     }
-    setError(null);
+    setLocalError(null);
     onChange(parsed.data);
   };
 
@@ -43,8 +52,15 @@ export function MessageTextForm({
           maxLength={4000}
           placeholder={t("Digite o texto a ser enviado pelo WhatsApp...")}
           onChange={(e) => commit(e.target.value)}
+          aria-invalid={isInvalid}
+          className={isInvalid ? "border-error focus-visible:ring-error" : undefined}
+          autoFocus={activeErrorField === "config.body" || activeErrorField === "body"}
         />
-        {error && <p className="text-xs text-error-fg">{error}</p>}
+        {displayError && (
+          <p className="text-xs text-error-fg" data-testid="field-error-body">
+            {displayError}
+          </p>
+        )}
       </div>
       <p className="text-xs text-text-muted">
         {t("Dica: você pode utilizar variáveis como {{nome}} para personalizar a mensagem para o contato.")}

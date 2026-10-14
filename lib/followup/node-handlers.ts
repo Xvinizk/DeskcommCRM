@@ -5,6 +5,7 @@ import type { ServiceBoundary } from "@/lib/atendimento/fronteira";
  * this node + these facts, what happens next" so it's testable without Postgres.
  */
 import {
+  ANY_REPLY_BRANCH_ID,
   NO_REPLY_BRANCH_ID,
   REPEAT_BODY_BRANCH_ID,
   REPEAT_DONE_BRANCH_ID,
@@ -638,7 +639,10 @@ export function processNode(input: {
         if (node.config.save_to && destinoJaPreenchido(lead, node.config.save_to)) {
           const modo = modoSeJaExiste(node);
           if (modo === "skip") {
-            const edge = selectEdge(edges, node.id, { type: "always" });
+            const edge =
+              (node.config.advance_on_any_reply
+                ? selectEdge(edges, node.id, { type: "branch", branch_id: ANY_REPLY_BRANCH_ID })
+                : null) ?? selectEdge(edges, node.id, { type: "always" });
             if (!edge) {
               return { kind: "fail", error: `match_reply node "${node.id}" has no fallback edge to skip` };
             }
@@ -667,6 +671,18 @@ export function processNode(input: {
         };
       }
       if (wokeEarly) {
+        if (node.config.advance_on_any_reply) {
+          const edge =
+            selectEdge(edges, node.id, { type: "branch", branch_id: ANY_REPLY_BRANCH_ID }) ??
+            selectEdge(edges, node.id, { type: "always" });
+          if (!edge) {
+            return {
+              kind: "fail",
+              error: `match_reply node "${node.id}" has no edge for branch "${ANY_REPLY_BRANCH_ID}" (fallback also missing)`,
+            };
+          }
+          return { kind: "advance", next_node_id: edge.target, next_eval_at: clock() };
+        }
         const body = (lastInboundBody ?? "").trim().toLowerCase();
         const hit =
           node.config.save_to !== undefined

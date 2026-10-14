@@ -213,6 +213,7 @@ const GRAFO_CONFIRMACAO: FlowGraph = {
       label: "Confere o nome",
       position: { x: 0, y: 0 },
       config: {
+        advance_on_any_reply: false,
         branches: [{ id: "ok", label: "Ok", op: "eq", pattern: "sim" }],
         grace_timeout_ms: 900_000,
         save_to: { kind: "contact_name" },

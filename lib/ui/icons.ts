@@ -129,6 +129,7 @@ export {
   WebhooksLogo,
   PuzzlePiece,
   UploadSimple,
+  LinkSimple,
   Signpost,
   // atualização de versão
   ArrowCircleUp,

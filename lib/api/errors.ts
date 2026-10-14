@@ -84,6 +84,12 @@ export const ApiErrorCodes = {
   channel_archived: "channel_archived", // ação sobre canal que o usuário excluiu (a linha só sobrevive como âncora das FKs)
   knowledge_source_type_in_use: "knowledge_source_type_in_use", // fonte ATIVA do mesmo tipo no agente — era o índice ai_knowledge_sources_unique_per_agent, que a 0181 derrubou; nenhuma rota emite mais este código
   voice_already_paired: "voice_already_paired", // POST /voice/sessions/pair com aparelho já vinculado — a saída é DELETE /voice/sessions, nunca re-parear por cima (ver a rota)
+  followup_flow_active_enrollments: "followup_flow_active_enrollments",
+  followup_flow_has_history: "followup_flow_has_history",
+  followup_flow_in_use_by_agent: "followup_flow_in_use_by_agent",
+  followup_flow_jobs_in_progress: "followup_flow_jobs_in_progress",
+  followup_flow_archived: "followup_flow_archived",
+  confirmation_mismatch: "confirmation_mismatch",
 
   // 422 — semântica
   unprocessable_entity: "unprocessable_entity",

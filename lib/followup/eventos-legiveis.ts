@@ -20,6 +20,7 @@
  * porque um alvo feio é melhor que alvo nenhum.
  */
 import {
+  ANY_REPLY_BRANCH_ID,
   CONDITION_FALSE_BRANCH_ID,
   CONDITION_TRUE_BRANCH_ID,
   FALLBACK_BRANCH_ID,
@@ -273,6 +274,9 @@ function fraseDoRamoDeclarado(origem: FlowNode | undefined, branchId: string, no
   }
 
   if (origem.type === "match_reply") {
+    if (branchId === ANY_REPLY_BRANCH_ID) {
+      return "quando o contato responder qualquer mensagem";
+    }
     const label = origem.config.branches.find((b) => b.id === branchId)?.label;
     return label ? `quando a resposta casa com “${label}”` : RAMO_SEM_NOME;
   }

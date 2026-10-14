@@ -34,6 +34,13 @@ import {
 
 import { arquivosDeCodigo, RAIZ_DO_REPO } from "./helpers/varrer-codigo";
 
+/**
+ * Purposes operacionais de fila (job_queue / followup_turn) que NÃO executam LLM.
+ * São puramente timers, retomada durável de fluxo ou sinalização da engine.
+ * Mantido estrito para NUNCA ignorar chamadas de modelo reais.
+ */
+export const PURPOSES_OPERACIONAIS_NAO_LLM = new Set(["wait_wake"]);
+
 /** Literal values emitted by object properties, including both branches of a conditional.
  * Type declarations, comments and string contents cannot manufacture a call site. */
 function purposesDoTexto(texto: string, arquivo = "source.ts"): string[] {
@@ -54,7 +61,13 @@ function purposesDoTexto(texto: string, arquivo = "source.ts"): string[] {
       const enqueueResult = ts.isObjectLiteralExpression(object) && ts.isReturnStatement(object.parent) &&
         object.properties.some(p => ts.isPropertyAssignment(p) && p.name.getText(ast) === "kind" &&
           ts.isStringLiteralLike(p.initializer) && p.initializer.text === "enqueue_turn");
-      if (!enqueueResult) result.push(...literals(node.initializer));
+      if (!enqueueResult) {
+        for (const lit of literals(node.initializer)) {
+          if (!PURPOSES_OPERACIONAIS_NAO_LLM.has(lit)) {
+            result.push(lit);
+          }
+        }
+      }
     }
     ts.forEachChild(node, visit);
   };
@@ -66,7 +79,7 @@ function purposesEmitidosNoCodigo(): Map<string, string[]> {
   for (const arquivo of arquivosDeCodigo(["lib", "workers", "app"])) {
     for (const purpose of purposesDoTexto(readFileSync(arquivo, "utf8"), arquivo)) {
       const lista = encontrados.get(purpose) ?? [];
-      lista.push(path.relative(RAIZ_DO_REPO, arquivo));
+      lista.push(path.relative(RAIZ_DO_REPO, arquivo).replace(/\\/g, "/"));
       encontrados.set(purpose, lista);
     }
   }
@@ -128,6 +141,19 @@ describe("registro de pontos de IA × código", () => {
     expect(purposesDoTexto(`const a = { purpose: payload.purpose };`)).toEqual([]);
     expect(purposesDoTexto(`function queue() { return { kind: "enqueue_turn", purpose: "send_message" }; }`)).toEqual([]);
     expect(purposesDoTexto(`runModelCall(db, cfg, { purpose: "send_message" });`)).toEqual(["send_message"]);
+    expect(purposesDoTexto(`const j = { purpose: "wait_wake" };`)).toEqual([]);
+    expect(purposesDoTexto(`const p = { purpose: "ai_node" };`)).toEqual(["ai_node"]);
+    expect(purposesDoTexto(`runModelCall(db, cfg, { purpose: "novo_purpose_llm_nao_declarado" });`)).toEqual(["novo_purpose_llm_nao_declarado"]);
+  });
+
+  it("distingue pontos de IA de purposes operacionais de fila (wait_wake)", () => {
+    // ai_node é ponto canônico de IA que chama runModelCall
+    expect(emitidos.has("ai_node")).toBe(true);
+    // wait_wake é purpose operacional de job_queue (timer durável), não chamada LLM
+    expect(emitidos.has("wait_wake")).toBe(false);
+    // um purpose LLM novo não declarado continua fazendo o scanner capturar e o teste falhar
+    const achados = purposesDoTexto(`runModelCall(db, cfg, { purpose: "novo_purpose_llm" });`);
+    expect(achados).toContain("novo_purpose_llm");
   });
 
   it("a varredura enxerga o código (controle positivo)", () => {

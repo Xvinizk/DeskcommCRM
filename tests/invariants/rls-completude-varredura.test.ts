@@ -174,6 +174,10 @@ const PROVA_PROPRIA: readonly Excecao[] = [
     razao: "tests/invariants/followup-schema.test.ts — mesmo laço de FOLLOWUP_TABLES.",
   },
   {
+    tabela: "followup_flow_shares",
+    razao: "tests/invariants/followup-schema.test.ts — mesmo laço de FOLLOWUP_TABLES.",
+  },
+  {
     tabela: "user_organizations",
     razao:
       "tests/invariants/gov-1b-team-manager-read.test.ts (\"cross-org: " +

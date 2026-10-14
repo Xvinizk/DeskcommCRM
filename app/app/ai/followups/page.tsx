@@ -11,7 +11,8 @@ import { QueueTab } from "./_components/QueueTab";
 
 export const dynamic = "force-dynamic";
 
-const FLOW_COLUMNS = "id, name, status, active_version_id, handoff_policy, updated_at";
+const FLOW_COLUMNS = "id, name, status, active_version_id, handoff_policy, updated_at, archived_at";
+
 
 export default async function FollowupFlowsPage() {
   const user = await requireAuth();

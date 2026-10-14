@@ -13,7 +13,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { fail, ok } from "@/lib/api/wrappers";
 import { requireRole } from "@/lib/auth/require-role";
 import { extFromMime, MAX_MEDIA_BYTES } from "@/lib/messaging/media/types";
-import { validateOutboundMedia } from "@/lib/messaging/media/upload-validation";
+import { validateMp4BufferIntegrity, validateOutboundMedia } from "@/lib/messaging/media/upload-validation";
 import { transcodificarNotaDeVoz } from "@/lib/messaging/media/voice-transcode";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { traduzir } from "@/lib/i18n/dicionario";
@@ -125,6 +125,24 @@ export async function POST(req: NextRequest): Promise<Response> {
   }
 
   const bruto = Buffer.from(await fileBlob.arrayBuffer());
+
+  if (verdict.kind === "video" && (mime === "video/mp4" || fileName.toLowerCase().endsWith(".mp4"))) {
+    const integrity = validateMp4BufferIntegrity(bruto);
+    if (!integrity.ok) {
+      logger.warn("[followup-flows/media] upload rejeitado: arquivo de video truncado", {
+        reason: integrity.reason,
+        fileName,
+        sizeBytes: bruto.length,
+        requestId,
+      });
+      return fail(
+        "validation_failed",
+        t("O arquivo de vídeo está incompleto ou corrompido (tamanho real menor que os dados declarados no arquivo)."),
+        422,
+        { requestId },
+      );
+    }
+  }
 
   let mimeFinal = mime;
   let buffer: Buffer = bruto;

@@ -82,7 +82,7 @@ describe("vocabulário da trilha de demonstração", () => {
     // Sem isto, uma regex que deixasse de casar produziria zero escritores — e o
     // caso abaixo reprovaria por outro motivo, ou, com a checagem invertida,
     // passaria medindo nada.
-    const relativos = ESCRITORES.map((a) => path.relative(RAIZ, a));
+    const relativos = ESCRITORES.map((a) => path.relative(RAIZ, a).replace(/\\/g, "/"));
     expect(relativos).toEqual(
       expect.arrayContaining(["lib/followup/engine.ts", "lib/followup/turn-bridge.ts", "lib/followup/reactivity.ts"]),
     );
@@ -165,6 +165,10 @@ class BancoEmMemoria implements TurnBridgeAdminClient, ReactivityAdminClient {
   readonly jobs: FollowupJobRequest[] = [];
 
   constructor(public inscricao: EnrollmentRow) {}
+
+  enqueueJob = async (job: FollowupJobRequest): Promise<void> => {
+    this.jobs.push(job);
+  };
 
   async claimDueEnrollments(_limit: number, leaseSeconds: number): Promise<EnrollmentRow[]> {
     const e = this.inscricao;
@@ -277,14 +281,28 @@ async function reencenar(banco: BancoEmMemoria, passo: PassoDeDemonstracao): Pro
   banco.relogio = Date.parse(passo.created_at);
   const clock = () => new Date(banco.relogio);
   const db: AdminClient = banco;
+
+  // O worker consome os jobs de wait_wake que venceram até este instante do relógio virtual
+  const wakeIdx = banco.jobs.findIndex(
+    (j) =>
+      j.payload.purpose === "wait_wake" &&
+      j.payload.followup_enrollment_id === banco.inscricao.id &&
+      j.run_after &&
+      new Date(j.run_after).getTime() <= banco.relogio,
+  );
+  if (wakeIdx !== -1) {
+    banco.jobs.splice(wakeIdx, 1);
+  }
+
   switch (passo.origem) {
     case "motor":
       await runFollowupTick({ db, clock, enqueueJob: async (job) => void banco.jobs.push(job) });
       return;
     case "envio": {
-      const job = banco.jobs.shift();
-      expect(job, `"${passo.event_type}": não há envio enfileirado para concluir`).toBeDefined();
-      await completeTurnForEnrollment(banco, ORG, banco.inscricao.id, job!.payload.node_id, { kind: "sent" }, clock);
+      const idx = banco.jobs.findIndex((j) => j.payload.purpose !== "wait_wake");
+      expect(idx, `"${passo.event_type}": não há envio enfileirado para concluir`).toBeGreaterThanOrEqual(0);
+      const job = banco.jobs.splice(idx, 1)[0]!;
+      await completeTurnForEnrollment(banco, ORG, banco.inscricao.id, job.payload.node_id, { kind: "sent" }, clock);
       return;
     }
     case "atendimento_humano":
@@ -330,9 +348,71 @@ describe("reencenação das inscrições de demonstração com o motor", () => {
         updated_at: e.updated_at,
         completed_at: e.completed_at,
       }).toEqual(inscricao.estado);
-      expect(banco.jobs, "sobrou envio enfileirado sem conclusão").toEqual([]);
+
+      // Nenhum envio pendente sem conclusão, e nenhum wake vencido esquecido na fila
+      const jobsVencidos = banco.jobs.filter(
+        (j) => !j.run_after || new Date(j.run_after).getTime() <= banco.relogio,
+      );
+      expect(jobsVencidos, "sobrou envio enfileirado ou wake vencido sem conclusão").toEqual([]);
+      if (inscricao.estado.status === "completed") {
+        expect(banco.jobs, "fila deve terminar completamente limpa no cenário concluído").toEqual([]);
+      }
     });
   }
+
+  it("ciclo completo de wait_wake no harness: antes/depois do vencimento (A-F)", async () => {
+    const inscricao = INSCRICOES[0]!;
+    const banco = new BancoEmMemoria(inscricaoRecemCriada(0, inscricao));
+    const clock = () => new Date(banco.relogio);
+
+    // Passo 1: trigger -> wait-1
+    await reencenar(banco, inscricao.passos(banco.inscricao.id)[0]!);
+    expect(banco.inscricao.current_node_id).toBe("wait-1");
+
+    // Passo 2: wait-1 -> wait_started (enfileira job wait_wake durável com run_after)
+    await reencenar(banco, inscricao.passos(banco.inscricao.id)[1]!);
+    expect(banco.jobs.length).toBe(1);
+    const wakeJob = banco.jobs[0]!;
+    expect(wakeJob.payload.purpose).toBe("wait_wake");
+    const runAfterMs = new Date(wakeJob.run_after!).getTime();
+
+    // A) Antes do vencimento: job wait_wake permanece pendente
+    // F) Um wait_wake futuro NÃO é drenado antes da hora
+    banco.relogio = runAfterMs - 60_000; // 1 minuto antes do vencimento
+    await runFollowupTick({ db: banco, clock, enqueueJob: async (j) => void banco.jobs.push(j) });
+    expect(banco.jobs.length).toBe(1);
+    expect(banco.jobs[0]?.payload.purpose).toBe("wait_wake");
+    expect(banco.inscricao.current_node_id).toBe("wait-1");
+
+    // B) Depois de run_after: job é consumido via wake canônico
+    // C) O enrollment avança corretamente
+    banco.relogio = runAfterMs + 1000; // 1 segundo depois do vencimento
+    const wakeIdx = banco.jobs.findIndex(
+      (j) => j.payload.purpose === "wait_wake" && j.run_after && new Date(j.run_after).getTime() <= banco.relogio,
+    );
+    expect(wakeIdx).toBe(0);
+    const job = banco.jobs.splice(wakeIdx, 1)[0]!;
+    expect(job.payload.purpose).toBe("wait_wake");
+    await runFollowupTick({ db: banco, clock, enqueueJob: async (j) => void banco.jobs.push(j) });
+
+    // Job foi consumido:
+    expect(banco.jobs.filter((j) => j.payload.purpose === "wait_wake")).toEqual([]);
+    // Enrollment avançou:
+    expect(banco.inscricao.current_node_id).toBe("action-1");
+
+    // D) Não existe envio duplicado se tick roda novamente
+    const antesEventos = banco.eventos.length;
+    await runFollowupTick({ db: banco, clock, enqueueJob: async (j) => void banco.jobs.push(j) });
+    // turn_enqueued gravado exatamente uma vez para action-1
+    expect(banco.eventos.length).toBe(antesEventos + 1);
+    expect(banco.eventos[banco.eventos.length - 1]?.event_type).toBe("turn_enqueued");
+
+    // E) Conclui envio da mensagem: fila termina limpa
+    const sendIdx = banco.jobs.findIndex((j) => j.payload.purpose === "send_message");
+    const sendJob = banco.jobs.splice(sendIdx, 1)[0]!;
+    await completeTurnForEnrollment(banco, ORG, banco.inscricao.id, sendJob.payload.node_id, { kind: "sent" }, clock);
+    expect(banco.jobs.filter((j) => j.payload.purpose === "send_message")).toEqual([]);
+  });
 
   it("o dublê reprova a trilha antiga (controle do instrumento)", async () => {
     // Os dois passos da primeira versão, no relógio dela: um dia antes do fim da

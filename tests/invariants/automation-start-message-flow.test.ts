@@ -35,12 +35,19 @@ type RowResult = {
   error: { message: string; code?: string } | null;
 };
 
+const EMBED_MAP: Record<string, { table: string; fk: string }> = {
+  followup_flow_pointers: { table: "followup_flow_pointers", fk: "pointer_id" },
+};
+
 class FakeQuery implements PromiseLike<QResult> {
   private mode: "select" | "update" | "insert" | null = null;
   private selectCols = "*";
   private selectAfterMutation = false;
   private mutationData: Record<string, unknown> | null = null;
-  private filters: Array<{ col: string; val: unknown }> = [];
+  private filters: Array<{ col: string; val: unknown; op?: string }> = [];
+  private orderCol?: string;
+  private orderAsc = true;
+  private limitN?: number;
 
   constructor(private table: string) {}
 
@@ -63,6 +70,22 @@ class FakeQuery implements PromiseLike<QResult> {
 
   eq(col: string, val: unknown): this {
     this.filters.push({ col, val });
+    return this;
+  }
+
+  in(col: string, val: unknown[]): this {
+    this.filters.push({ col, val, op: "in" });
+    return this;
+  }
+
+  order(col: string, opts?: { ascending?: boolean }): this {
+    this.orderCol = col;
+    this.orderAsc = opts?.ascending ?? true;
+    return this;
+  }
+
+  limit(n: number): this {
+    this.limitN = n;
     return this;
   }
 
@@ -90,16 +113,94 @@ class FakeQuery implements PromiseLike<QResult> {
     return this.execute().then(onfulfilled, onrejected);
   }
 
-  private where(): string {
-    return this.filters.length
-      ? ` where ${this.filters.map((f) => `${f.col} = ${sqlLiteral(f.val)}`).join(" and ")}`
-      : "";
+  private buildWhere(prefix = ""): string {
+    if (!this.filters.length) return "";
+    const clauses = this.filters.map((f) => {
+      if (f.op === "in") {
+        const arr = (f.val as unknown[]) ?? [];
+        if (!arr.length) return "1=0";
+        const vals = arr.map(sqlLiteral).join(", ");
+        return `${prefix}${f.col} in (${vals})`;
+      }
+      return `${prefix}${f.col} = ${sqlLiteral(f.val)}`;
+    });
+    return ` where ${clauses.join(" and ")}`;
+  }
+
+  private parseCols(): {
+    plain: string[];
+    embeds: Array<{ alias: string; fk: string; table: string; cols: string[] }>;
+  } {
+    const plain: string[] = [];
+    const embeds: Array<{ alias: string; fk: string; table: string; cols: string[] }> = [];
+    const parts: string[] = [];
+    let depth = 0;
+    let cur = "";
+    for (const ch of this.selectCols) {
+      if (ch === "(") depth++;
+      if (ch === ")") depth--;
+      if (ch === "," && depth === 0) {
+        parts.push(cur);
+        cur = "";
+      } else {
+        cur += ch;
+      }
+    }
+    if (cur.trim()) parts.push(cur);
+    for (const raw of parts) {
+      const p = raw.trim();
+      const mEmbed = /^(\w+)(?::(\w+))?\(([^)]+)\)$/.exec(p);
+      if (mEmbed) {
+        const part1 = mEmbed[1]!;
+        const part2 = mEmbed[2];
+        const cols = mEmbed[3]!.split(",").map((c) => c.trim());
+        if (part2) {
+          const mapped = EMBED_MAP[part2];
+          embeds.push({
+            alias: part1,
+            fk: part2,
+            table: mapped ? mapped.table : part2,
+            cols,
+          });
+        } else {
+          const mapped = EMBED_MAP[part1];
+          embeds.push({
+            alias: part1,
+            fk: mapped ? mapped.fk : `${part1}_id`,
+            table: mapped ? mapped.table : part1,
+            cols,
+          });
+        }
+      } else if (p) {
+        plain.push(p);
+      }
+    }
+    return { plain, embeds };
+  }
+
+  private buildSelectSql(): string {
+    const { plain, embeds } = this.parseCols();
+    const alias = "b";
+    const parts: string[] = [];
+    if (!plain.length && !embeds.length) {
+      parts.push(`${alias}.*`);
+    } else {
+      for (const c of plain) parts.push(`${alias}.${c}`);
+      for (const e of embeds) {
+        const objFields = e.cols.map((c) => `${sqlString(c)}, r.${c}`).join(", ");
+        parts.push(
+          `(select jsonb_build_object(${objFields}) from public.${e.table} r where r.id = ${alias}.${e.fk}) as ${e.alias}`,
+        );
+      }
+    }
+    let q = `select ${parts.join(", ")} from public.${this.table} ${alias}${this.buildWhere(`${alias}.`)}`;
+    if (this.orderCol) q += ` order by ${alias}.${this.orderCol} ${this.orderAsc ? "asc" : "desc"}`;
+    if (this.limitN !== undefined) q += ` limit ${this.limitN}`;
+    return q;
   }
 
   private toSql(): string {
-    if (this.mode === "select") {
-      return `select ${this.selectCols} from public.${this.table}${this.where()}`;
-    }
+    if (this.mode === "select") return this.buildSelectSql();
     if (this.mode === "insert") {
       const entries = Object.entries(this.mutationData!).filter(([, v]) => v !== undefined);
       const cols = entries.map(([k]) => k).join(", ");

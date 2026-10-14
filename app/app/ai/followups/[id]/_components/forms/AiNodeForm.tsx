@@ -45,9 +45,11 @@ interface Props {
   config: ConfigOf<"ai_node">;
   onChange: (c: ConfigOf<"ai_node">) => void;
   ramosLigados?: string[];
+  fieldErrors?: Record<string, string>;
+  activeErrorField?: string | null;
 }
 
-export function AiNodeForm({ config, onChange }: Props) {
+export function AiNodeForm({ config, onChange, ramosLigados, fieldErrors }: Props) {
   const t = useT();
   const { data: agents = [], isLoading: isLoadingAgents } = useAgentsList();
   const { etapas } = useEtapasDoFluxo();
@@ -222,6 +224,12 @@ export function AiNodeForm({ config, onChange }: Props) {
       agentError = t("Selecione uma versão válida.");
     }
   }
+  agentError =
+    agentError ||
+    fieldErrors?.["config.agent_binding.agent_id"] ||
+    fieldErrors?.["config.agent_binding"] ||
+    fieldErrors?.["agent_id"] ||
+    null;
 
   return (
     <div className="space-y-6" data-testid="ai-node-form">
@@ -375,7 +383,7 @@ export function AiNodeForm({ config, onChange }: Props) {
               </button>
 
               {advancedOpen && (
-                <div className="mt-3 space-y-3 rounded border border-border/80 bg-surface p-2.5">
+                <div className="mt-3 space-y-3 rounded-md border border-border/80 bg-surface p-2.5">
                   <div className="space-y-1.5">
                     <Label className="text-xs">{t("Versão do agente")}</Label>
                     <Select
@@ -542,7 +550,7 @@ export function AiNodeForm({ config, onChange }: Props) {
             <input
               type="checkbox"
               id="cond-images"
-              className="h-4 w-4 rounded border-border text-accent focus:ring-accent cursor-pointer"
+              className="h-4 w-4 rounded-md border-border text-accent focus:ring-accent cursor-pointer"
               checked={minImages > 0}
               onChange={(e) =>
                 updateDetConds({ min_images: e.target.checked ? (minImages || 1) : 0 })
@@ -573,7 +581,7 @@ export function AiNodeForm({ config, onChange }: Props) {
             <input
               type="checkbox"
               id="cond-audio"
-              className="h-4 w-4 rounded border-border text-accent focus:ring-accent cursor-pointer"
+              className="h-4 w-4 rounded-md border-border text-accent focus:ring-accent cursor-pointer"
               checked={requireAudio}
               onChange={(e) =>
                 updateDetConds({ require_audio: e.target.checked })
@@ -590,7 +598,7 @@ export function AiNodeForm({ config, onChange }: Props) {
             <input
               type="checkbox"
               id="cond-doc"
-              className="h-4 w-4 rounded border-border text-accent focus:ring-accent cursor-pointer"
+              className="h-4 w-4 rounded-md border-border text-accent focus:ring-accent cursor-pointer"
               checked={requireDocument}
               onChange={(e) =>
                 updateDetConds({ require_document: e.target.checked })
@@ -608,7 +616,7 @@ export function AiNodeForm({ config, onChange }: Props) {
               <input
                 type="checkbox"
                 id="cond-tag"
-                className="h-4 w-4 rounded border-border text-accent focus:ring-accent cursor-pointer"
+                className="h-4 w-4 rounded-md border-border text-accent focus:ring-accent cursor-pointer"
                 checked={Boolean(tagExists)}
                 onChange={(e) =>
                   updateDetConds({ tag_exists: e.target.checked ? (tagExists || "interessado") : "" })
@@ -636,7 +644,7 @@ export function AiNodeForm({ config, onChange }: Props) {
               <input
                 type="checkbox"
                 id="cond-stage"
-                className="h-4 w-4 rounded border-border text-accent focus:ring-accent cursor-pointer"
+                className="h-4 w-4 rounded-md border-border text-accent focus:ring-accent cursor-pointer"
                 checked={Boolean(stageId)}
                 onChange={(e) =>
                   updateDetConds({ stage_id: e.target.checked ? (stageId || etapas[0]?.stageId || "") : "" })

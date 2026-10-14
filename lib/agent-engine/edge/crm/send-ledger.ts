@@ -18,7 +18,7 @@ interface LedgerStore {
   create(input: Intent, hash: string): Promise<string>;
   find(input: Intent): Promise<Row | null>;
   rotate(input: Intent, hash: string): Promise<string>;
-  message(org: string, key: string): Promise<{ id: string; status: string } | null>;
+  message(org: string, key: string): Promise<{ id: string; status: string; external_id?: string | null } | null>;
   update(
     org: string,
     key: string,
@@ -48,11 +48,40 @@ export async function sendWithLedger(
     if (prior.status === "accepted")
       return { kind: "already_sent", idempotencyKey: key, crmMessageId: prior.crm_message_id };
     if (prior.status === "vetoed") return { kind: "blocked", idempotencyKey: key };
+
+    // Se outro worker/promise concorrente acabou de reservar ('requested'), aguarda a conclusão
+    if (prior.status === "requested") {
+      const start = Date.now();
+      while (Date.now() - start < 1000) {
+        await new Promise((r) => setTimeout(r, 20));
+        const current = await store.find(input);
+        if (current?.status === "accepted") {
+          return { kind: "already_sent", idempotencyKey: key, crmMessageId: current.crm_message_id };
+        }
+        if (current?.status === "vetoed") {
+          return { kind: "blocked", idempotencyKey: key };
+        }
+        const msg = await store.message(input.tenantId, key);
+        if (msg && (["sent", "delivered", "read"].includes(msg.status) || Boolean(msg.external_id))) {
+          await store.update(input.tenantId, key, "accepted", msg.id, null);
+          return { kind: "sent", idempotencyKey: key, crmMessageId: msg.id };
+        }
+      }
+    }
+
     if (prior.status === "failed") key = await store.rotate(input, hash);
   }
   const existing = await store.message(input.tenantId, key);
   let message = existing;
-  if (!message || message.status === "queued") {
+  if (
+    message &&
+    (["sent", "delivered", "read"].includes(message.status) ||
+      Boolean((message as { external_id?: string | null }).external_id))
+  ) {
+    await store.update(input.tenantId, key, "accepted", message.id, null);
+    return { kind: "sent", idempotencyKey: key, crmMessageId: message.id };
+  }
+  if (!message || message.status === "queued" || message.status === "failed") {
     try {
       message = await send(key, existing?.id ?? key);
     } catch (error) {
@@ -89,7 +118,7 @@ export async function reconcileAcceptedSend(
   if (!prior) return false;
   if (prior.status === "accepted") return true;
   const message = await store.message(input.tenantId, prior.id);
-  if (!message || !["sent", "delivered", "read"].includes(message.status)) return false;
+  if (!message || (!["sent", "delivered", "read"].includes(message.status) && !Boolean((message as { external_id?: string | null }).external_id))) return false;
   await store.update(input.tenantId, prior.id, "accepted", message.id, null);
   return true;
 }
@@ -112,15 +141,15 @@ export function pgSendLedger(db: Queryable): LedgerStore {
     },
     async rotate(i, hash) {
       const { rows } = await db.query<{ id: string }>(
-        "update send_ledger set id=gen_random_uuid(),status='requested',body_hash=$4,crm_message_id=null,last_error=null,updated_at=now() where organization_id=$1 and job_id=$2 and seq=$3 returning id",
+        "update send_ledger set status='requested',body_hash=$4,last_error=null,updated_at=now() where organization_id=$1 and job_id=$2 and seq=$3 returning id",
         [i.tenantId, i.jobId, i.seq, hash],
       );
       if (!rows[0]) throw new Error("send_ledger_rotation_missing");
       return rows[0].id;
     },
     async message(org, key) {
-      const { rows } = await db.query<{ id: string; status: string }>(
-        "select id,status from messages where organization_id=$1 and metadata->>'idempotency_key'=$2 limit 1",
+      const { rows } = await db.query<{ id: string; status: string; external_id?: string | null }>(
+        "select id,status,external_id from messages where organization_id=$1 and (metadata->>'idempotency_key'=$2 or id::text=$2) limit 1",
         [org, key],
       );
       return rows[0] ?? null;
@@ -165,10 +194,8 @@ export function supabaseSendLedger(db: SupabaseClient): LedgerStore {
       const { data, error } = await db
         .from("send_ledger")
         .update({
-          id: crypto.randomUUID(),
           status: "requested",
           body_hash: hash,
-          crm_message_id: null,
           last_error: null,
           updated_at: new Date().toISOString(),
         })
@@ -183,13 +210,13 @@ export function supabaseSendLedger(db: SupabaseClient): LedgerStore {
     async message(org, key) {
       const { data, error } = await db
         .from("messages")
-        .select("id,status")
+        .select("id, status, external_id")
         .eq("organization_id", org)
-        .eq("metadata->>idempotency_key", key)
+        .or(`metadata->>idempotency_key.eq.${key},id.eq.${key}`)
         .limit(1)
         .maybeSingle();
       if (error) throw error;
-      return data;
+      return data as { id: string; status: string; external_id?: string | null } | null;
     },
     async update(org, key, status, id, errorText) {
       const { error } = await db

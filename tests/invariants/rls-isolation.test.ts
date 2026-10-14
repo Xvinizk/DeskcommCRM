@@ -455,6 +455,12 @@ beforeAll(() => {
                     '\\x00'::bytea, '\\x000000000000000000000000'::bytea,
                     '\\x00000000000000000000000000000000'::bytea);
         end if;
+
+        if not exists (select 1 from public.scheduled_messages where organization_id = v_org) then
+          insert into public.scheduled_messages
+            (organization_id, conversation_id, scheduled_for, body)
+            values (v_org, v_conv, now() + interval '1 hour', 'RLS invariant scheduled message');
+        end if;
       end loop;
     end
     $seed$;
@@ -583,6 +589,7 @@ export const TABLES = [
   // provar isso pediria um usuário abaixo de admin escrevendo. Fica declarado
   // em vez de parecer coberto.
   "external_db_connections",
+  "scheduled_messages",
   // ⚠️ `webhook_lead_captures` (migration 0174) NÃO entra nesta lista, e a
   // ausência é deliberada: a policy dela exige `manager`, e o usuário semeado
   // aqui é `agent` — o controle positivo falharia por ACERTO, e a "correção"

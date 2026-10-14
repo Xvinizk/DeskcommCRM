@@ -44,8 +44,14 @@ alter table public.scheduled_messages enable row level security;
 
 do $$ begin
   create policy tenant_isolation_scheduled_messages_all on public.scheduled_messages
-    for all using (organization_id in (select fn_user_org_ids()))
-    with check (organization_id in (select fn_user_org_ids()));
+    for all using (
+      organization_id in (select fn_user_org_ids())
+      and public.fn_role_at_least(organization_id, 'agent')
+    )
+    with check (
+      organization_id in (select fn_user_org_ids())
+      and public.fn_role_at_least(organization_id, 'agent')
+    );
 exception when duplicate_object then null; end $$;
 
 -- Privilégios

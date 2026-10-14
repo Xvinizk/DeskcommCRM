@@ -54,6 +54,8 @@ import { EdgeConfigPanel } from "./EdgeConfigPanel";
 import { EtapasDoFluxoProvider, useEtapasDoFluxo } from "./EtapasDoFluxo";
 import { NodePalette } from "./NodePalette";
 import { PublishBar } from "./PublishBar";
+import { ValidationIssuesBar } from "./ValidationIssuesBar";
+import type { FlowValidationIssue } from "@/lib/followup/validation-contract";
 import { NODE_VISUALS } from "./nodes/nodeVisuals";
 import { TriggerNode } from "./nodes/TriggerNode";
 import { WaitNode } from "./nodes/WaitNode";
@@ -155,6 +157,22 @@ function FlowCanvasInner({ flowId, initialData, aiNodeEnabled = false }: Props) 
     return () => clearTimeout(timer);
   }, [dirty, liveGraph, saveDraftMutation]);
 
+  const [validationIssues, setValidationIssues] = useState<FlowValidationIssue[]>([]);
+  const [activeErrorField, setActiveErrorField] = useState<string | null>(null);
+
+  const nodeLabels = useMemo(
+    () => new Map(nodes.map((n) => [n.id, n.data.label || n.id])),
+    [nodes],
+  );
+
+  const edgeErrorsSet = useMemo(() => {
+    const set = new Set<string>();
+    for (const issue of validationIssues) {
+      if (issue.edge_id) set.add(issue.edge_id);
+    }
+    return set;
+  }, [validationIssues]);
+
   const markNodeErrors = useCallback(
     (errorsByNode: Record<string, string[]>) => {
       setNodes((nds) => nds.map((n) => ({ ...n, data: { ...n.data, errors: errorsByNode[n.id] } })));
@@ -164,6 +182,52 @@ function FlowCanvasInner({ flowId, initialData, aiNodeEnabled = false }: Props) 
   const clearNodeErrors = useCallback(() => {
     setNodes((nds) => nds.map((n) => (n.data.errors ? { ...n, data: { ...n.data, errors: undefined } } : n)));
   }, [setNodes]);
+
+  const handleValidationIssues = useCallback(
+    (issues: FlowValidationIssue[]) => {
+      setValidationIssues(issues);
+      if (issues.length > 0) {
+        const first = issues[0]!;
+        if (first.node_id) {
+          setSelectedNodeId(first.node_id);
+          setSelectedEdgeId(null);
+          const target = nodes.find((n) => n.id === first.node_id);
+          if (target) {
+            void fitView({ nodes: [{ id: target.id }], duration: 350, maxZoom: 1.2, padding: 0.3 });
+          }
+          setActiveErrorField(first.field || null);
+        } else if (first.edge_id) {
+          setSelectedEdgeId(first.edge_id);
+          setSelectedNodeId(null);
+        }
+      }
+    },
+    [nodes, fitView],
+  );
+
+  const handleSelectIssue = useCallback(
+    (issue: FlowValidationIssue) => {
+      if (issue.node_id) {
+        setSelectedNodeId(issue.node_id);
+        setSelectedEdgeId(null);
+        const target = nodes.find((n) => n.id === issue.node_id);
+        if (target) {
+          void fitView({ nodes: [{ id: target.id }], duration: 350, maxZoom: 1.2, padding: 0.3 });
+        }
+        setActiveErrorField(issue.field || null);
+      } else if (issue.edge_id) {
+        setSelectedEdgeId(issue.edge_id);
+        setSelectedNodeId(null);
+      }
+    },
+    [nodes, fitView],
+  );
+
+  const clearValidationIssues = useCallback(() => {
+    setValidationIssues([]);
+    setActiveErrorField(null);
+    clearNodeErrors();
+  }, [clearNodeErrors]);
 
   // Node and edge selection are mutually exclusive — opening one panel closes the other's.
   const onNodeClick = useCallback<NodeMouseHandler<RFNode>>((_, node) => {
@@ -182,6 +246,9 @@ function FlowCanvasInner({ flowId, initialData, aiNodeEnabled = false }: Props) 
   const updateNodeData = useCallback(
     (id: string, patch: Partial<RFNodeData>) => {
       setNodes((nds) => nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, ...patch } } : n)));
+      // Limpar erro deste nó imediatamente quando o usuário edita
+      setValidationIssues((prev) => prev.filter((i) => i.node_id !== id));
+      setNodes((nds) => nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, errors: undefined } } : n)));
     },
     [setNodes],
   );
@@ -214,14 +281,16 @@ function FlowCanvasInner({ flowId, initialData, aiNodeEnabled = false }: Props) 
               (b) => b.id === branchIdForCondition(toFlowNode(source), condition),
             )
           : undefined;
+        const hasError = edgeErrorsSet.has(e.id);
         return {
           ...e,
           type: "smoothstep" as const,
           label: branch ? t(rotuloDoRamo(branch, nomes)) : t(conditionLabel(condition)),
           selected: e.id === selectedEdgeId,
+          style: hasError ? { stroke: "var(--color-error, #ef4444)", strokeWidth: 2.5 } : undefined,
         };
       }),
-    [edges, nodes, selectedEdgeId, t, nomes],
+    [edges, nodes, selectedEdgeId, t, nomes, edgeErrorsSet],
   );
 
   // Quais saídas do nó selecionado já têm aresta. Quem sabe isso é o canvas —
@@ -343,6 +412,17 @@ function FlowCanvasInner({ flowId, initialData, aiNodeEnabled = false }: Props) 
     [screenToFlowPosition, addNodeAt],
   );
 
+  const nodeFieldErrors = useMemo(() => {
+    if (!selectedNode) return undefined;
+    const errs: Record<string, string> = {};
+    for (const issue of validationIssues) {
+      if (issue.node_id === selectedNode.id && issue.field) {
+        errs[issue.field] = issue.message;
+      }
+    }
+    return Object.keys(errs).length > 0 ? errs : undefined;
+  }, [selectedNode, validationIssues]);
+
   return (
     <div className="flex h-full min-h-[600px] w-full flex-col">
       {flow && (
@@ -355,13 +435,20 @@ function FlowCanvasInner({ flowId, initialData, aiNodeEnabled = false }: Props) 
           onDeleteSelection={onDeleteSelection}
           onSaved={setSavedGraph}
           onPublishErrors={markNodeErrors}
-          onPublishSuccess={clearNodeErrors}
+          onPublishSuccess={clearValidationIssues}
+          onValidationIssues={handleValidationIssues}
           onAutoFit={onAutoFit}
           canAutoFit={nodes.length > 0}
           autosaving={autosaving}
           lastAutosavedAt={lastAutosavedAt}
         />
       )}
+      <ValidationIssuesBar
+        issues={validationIssues}
+        nodeLabels={nodeLabels}
+        onSelectIssue={handleSelectIssue}
+        onDismiss={() => setValidationIssues([])}
+      />
       <div className="flex flex-1 overflow-hidden">
         <NodePalette onAdd={onPaletteAdd} aiNodeEnabled={aiNodeEnabled} />
         {/* Abaixo de `lg` a paleta fixa de 224px não cabe do lado do canvas —
@@ -450,6 +537,8 @@ function FlowCanvasInner({ flowId, initialData, aiNodeEnabled = false }: Props) 
                 onChange={(patch) => updateNodeData(selectedNode.id, patch)}
                 onDelete={() => deleteNode(selectedNode.id)}
                 ramosLigados={ramosLigadosDoSelecionado}
+                fieldErrors={nodeFieldErrors}
+                activeErrorField={activeErrorField}
               />
             </div>
           </aside>

@@ -860,4 +860,228 @@ describe('Node IA - Fase 3: Execução, Agentes Existentes, Fencing e Condiçõe
     expect(messages[1]).toEqual({ role: 'assistant', content: 'Com certeza! Temos 3 planos disponíveis.' });
     expect(messages[2]).toEqual({ role: 'user', content: 'Meu e-mail é mariana@empresa.com' });
   });
+
+  // =========================================================================
+  // CASO P1: BURST — getLeadContext já contém ALFA, BETA e GAMA (banco atualizado)
+  //          Garante que GAMA NÃO é duplicado e que ALFA, BETA, GAMA aparecem exatamente 1x
+  // =========================================================================
+  it('P1: burst de mensagens — histórico completo com ALFA, BETA e GAMA não duplica inbound atual', async () => {
+    const nodeConfig: AiNodeConfig = {
+      mode: 'custom_prompt',
+      custom_prompt: 'Processe os códigos informados pelo usuário.',
+    };
+
+    const runModelCallFn = vi.fn().mockResolvedValue({
+      result: { text: mockStructuredText('Recebi ALFA, BETA e GAMA. [BURST OK]') },
+      provider: 'anthropic',
+      model: 'claude-3-5-sonnet-20241022',
+      usage: { inputTokens: 200, outputTokens: 30 },
+    });
+
+    const getLeadContextFn = vi.fn().mockResolvedValue({
+      ok: true,
+      context: {
+        lead_id: 'lead-burst',
+        contact: { name: 'Operador', phone: '11945937478', tags: [], is_blocked: false },
+        conversationId: 'conv-burst',
+        last_human_decision: null,
+        messages: [
+          { direction: 'inbound', body: 'BURST PARTE 1 — código ALFA', sent_at: '2026-10-04T00:04:36Z' },
+          { direction: 'inbound', body: 'BURST PARTE 2 — código BETA', sent_at: '2026-10-04T00:04:49Z' },
+          { direction: 'inbound', body: 'BURST PARTE 3 — código GAMA', sent_at: '2026-10-04T00:05:01Z' },
+        ],
+      },
+    });
+
+    const input: ExecuteAiNodeTurnInput = {
+      organizationId: orgId,
+      enrollmentId,
+      nodeId,
+      inboundMessageId,
+      contactId: 'lead-burst',
+      conversationId: 'conv-burst',
+      workerId: 'worker-1',
+      leaseGeneration: 1,
+      nodeConfig,
+      session: buildMockSession({ turn_count: 1 }),
+      inboundText: 'BURST PARTE 3 — código GAMA',
+    };
+
+    await executeAiNodeTurn(mockDb, input, {
+      crmCfg: { supabase: {} as unknown } as unknown as CrmEdgeConfig,
+      runModelCallFn,
+      getLeadContextFn,
+      validateOwnershipFn: vi.fn().mockResolvedValue({ is_valid: true }),
+      getReplyCacheFn: vi.fn().mockResolvedValue(null),
+      recordReplyFn: vi.fn().mockResolvedValue({ recorded: true }),
+    });
+
+    const callArgs = runModelCallFn.mock.calls[0]![2];
+    const messages = callArgs.messages;
+
+    expect(messages.length).toBe(3);
+    expect(messages[0]).toEqual({ role: 'user', content: 'BURST PARTE 1 — código ALFA' });
+    expect(messages[1]).toEqual({ role: 'user', content: 'BURST PARTE 2 — código BETA' });
+    expect(messages[2]).toEqual({ role: 'user', content: 'BURST PARTE 3 — código GAMA' });
+
+    // Confirma que cada código aparece exatamente 1 vez
+    const userTexts = messages.map((m: { content: string }) => m.content);
+    expect(userTexts.filter((t: string) => t.includes('ALFA')).length).toBe(1);
+    expect(userTexts.filter((t: string) => t.includes('BETA')).length).toBe(1);
+    expect(userTexts.filter((t: string) => t.includes('GAMA')).length).toBe(1);
+  });
+
+  // =========================================================================
+  // CASO P2: BURST — getLeadContext contém ALFA e BETA, inboundText é GAMA
+  //          Garante que GAMA é apensado exatamente 1 vez ao final
+  // =========================================================================
+  it('P2: burst de mensagens — histórico com ALFA e BETA e inboundText GAMA entrega todos os 3', async () => {
+    const nodeConfig: AiNodeConfig = {
+      mode: 'custom_prompt',
+      custom_prompt: 'Processe os códigos informados pelo usuário.',
+    };
+
+    const runModelCallFn = vi.fn().mockResolvedValue({
+      result: { text: mockStructuredText('Recebi ALFA, BETA e GAMA. [BURST OK]') },
+      provider: 'anthropic',
+      model: 'claude-3-5-sonnet-20241022',
+      usage: { inputTokens: 200, outputTokens: 30 },
+    });
+
+    const getLeadContextFn = vi.fn().mockResolvedValue({
+      ok: true,
+      context: {
+        lead_id: 'lead-burst',
+        contact: { name: 'Operador', phone: '11945937478', tags: [], is_blocked: false },
+        conversationId: 'conv-burst',
+        last_human_decision: null,
+        messages: [
+          { direction: 'inbound', body: 'BURST PARTE 1 — código ALFA', sent_at: '2026-10-04T00:04:36Z' },
+          { direction: 'inbound', body: 'BURST PARTE 2 — código BETA', sent_at: '2026-10-04T00:04:49Z' },
+        ],
+      },
+    });
+
+    const input: ExecuteAiNodeTurnInput = {
+      organizationId: orgId,
+      enrollmentId,
+      nodeId,
+      inboundMessageId,
+      contactId: 'lead-burst',
+      conversationId: 'conv-burst',
+      workerId: 'worker-1',
+      leaseGeneration: 1,
+      nodeConfig,
+      session: buildMockSession({ turn_count: 1 }),
+      inboundText: 'BURST PARTE 3 — código GAMA',
+    };
+
+    await executeAiNodeTurn(mockDb, input, {
+      crmCfg: { supabase: {} as unknown } as unknown as CrmEdgeConfig,
+      runModelCallFn,
+      getLeadContextFn,
+      validateOwnershipFn: vi.fn().mockResolvedValue({ is_valid: true }),
+      getReplyCacheFn: vi.fn().mockResolvedValue(null),
+      recordReplyFn: vi.fn().mockResolvedValue({ recorded: true }),
+    });
+
+    const callArgs = runModelCallFn.mock.calls[0]![2];
+    const messages = callArgs.messages;
+
+    expect(messages.length).toBe(3);
+    expect(messages[0]).toEqual({ role: 'user', content: 'BURST PARTE 1 — código ALFA' });
+    expect(messages[1]).toEqual({ role: 'user', content: 'BURST PARTE 2 — código BETA' });
+    expect(messages[2]).toEqual({ role: 'user', content: 'BURST PARTE 3 — código GAMA' });
+  });
+
+  // =========================================================================
+  // CASO Q: Falha em getLeadContext não derruba o turno — fallback gracioso
+  // =========================================================================
+  it('Q: falha em getLeadContextFn não quebra o turno e preserva inboundText único', async () => {
+    const nodeConfig: AiNodeConfig = {
+      mode: 'custom_prompt',
+      custom_prompt: 'Atenda o usuário.',
+    };
+
+    const runModelCallFn = vi.fn().mockResolvedValue({
+      result: { text: mockStructuredText('Olá! Como posso ajudar?') },
+      provider: 'anthropic',
+      model: 'claude-3-5-sonnet-20241022',
+      usage: { inputTokens: 50, outputTokens: 10 },
+    });
+
+    const getLeadContextFn = vi.fn().mockRejectedValue(new Error('CRM timeout'));
+
+    const input: ExecuteAiNodeTurnInput = {
+      organizationId: orgId,
+      enrollmentId,
+      nodeId,
+      inboundMessageId,
+      contactId: 'lead-err',
+      conversationId: 'conv-err',
+      workerId: 'worker-1',
+      leaseGeneration: 1,
+      nodeConfig,
+      session: buildMockSession({ turn_count: 1 }),
+      inboundText: 'Mensagem única de teste',
+    };
+
+    const res = await executeAiNodeTurn(mockDb, input, {
+      crmCfg: { supabase: {} as unknown } as unknown as CrmEdgeConfig,
+      runModelCallFn,
+      getLeadContextFn,
+      validateOwnershipFn: vi.fn().mockResolvedValue({ is_valid: true }),
+      getReplyCacheFn: vi.fn().mockResolvedValue(null),
+      recordReplyFn: vi.fn().mockResolvedValue({ recorded: true }),
+    });
+
+    expect(res.status).toBe('generated');
+    const callArgs = runModelCallFn.mock.calls[0]![2];
+    expect(callArgs.messages.length).toBe(1);
+    expect(callArgs.messages[0]).toEqual({ role: 'user', content: 'Mensagem única de teste' });
+  });
+
+  // =========================================================================
+  // CASO R: Sem getLeadContextFn fornecido — turno simples funciona normalmente
+  // =========================================================================
+  it('R: sem getLeadContextFn, inboundText aparece exatamente 1 vez', async () => {
+    const nodeConfig: AiNodeConfig = {
+      mode: 'custom_prompt',
+      custom_prompt: 'Atenda o usuário.',
+    };
+
+    const runModelCallFn = vi.fn().mockResolvedValue({
+      result: { text: mockStructuredText('Mensagem recebida.') },
+      provider: 'anthropic',
+      model: 'claude-3-5-sonnet-20241022',
+      usage: { inputTokens: 50, outputTokens: 10 },
+    });
+
+    const input: ExecuteAiNodeTurnInput = {
+      organizationId: orgId,
+      enrollmentId,
+      nodeId,
+      inboundMessageId,
+      contactId: 'lead-simple',
+      conversationId: 'conv-simple',
+      workerId: 'worker-1',
+      leaseGeneration: 1,
+      nodeConfig,
+      session: buildMockSession({ turn_count: 1 }),
+      inboundText: 'Oi, tudo bem?',
+    };
+
+    const res = await executeAiNodeTurn(mockDb, input, {
+      crmCfg: { supabase: {} as unknown } as unknown as CrmEdgeConfig,
+      runModelCallFn,
+      validateOwnershipFn: vi.fn().mockResolvedValue({ is_valid: true }),
+      getReplyCacheFn: vi.fn().mockResolvedValue(null),
+      recordReplyFn: vi.fn().mockResolvedValue({ recorded: true }),
+    });
+
+    expect(res.status).toBe('generated');
+    const callArgs = runModelCallFn.mock.calls[0]![2];
+    expect(callArgs.messages.length).toBe(1);
+    expect(callArgs.messages[0]).toEqual({ role: 'user', content: 'Oi, tudo bem?' });
+  });
 });

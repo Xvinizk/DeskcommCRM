@@ -116,6 +116,7 @@ export const NODE_VISUALS: Record<NodeType, NodeVisual> = {
     borderClassName: "border-l-info",
     defaultLabel: "Casar resposta",
     defaultConfig: () => ({
+      advance_on_any_reply: false,
       branches: [{ id: "br_sim", label: "Sim", op: "contains", pattern: "sim" }],
       grace_timeout_ms: 900_000,
     }),
@@ -278,6 +279,13 @@ export function describeNodeConfig(
     }
     case "match_reply": {
       const c = config as ConfigOf<"match_reply">;
+      if (c.advance_on_any_reply) {
+        return `${t("Qualquer resposta · espera")} ${minutos(c.grace_timeout_ms)}${
+          c.save_to
+            ? ` · ${t("grava resposta")}${c.if_exists === "skip" ? ` · ${t("pula se já existir")}` : c.if_exists === "confirm" ? ` · ${t("confirma se já existir")}` : ""}`
+            : ""
+        }`;
+      }
       return `${c.branches.length} ${c.branches.length === 1 ? t("regra · espera") : t("regras · espera")} ${minutos(c.grace_timeout_ms)}${
         c.save_to
           ? ` · ${t("grava resposta")}${c.if_exists === "skip" ? ` · ${t("pula se já existir")}` : c.if_exists === "confirm" ? ` · ${t("confirma se já existir")}` : ""}`

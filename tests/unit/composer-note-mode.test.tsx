@@ -40,7 +40,7 @@ describe("Composer + modo nota interna", () => {
 
   it("modo reply (default): envia normal via useSendMessage", () => {
     renderComposer();
-    fireEvent.change(screen.getByLabelText(/mensagem/i), { target: { value: "oi cliente" } });
+    fireEvent.change(screen.getByRole("textbox", { name: /^mensagem$/i }), { target: { value: "oi cliente" } });
     fireEvent.click(screen.getByRole("button", { name: /^enviar$/i }));
 
     expect(sendMock).toHaveBeenCalledWith(
@@ -55,7 +55,7 @@ describe("Composer + modo nota interna", () => {
       /* simula request lento — onSuccess não é chamado */
     });
     renderComposer();
-    const input = screen.getByLabelText(/mensagem/i);
+    const input = screen.getByRole("textbox", { name: /^mensagem$/i });
     fireEvent.change(input, { target: { value: "oi cliente" } });
     fireEvent.click(screen.getByRole("button", { name: /^enviar$/i }));
 

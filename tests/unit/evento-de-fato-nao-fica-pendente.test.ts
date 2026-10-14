@@ -178,10 +178,6 @@ const NAMESPACE_ABERTO: Record<string, { onde: string; expressao: string }> = {
     onde: "app/api/v1/webhooks/nuvemshop/[event]/route.ts",
     expressao: "p_event_type: eventLogType",
   },
-  "<target da regra de automacao>": {
-    onde: "lib/automation/actions/add-tag.ts",
-    expressao: "p_event_type: target.event",
-  },
 };
 
 function arquivos(dir: string): string[] {

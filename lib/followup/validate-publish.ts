@@ -1,5 +1,6 @@
 import type { FlowGraph, FlowEdge, FlowNode } from './graph-schema';
-import { branchIdForCondition, nodeBranches } from './graph-schema';
+import { ANY_REPLY_BRANCH_ID, branchIdForCondition, nodeBranches, FLOW_MAX_STATIC_PATH_STEPS } from './graph-schema';
+export { FLOW_MAX_STATIC_PATH_STEPS } from './graph-schema';
 import { rotuloDoRamo } from './rotulo-do-ramo';
 import type { NomesDeValor } from './vocabulario';
 import type { AgenteCitado } from './agentes-citados';
@@ -37,6 +38,10 @@ export const PUBLISH_ERROR_CODES = [
   'ai_node_agent_unpublished',
   'ai_node_pinned_version_invalid',
   'ai_node_missing_instruction',
+  'ai_node_incompatible_custom_prompt',
+  'ai_node_incompatible_supplementary_instruction',
+  'ai_node_incompatible_agent_binding',
+  'ai_node_incompatible_agent_name',
 ] as const;
 export type PublishErrorCode = (typeof PUBLISH_ERROR_CODES)[number];
 
@@ -70,7 +75,6 @@ export interface ContextoDoPublish {
 
 const LONG_WAIT_THRESHOLD_MS = 86_400_000; // 24h
 const MIN_CYCLE_WAIT_MS = 300_000; // 5min
-const MAX_PATH_STEPS = 30;
 
 function waitMs(config: Extract<FlowNode, { type: 'wait' }>['config']): number {
   return config.mode === 'fixed' ? config.duration_ms : config.max_ms;
@@ -202,9 +206,10 @@ function analyzeCondensedPaths(
   nodes: FlowNode[],
   nodesById: Map<string, FlowNode>,
   outEdges: Map<string, FlowEdge[]>
-): { longWaitNodeIds: Set<string>; maxStepsExceeded: boolean } {
+): { longWaitNodeIds: Set<string>; maxStepsExceeded: boolean; longestPathSteps: number } {
   const longWaitNodeIds = new Set<string>();
   let maxStepsExceeded = false;
+  let longestPathSteps = 0;
 
   const components = stronglyConnectedComponents(
     nodes.map((n) => n.id),
@@ -234,7 +239,7 @@ function analyzeCondensedPaths(
   }
 
   const startComp = componentIndexById.get(startId);
-  if (startComp === undefined) return { longWaitNodeIds, maxStepsExceeded };
+  if (startComp === undefined) return { longWaitNodeIds, maxStepsExceeded, longestPathSteps };
 
   const arriveWait = new Map<number, number>([[startComp, 0]]);
   const arriveSteps = new Map<number, number>([[startComp, 0]]);
@@ -249,7 +254,8 @@ function analyzeCondensedPaths(
     const totalWait = arrivedWait + waitWeight[idx]!;
     const totalSteps = arrivedSteps + stepWeight[idx]!;
 
-    if (totalSteps > MAX_PATH_STEPS) maxStepsExceeded = true;
+    if (totalSteps > longestPathSteps) longestPathSteps = totalSteps;
+    if (totalSteps > FLOW_MAX_STATIC_PATH_STEPS) maxStepsExceeded = true;
 
     for (const id of components[idx]!) {
       const node = nodesById.get(id);
@@ -270,7 +276,7 @@ function analyzeCondensedPaths(
     }
   }
 
-  return { longWaitNodeIds, maxStepsExceeded };
+  return { longWaitNodeIds, maxStepsExceeded, longestPathSteps };
 }
 
 function byId(a: { id: string }, b: { id: string }): number {
@@ -306,7 +312,10 @@ function cobrirRamos(
       node_id: node.id,
       code: 'missing_branch_edge',
       branch_id: branch.id,
-      message: `Nó "${node.id}": a saída "${rotuloDoRamo(branch, nomes)}" não está ligada a nada.`,
+      message:
+        branch.id === ANY_REPLY_BRANCH_ID
+          ? "A saída 'Respondeu' precisa estar conectada."
+          : `Nó "${node.id}": a saída "${rotuloDoRamo(branch, nomes)}" não está ligada a nada.`,
     });
   }
 }
@@ -435,7 +444,7 @@ export function validateFlowForPublish(
       }
     }
 
-    const { longWaitNodeIds, maxStepsExceeded } = analyzeCondensedPaths(
+    const { longWaitNodeIds, maxStepsExceeded, longestPathSteps } = analyzeCondensedPaths(
       startTrigger.id,
       nodes,
       nodesById,
@@ -452,7 +461,7 @@ export function validateFlowForPublish(
       errors.push({
         node_id: null,
         code: 'max_steps_exceeded',
-        message: `O caminho mais longo a partir do trigger excede ${MAX_PATH_STEPS} passos.`,
+        message: `O caminho mais longo deste fluxo possui ${longestPathSteps} passos. O limite atual é ${FLOW_MAX_STATIC_PATH_STEPS}.`,
       });
     }
   }
@@ -574,6 +583,55 @@ export function validateFlowForPublish(
     }
 
     const cfg = node.config;
+
+    // Compatibilidade estrita de campos por mode (Fail-Closed)
+    if (cfg.mode === 'existing_agent') {
+      if (cfg.custom_prompt && cfg.custom_prompt.trim().length > 0) {
+        errors.push({
+          node_id: node.id,
+          code: 'ai_node_incompatible_custom_prompt',
+          message: `Nó IA "${node.label || node.id}" no modo "Agente Existente" não permite custom_prompt.`,
+        });
+      }
+      if (cfg.supplementary_instruction && cfg.supplementary_instruction.trim().length > 0) {
+        errors.push({
+          node_id: node.id,
+          code: 'ai_node_incompatible_supplementary_instruction',
+          message: `Nó IA "${node.label || node.id}" no modo "Agente Existente" não permite supplementary_instruction. Use o modo "Agente com Instrução Complementar".`,
+        });
+      }
+    } else if (cfg.mode === 'custom_prompt') {
+      if (cfg.supplementary_instruction && cfg.supplementary_instruction.trim().length > 0) {
+        errors.push({
+          node_id: node.id,
+          code: 'ai_node_incompatible_supplementary_instruction',
+          message: `Nó IA "${node.label || node.id}" no modo "Prompt Personalizado" não permite supplementary_instruction.`,
+        });
+      }
+      if (cfg.agent_binding && (cfg.agent_binding.agent_id || cfg.agent_binding.version_strategy)) {
+        errors.push({
+          node_id: node.id,
+          code: 'ai_node_incompatible_agent_binding',
+          message: `Nó IA "${node.label || node.id}" no modo "Prompt Personalizado" não permite vínculo com agente (agent_binding).`,
+        });
+      }
+      if (cfg.agent_name && cfg.agent_name.trim().length > 0) {
+        errors.push({
+          node_id: node.id,
+          code: 'ai_node_incompatible_agent_name',
+          message: `Nó IA "${node.label || node.id}" no modo "Prompt Personalizado" não permite agent_name residual.`,
+        });
+      }
+    } else if (cfg.mode === 'existing_with_supplementary') {
+      if (cfg.custom_prompt && cfg.custom_prompt.trim().length > 0) {
+        errors.push({
+          node_id: node.id,
+          code: 'ai_node_incompatible_custom_prompt',
+          message: `Nó IA "${node.label || node.id}" no modo "Agente com Instrução Complementar" não permite custom_prompt.`,
+        });
+      }
+    }
+
     if (cfg.mode === 'existing_agent' || cfg.mode === 'existing_with_supplementary') {
       const binding = cfg.agent_binding;
       if (!binding?.agent_id) {
@@ -670,4 +728,17 @@ export function validateFlowForPublish(
   });
 
   return { ok: false, errors };
+}
+
+/**
+ * Calcula a profundidade máxima (caminho mais longo em número de nós) a partir do trigger.
+ * Útil para observabilidade e logs de publicação.
+ */
+export function calculateFlowLongestPath(graph: FlowGraph): number {
+  const triggers = graph.nodes.filter((n) => n.type === 'trigger');
+  if (triggers.length === 0) return 0;
+  const nodesById = new Map(graph.nodes.map((n) => [n.id, n]));
+  const outEdges = buildOutEdges(graph.edges);
+  const { longestPathSteps } = analyzeCondensedPaths(triggers[0]!.id, graph.nodes, nodesById, outEdges);
+  return longestPathSteps;
 }
