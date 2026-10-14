@@ -369,43 +369,60 @@ export const messageTextConfigSchema = z.strictObject({
   body: z.string().min(1).max(4000),
 });
 
+function stripLegacyMedia<T>(raw: T): T {
+  if (raw && typeof raw === "object" && "media" in raw) {
+    const { media: _discarded, ...rest } = raw as Record<string, unknown>;
+    return rest as T;
+  }
+  return raw;
+}
+
 export const messageImageConfigSchema = z
-  .strictObject({
-    media_url: z.string().url().max(2000).optional(),
-    media_storage_path: z.string().min(1).max(500).optional(),
-    media_type: z.literal("image").optional(),
-    media_mime: z.string().max(100).optional(),
-    media_filename: z.string().max(255).optional(),
-    media_size_bytes: z.number().int().nonnegative().optional(),
-    caption: z.string().max(1000).optional(),
-  })
+  .preprocess(
+    stripLegacyMedia,
+    z.strictObject({
+      media_url: z.string().url().max(2000).optional(),
+      media_storage_path: z.string().min(1).max(500).optional(),
+      media_type: z.literal("image").optional(),
+      media_mime: z.string().max(100).optional(),
+      media_filename: z.string().max(255).optional(),
+      media_size_bytes: z.number().int().nonnegative().optional(),
+      caption: z.string().max(1000).optional(),
+    }),
+  )
   .refine((d) => Boolean(d.media_storage_path || d.media_url), {
     message: "media_storage_path or media_url is required",
   });
 
 export const messageVideoConfigSchema = z
-  .strictObject({
-    media_url: z.string().url().max(2000).optional(),
-    media_storage_path: z.string().min(1).max(500).optional(),
-    media_type: z.literal("video").optional(),
-    media_mime: z.string().max(100).optional(),
-    media_filename: z.string().max(255).optional(),
-    media_size_bytes: z.number().int().nonnegative().optional(),
-    caption: z.string().max(1000).optional(),
-  })
+  .preprocess(
+    stripLegacyMedia,
+    z.strictObject({
+      media_url: z.string().url().max(2000).optional(),
+      media_storage_path: z.string().min(1).max(500).optional(),
+      media_type: z.literal("video").optional(),
+      media_mime: z.string().max(100).optional(),
+      media_filename: z.string().max(255).optional(),
+      media_size_bytes: z.number().int().nonnegative().optional(),
+      caption: z.string().max(1000).optional(),
+    }),
+  )
   .refine((d) => Boolean(d.media_storage_path || d.media_url), {
     message: "media_storage_path or media_url is required",
   });
 
 export const messageAudioConfigSchema = z
-  .strictObject({
-    media_url: z.string().url().max(2000).optional(),
-    media_storage_path: z.string().min(1).max(500).optional(),
-    media_type: z.literal("audio").optional(),
-    media_mime: z.string().max(100).optional(),
-    media_filename: z.string().max(255).optional(),
-    media_size_bytes: z.number().int().nonnegative().optional(),
-  })
+  .preprocess(
+    stripLegacyMedia,
+    z.strictObject({
+      media_url: z.string().url().max(2000).optional(),
+      media_storage_path: z.string().min(1).max(500).optional(),
+      media_type: z.literal("audio").optional(),
+      media_mime: z.string().max(100).optional(),
+      media_filename: z.string().max(255).optional(),
+      media_size_bytes: z.number().int().nonnegative().optional(),
+    }),
+  )
   .refine((d) => Boolean(d.media_storage_path || d.media_url), {
     message: "media_storage_path or media_url is required",
   });

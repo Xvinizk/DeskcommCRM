@@ -76,6 +76,24 @@ describe("Flow Builder — Upload de Mídia nos Nós (Fase 1)", () => {
     expect(parsed.success).toBe(true);
   });
 
+  it("remove com segurança a chave legacy config.media sem falhar no strictObject", () => {
+    const parsed = messageVideoConfigSchema.safeParse({
+      media: { fileSize: 11092020 },
+      media_storage_path: `${orgId}/flows/video.mp4`,
+      media_type: "video",
+      media_mime: "video/mp4",
+      media_filename: "video.mp4",
+      media_size_bytes: 11092020,
+      caption: "Legenda",
+    });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect("media" in (parsed.data as Record<string, unknown>)).toBe(false);
+      expect(parsed.data.media_size_bytes).toBe(11092020);
+      expect(parsed.data.media_storage_path).toBe(`${orgId}/flows/video.mp4`);
+    }
+  });
+
   it("valida schema de message_audio persistindo media_storage_path e metadados", () => {
     const parsed = messageAudioConfigSchema.safeParse({
       media_storage_path: `${orgId}/flows/audio.ogg`,

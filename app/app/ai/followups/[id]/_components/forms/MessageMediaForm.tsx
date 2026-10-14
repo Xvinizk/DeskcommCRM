@@ -49,15 +49,35 @@ export function MessageMediaForm({ type, config, onChange, fieldErrors }: Props)
   const t = useT();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const [mediaStoragePath, setMediaStoragePath] = useState(config.media_storage_path ?? "");
-  const [mediaUrl, setMediaUrl] = useState(config.media_url ?? "");
+  const raw = config as Record<string, unknown> & {
+    media?: {
+      storagePath?: string;
+      storage_path?: string;
+      url?: string;
+      mime?: string;
+      filename?: string;
+      fileName?: string;
+      size?: number;
+      fileSize?: number;
+    };
+  };
+
+  const [mediaStoragePath, setMediaStoragePath] = useState(
+    config.media_storage_path ?? raw.media?.storage_path ?? raw.media?.storagePath ?? ""
+  );
+  const [mediaUrl, setMediaUrl] = useState(config.media_url ?? raw.media?.url ?? "");
   const [mediaType, setMediaType] = useState(
     config.media_type ?? (type === "message_image" ? "image" : type === "message_video" ? "video" : "audio")
   );
-  const [mediaMime, setMediaMime] = useState(config.media_mime ?? "");
-  const [mediaFilename, setMediaFilename] = useState(config.media_filename ?? "");
+  const [mediaMime, setMediaMime] = useState(config.media_mime ?? raw.media?.mime ?? "");
+  const [mediaFilename, setMediaFilename] = useState(
+    config.media_filename ?? raw.media?.filename ?? raw.media?.fileName ?? ""
+  );
   const [mediaSizeBytes, setMediaSizeBytes] = useState<number | null>(
-    (config as Record<string, unknown>).media_size_bytes as number | null ?? null
+    ((config as Record<string, unknown>).media_size_bytes as number | null) ??
+      raw.media?.size ??
+      raw.media?.fileSize ??
+      null
   );
   const [caption, setCaption] = useState(
     type !== "message_audio" ? (config as ConfigOf<"message_image">).caption ?? "" : ""
