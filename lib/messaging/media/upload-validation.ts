@@ -51,3 +51,39 @@ export function validateOutboundMedia(mime: string, sizeBytes: number): Ok | Fai
   if (DOCUMENT_MIMES.has(base)) return { ok: true, kind: "document" };
   return { ok: false, code: "unsupported_media_type", message: "Tipo de arquivo não suportado." };
 }
+
+/**
+ * Inspeciona a integridade de um container MP4 verificando se átomos de mídia
+ * (mdat) não declaram tamanho superior aos bytes realmente contidos no buffer.
+ * Evita upload e persistência de vídeos truncados cujo cabeçalho (moov) promete
+ * uma duração maior (ex.: 59s) do que os pacotes de mídia realmente gravados (ex.: 24s).
+ */
+export function validateMp4BufferIntegrity(buffer: Buffer): { ok: true } | { ok: false; reason: string } {
+  if (buffer.length < 16) return { ok: true };
+  let offset = 0;
+  while (offset + 8 <= buffer.length) {
+    let size = buffer.readUInt32BE(offset);
+    const type = buffer.toString("ascii", offset + 4, offset + 8);
+    let headerSize = 8;
+    if (size === 1) {
+      if (offset + 16 > buffer.length) break;
+      const extSize = Number(buffer.readBigUInt64BE(offset + 8));
+      size = extSize;
+      headerSize = 16;
+    } else if (size === 0) {
+      break;
+    }
+    if (size < headerSize) break;
+    if (type === "mdat") {
+      if (offset + size > buffer.length) {
+        return {
+          ok: false,
+          reason: `Arquivo de vídeo truncado (bloco mdat declara ${size} bytes mas o arquivo só possui ${buffer.length - offset} bytes restantes).`,
+        };
+      }
+    }
+    offset += size;
+  }
+  return { ok: true };
+}
+
