@@ -80,7 +80,8 @@ export const TETO_PADRAO_MS = 15_000;
  * 30s é o mesmo teto que a mídia de ENTRADA já usa
  * (`lib/messaging/media/waha-source.ts:18`).
  */
-export const TETO_DE_MIDIA_MS = 30_000;
+export const TETO_DE_MIDIA_MS = 120_000;
+export const TETO_DE_VIDEO_MS = 180_000;
 
 /**
  * O ERRO DIZ O STATUS. NUNCA O CORPO QUE O WAHA DEVOLVEU.
@@ -611,11 +612,16 @@ export class WahaClient {
     // o WAHA roda ffmpeg e baixa a URL do Storage antes de responder. Com o teto
     // de texto, o envio de áudio legítimo seria cortado — o conserto do timeout
     // viraria um defeito novo, e mais silencioso que o original.
-    const res = await this.fetchComTeto(`${this.baseUrl}/api/${plan.endpoint}`, {
-      method: "POST",
-      headers: { "X-Api-Key": this.apiKey, "Content-Type": "application/json" },
-      body: JSON.stringify({ session, chatId, ...plan.payload }),
-    }, TETO_DE_MIDIA_MS);
+    const teto = plan.endpoint === "sendVideo" ? TETO_DE_VIDEO_MS : TETO_DE_MIDIA_MS;
+    const res = await this.fetchComTeto(
+      `${this.baseUrl}/api/${plan.endpoint}`,
+      {
+        method: "POST",
+        headers: { "X-Api-Key": this.apiKey, "Content-Type": "application/json" },
+        body: JSON.stringify({ session, chatId, ...plan.payload }),
+      },
+      teto,
+    );
     if (!res.ok) {
       throw new Error(`waha_${res.status}`);
     }

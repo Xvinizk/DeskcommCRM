@@ -1,5 +1,5 @@
 import {claimOfJob,type JobClaim} from "../queue/claim";
-import {resultadoDoEnvioDoFollowup} from "../edge/crm/send-ledger";
+import {resultadoDoEnvioDoFollowup, reconcileAcceptedSend} from "../edge/crm/send-ledger";
 import { parseServiceBoundary } from "@/lib/atendimento/fronteira";
 import { requireCurrentServiceBoundary } from "@/lib/atendimento/fronteira-server";
 /**
@@ -690,6 +690,18 @@ async function sendFixedOutbound(
   const { tenantId, leadId, channelSessionId, conversationId } = target;
   const runLog = withFields(deps.log, { job_id: job.id, tenant_id: tenantId, lead_id: leadId });
 
+  const alreadyAccepted = await reconcileAcceptedSend(pool, {
+    tenantId,
+    jobId: job.id,
+    seq: 1,
+  });
+  if (alreadyAccepted) {
+    runLog.info('envio fixo ja aceito no ledger — reconciliado sem reenviar ao canal', {
+      job_id: job.id,
+    });
+    return { kind: "sent" };
+  }
+
   if (await isLeadInHandoff(pool, tenantId, leadId)) {
     runLog.info('envio fixo pulado — lead silenciado (handoff/opt-out)', { kind: job.kind });
     return { kind: "skipped" };
@@ -730,6 +742,7 @@ async function sendFixedOutbound(
     now: clock(),
     sleep: deps.sleep,
     lgpd: context.lgpd,
+    enforceSpinning: false,
     ...(deps.knobs.disclosureMode !== undefined ? { disclosureMode: deps.knobs.disclosureMode } : {}),
     ...(camadaSemanticaLigada
       ? {
