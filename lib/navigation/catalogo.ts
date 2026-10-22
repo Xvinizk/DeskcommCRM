@@ -621,6 +621,18 @@ export const NAV_CATALOG = [
     minRole: "viewer",
   },
   {
+    // Irmão do Faturamento: lá é o caixa; aqui é a venda e se o anúncio se
+    // paga (ROAS). No sidebar porque é a tela do número do dia, não do mês.
+    href: "/app/operacao",
+    label: "Painel da operação",
+    description: "Faturamento, vendas, ticket médio, gasto em anúncio e ROAS, dia a dia.",
+    icon: "ChartBar",
+    group: "analise",
+    section: "Dinheiro",
+    minRole: "viewer",
+    sidebar: true,
+  },
+  {
     href: "/app/metrics",
     label: "Desempenho",
     description: "Funil e performance por atendente nos últimos 30 dias.",
