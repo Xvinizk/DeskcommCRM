@@ -605,7 +605,40 @@ async function applyResult(
           updated_at: clock().toISOString(),
         });
         tallyOutcome(result, summary);
+        return false;
       }
+      if (prior.event_type === "wait_started") {
+        // A espera gravou o evento e o UPDATE dela perdeu o CAS (corrida
+        // inbound × tick). Sem recompor o passo, todo tick recalcula a mesma
+        // chave, perde o insert e sai sem gravar — a inscrição fica reivindicada
+        // para sempre (medido em produção: 8 dias, `claimed: 3, advanced: 0`).
+        // O patch é o que a espera teria aplicado; se ela ainda gravar, um dos
+        // dois perde o CAS e o estado final é o mesmo.
+        const nextEval = typeof prior.payload?.next_eval_at === "string" ? prior.payload.next_eval_at : clock().toISOString();
+        const wakeStatus = prior.payload?.wake_status === "waiting_reply" ? "waiting_reply" : "active";
+        logger.warn("followup: espera sem passo gravado — recompondo", {
+          enrollment_id: enrollment.id,
+          node_id: node.id,
+          idempotency_key: idemKey,
+        });
+        await db.updateEnrollment(enrollment.id, enrollment.organization_id, {
+          current_node_id: enrollment.current_node_id,
+          status: wakeStatus,
+          next_eval_at: nextEval,
+          steps_taken: enrollment.steps_taken + 1,
+          claimed_until: null,
+          updated_at: clock().toISOString(),
+        });
+        summary.scheduled++;
+        return false;
+      }
+      logger.error("followup: chave do passo já usada por outro evento — inscrição não avança", {
+        enrollment_id: enrollment.id,
+        node_id: node.id,
+        idempotency_key: idemKey,
+        evento_existente: prior.event_type,
+        evento_desejado: wantedType,
+      });
       return false;
     }
   }

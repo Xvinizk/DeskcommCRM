@@ -48,6 +48,7 @@ function admin() {
       eq: () => chain,
       lte: () => chain,
       in: () => chain,
+      or: () => chain,
       single: () => Promise.resolve({data:table==="send_ledger"?{id:"ledger-1"}:{settings:{}},error:null}),
       insert: () => chain,
       order: () => chain,
