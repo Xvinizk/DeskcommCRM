@@ -456,6 +456,18 @@ beforeAll(() => {
                     '\\x00000000000000000000000000000000'::bytea);
         end if;
 
+        -- migration 0389 — o painel da operação: a venda registrada e o gasto
+        -- diário em anúncio. Inseridos DIRETO, sem o gatilho do lead ganho: o
+        -- que se prova aqui é a cerca da LINHA.
+        if not exists (select 1 from public.operation_sales where organization_id = v_org) then
+          insert into public.operation_sales (organization_id, sold_on, quantity, amount_cents, contact_id)
+            values (v_org, current_date, 1, 5000, v_contact);
+        end if;
+        if not exists (select 1 from public.ad_spend_daily where organization_id = v_org) then
+          insert into public.ad_spend_daily (organization_id, spend_date, amount_cents)
+            values (v_org, current_date, 1000);
+        end if;
+
         if not exists (select 1 from public.scheduled_messages where organization_id = v_org) then
           insert into public.scheduled_messages
             (organization_id, conversation_id, scheduled_for, body)
@@ -576,6 +588,9 @@ export const TABLES = [
   "financial_entries",
   "loyalty_ledger",
   "recurring_entries",
+  // migration 0389 — painel da operação.
+  "operation_sales",
+  "ad_spend_daily",
   // migration 0372 — a conexão com um PostgreSQL de OUTRO sistema (recorte do
   // PR #1130, de @vgamkt). Vazar a linha entrega ao vizinho o host, a porta, o
   // banco e o USUÁRIO do sistema interno dele: metade de uma credencial, e o

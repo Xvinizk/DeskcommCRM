@@ -143,7 +143,9 @@ begin
   return new;
 end $$;
 
-revoke execute on function public.fn_sincronizar_venda_do_lead() from public, anon;
+-- Função de GATILHO: ninguém a chama direto. `authenticated` também sai — o
+-- default ACL do baseline lhe daria EXECUTE, e o gatilho dispara sem precisar dele.
+revoke execute on function public.fn_sincronizar_venda_do_lead() from public, anon, authenticated;
 
 drop trigger if exists trg_venda_do_lead_ganho on public.crm_leads;
 create trigger trg_venda_do_lead_ganho
