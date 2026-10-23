@@ -126,7 +126,30 @@ export async function POST(req: NextRequest): Promise<Response> {
 
   const bruto = Buffer.from(await fileBlob.arrayBuffer());
 
-  if (verdict.kind === "video" && (mime === "video/mp4" || fileName.toLowerCase().endsWith(".mp4"))) {
+  // O corpo chegou menor do que o navegador declarou: alguma camada no caminho
+  // (proxy do Next, proxy reverso) cortou o upload. Não é culpa do arquivo do
+  // usuário, então a mensagem não pode dizer "corrompido". O envelope multipart
+  // custa poucas centenas de bytes; 64KB de folga cobre qualquer cabeçalho.
+  if (declared > 0 && declared - bruto.length > 65_536) {
+    logger.error("[followup-flows/media] upload chegou cortado no servidor", {
+      declaredBytes: declared,
+      receivedBytes: bruto.length,
+      fileName,
+      requestId,
+    });
+    return fail(
+      "payload_too_large",
+      t("O servidor recebeu só parte do arquivo. Tente de novo; se persistir, avise o suporte."),
+      413,
+      { requestId },
+    );
+  }
+
+  const nomeMinusculo = fileName.toLowerCase();
+  if (
+    verdict.kind === "video" &&
+    (mime === "video/mp4" || mime === "video/quicktime" || nomeMinusculo.endsWith(".mp4") || nomeMinusculo.endsWith(".mov"))
+  ) {
     const integrity = validateMp4BufferIntegrity(bruto);
     if (!integrity.ok) {
       logger.warn("[followup-flows/media] upload rejeitado: arquivo de video truncado", {

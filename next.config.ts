@@ -78,6 +78,12 @@ const nextConfig: NextConfig = {
   typedRoutes: true,
   experimental: {
     optimizePackageImports: ["@phosphor-icons/react", "lucide-react", "date-fns"],
+    // O proxy (proxy.ts) roda em toda rota de API e, no Next 16, guarda só os
+    // primeiros 10MB do corpo da requisição (default de proxyClientMaxBodySize).
+    // O resto é DESCARTADO em silêncio: um vídeo de 25MB chegava ao handler com
+    // 10MB e era recusado como "incompleto ou corrompido". O teto de mídia é
+    // 50MB (MAX_MEDIA_BYTES) + envelope multipart, então 60mb dá folga.
+    proxyClientMaxBodySize: "60mb",
   },
   images: {
     // O app não usa next/image de fato (só <img> raw); desligar o otimizador
