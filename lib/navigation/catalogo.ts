@@ -621,6 +621,18 @@ export const NAV_CATALOG = [
     minRole: "viewer",
   },
   {
+    // Irmão do Faturamento: lá é o caixa; aqui é a venda e se o anúncio se
+    // paga (ROAS). Fora do sidebar, como o Faturamento: o menu lateral está no
+    // teto da dobra (15 itens a 1280x900, `interface-por-empresa.test.ts`).
+    href: "/app/operacao",
+    label: "Painel da operação",
+    description: "Faturamento, vendas, ticket médio, gasto em anúncio e ROAS, dia a dia.",
+    icon: "ChartBar",
+    group: "analise",
+    section: "Dinheiro",
+    minRole: "viewer",
+  },
+  {
     href: "/app/metrics",
     label: "Desempenho",
     description: "Funil e performance por atendente nos últimos 30 dias.",

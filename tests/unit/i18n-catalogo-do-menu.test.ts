@@ -52,7 +52,6 @@ function textosDoMenu(): TextoDoMenu[] {
  */
 const DIVIDA_CONGELADA: { onde: string; campo: string; motivo: string }[] = [
   { onde: "/app/prospecting", campo: "description", motivo: "descrição sem linha no dicionário" },
-  { onde: "/app/faturamento", campo: "section", motivo: "seção “Dinheiro” sem linha no dicionário" },
   { onde: "/app/settings/tags", campo: "description", motivo: "descrição sem linha no dicionário" },
   {
     onde: "/app/settings/voip-trunk",

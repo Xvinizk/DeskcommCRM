@@ -35572,6 +35572,561 @@ revoke all on function public.fn_followup_patch(uuid,uuid,bigint,jsonb) from pub
 grant execute on function public.fn_followup_patch(uuid,uuid,bigint,jsonb) to service_role;
 
 
+-- ---- compartilhamento de fluxos, versionamento e backups (migration 0383) ----
+alter table public.followup_flow_versions
+  add column if not exists label text,
+  add column if not exists kind text not null default 'publish';
+
+alter table public.followup_flow_versions
+  drop constraint if exists followup_flow_versions_kind_check;
+
+alter table public.followup_flow_versions
+  add constraint followup_flow_versions_kind_check
+  check (kind in ('publish', 'manual_backup', 'pre_restore'));
+
+create index if not exists idx_followup_versions_pointer_created
+  on public.followup_flow_versions (pointer_id, created_at desc);
+
+create table if not exists public.followup_flow_shares (
+  id uuid primary key default gen_random_uuid(),
+  organization_id uuid not null references public.organizations(id) on delete cascade,
+  pointer_id uuid not null references public.followup_flow_pointers(id) on delete cascade,
+  token text not null unique,
+  status text not null default 'active',
+  snapshot jsonb not null,
+  created_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  revoked_at timestamptz,
+  constraint followup_flow_shares_status_check check (status in ('active', 'revoked'))
+);
+
+alter table public.followup_flow_shares enable row level security;
+
+drop policy if exists tenant_isolation_followup_flow_shares_all on public.followup_flow_shares;
+create policy tenant_isolation_followup_flow_shares_all on public.followup_flow_shares
+  for all using (
+    organization_id in (select fn_user_org_ids())
+    and public.fn_role_at_least(organization_id, 'agent')
+  )
+  with check (
+    organization_id in (select fn_user_org_ids())
+    and public.fn_role_at_least(organization_id, 'agent')
+  );
+
+create index if not exists idx_followup_flow_shares_token
+  on public.followup_flow_shares (token) where status = 'active';
+
+create index if not exists idx_followup_flow_shares_pointer
+  on public.followup_flow_shares (pointer_id);
+
+-- 0384: Ajusta o default de ai_routers.config para remover 'claude-haiku-4-5' hardcoded
+alter table public.ai_routers
+  alter column config set default jsonb_build_object(
+    'sticky', true,
+    'min_confidence', 0.6
+  );
+
+update public.ai_routers
+   set config = (config - 'classifier_model')
+ where config->>'classifier_model' = 'claude-haiku-4-5'
+   and (config->>'classifier_provider' is null or config->>'classifier_provider' = '');
+
+-- 0385: Suporte a estado de sessão do Node IA no enrollment
+alter table public.followup_enrollments
+  add column if not exists ai_node_session jsonb;
+
+comment on column public.followup_enrollments.ai_node_session is
+  'Estado transiente de execução do nó IA (turn_count, last_inbound_at, agent_id, etc.). Fonte da verdade canônica do nó no enrollment.';
+-- 0387/0388: Follow-up flows: suporte a arquivamento e exclusão permanente transacional
+alter table public.followup_flow_pointers
+  add column if not exists archived_at timestamptz;
+
+create index if not exists idx_followup_flow_pointers_archived
+  on public.followup_flow_pointers (organization_id, archived_at);
+
+create or replace function public.fn_followup_flow_deletion_summary(
+  p_org uuid,
+  p_pointer uuid
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_name text;
+  v_versions int := 0;
+  v_active int := 0;
+  v_completed int := 0;
+  v_cancelled int := 0;
+  v_other int := 0;
+  v_events int := 0;
+  v_agents int := 0;
+  v_running_jobs int := 0;
+  v_pending_jobs int := 0;
+begin
+  select name into v_name
+  from public.followup_flow_pointers
+  where id = p_pointer and organization_id = p_org;
+
+  if not found then
+    return null;
+  end if;
+
+  select count(*) into v_versions
+  from public.followup_flow_versions
+  where organization_id = p_org and pointer_id = p_pointer;
+
+  select
+    count(*) filter (where status in ('active', 'waiting_reply', 'dormente', 'paused_handoff', 'paused_manual')),
+    count(*) filter (where status = 'completed'),
+    count(*) filter (where status = 'cancelled'),
+    count(*) filter (where status not in ('active', 'waiting_reply', 'dormente', 'paused_handoff', 'paused_manual', 'completed', 'cancelled'))
+  into v_active, v_completed, v_cancelled, v_other
+  from public.followup_enrollments
+  where organization_id = p_org and pointer_id = p_pointer;
+
+  select count(*) into v_events
+  from public.followup_enrollment_events fee
+  join public.followup_enrollments fe on fe.id = fee.enrollment_id
+  where fe.organization_id = p_org and fe.pointer_id = p_pointer;
+
+  select count(*) into v_agents
+  from public.ai_agents a
+  join public.ai_agent_versions v on v.id = a.published_version_id
+  where a.organization_id = p_org
+    and a.archived_at is null
+    and (
+      v.followup->'flow_pointer_ids' @> to_jsonb(p_pointer::text)
+      or v.followup->>'flow_pointer_id' = p_pointer::text
+    );
+
+  select
+    count(*) filter (where status = 'running' or (locked_at is not null and locked_at > now() - interval '5 minutes')),
+    count(*) filter (where status = 'pending')
+  into v_running_jobs, v_pending_jobs
+  from public.job_queue
+  where organization_id = p_org
+    and (
+      payload->>'pointer_id' = p_pointer::text
+      or payload->>'enrollment_id' in (
+        select id::text from public.followup_enrollments where pointer_id = p_pointer and organization_id = p_org
+      )
+    );
+
+  return jsonb_build_object(
+    'flow_name', v_name,
+    'versions_count', v_versions,
+    'active_enrollments', v_active,
+    'completed_enrollments', v_completed,
+    'cancelled_enrollments', v_cancelled,
+    'other_historical_enrollments', v_other,
+    'total_events_count', v_events,
+    'agent_references', v_agents,
+    'running_jobs', v_running_jobs,
+    'pending_jobs', v_pending_jobs,
+    'can_delete', (v_active = 0 and v_agents = 0 and v_running_jobs = 0)
+  );
+end;
+$$;
+
+revoke all on function public.fn_followup_flow_deletion_summary(uuid, uuid) from public, anon, authenticated;
+grant execute on function public.fn_followup_flow_deletion_summary(uuid, uuid) to service_role;
+
+drop function if exists public.fn_delete_followup_flow(uuid, uuid);
+
+create or replace function public.fn_delete_followup_flow(
+  p_org uuid,
+  p_pointer uuid,
+  p_purge_history boolean default false
+)
+returns boolean
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_active_count int;
+  v_running_jobs int;
+begin
+  if not exists (
+    select 1
+    from public.followup_flow_pointers
+    where id = p_pointer and organization_id = p_org
+  ) then
+    raise exception 'pointer_not_found' using errcode = 'P0002';
+  end if;
+
+  select count(*) into v_active_count
+  from public.followup_enrollments
+  where organization_id = p_org
+    and pointer_id = p_pointer
+    and status in ('active', 'waiting_reply', 'dormente', 'paused_handoff', 'paused_manual');
+
+  if v_active_count > 0 then
+    raise exception 'flow_has_active_enrollments' using errcode = 'P0001';
+  end if;
+
+  if exists (
+    select 1
+    from public.ai_agents a
+    join public.ai_agent_versions v on v.id = a.published_version_id
+    where a.organization_id = p_org
+      and a.archived_at is null
+      and (
+        v.followup->'flow_pointer_ids' @> to_jsonb(p_pointer::text)
+        or v.followup->>'flow_pointer_id' = p_pointer::text
+      )
+  ) then
+    raise exception 'flow_in_use_by_agent' using errcode = 'P0003';
+  end if;
+
+  if not p_purge_history then
+    if exists (
+      select 1
+      from public.followup_enrollments
+      where organization_id = p_org and pointer_id = p_pointer
+    ) then
+      raise exception 'flow_has_history' using errcode = 'P0004';
+    end if;
+  else
+    select count(*) into v_running_jobs
+    from public.job_queue
+    where organization_id = p_org
+      and (status = 'running' or (locked_at is not null and locked_at > now() - interval '5 minutes'))
+      and (
+        payload->>'pointer_id' = p_pointer::text
+        or payload->>'enrollment_id' in (
+          select id::text from public.followup_enrollments where pointer_id = p_pointer and organization_id = p_org
+        )
+      );
+
+    if v_running_jobs > 0 then
+      raise exception 'flow_jobs_in_progress' using errcode = 'P0005';
+    end if;
+
+    update public.job_queue
+    set status = 'dead',
+        last_error = 'flow_permanently_deleted'
+    where organization_id = p_org
+      and status = 'pending'
+      and (
+        payload->>'pointer_id' = p_pointer::text
+        or payload->>'enrollment_id' in (
+          select id::text from public.followup_enrollments where pointer_id = p_pointer and organization_id = p_org
+        )
+      );
+  end if;
+
+  update public.ai_agent_versions
+  set followup = jsonb_set(
+    followup,
+    '{flow_pointer_ids}',
+    (
+      select coalesce(jsonb_agg(elem), '[]'::jsonb)
+      from jsonb_array_elements_text(followup->'flow_pointer_ids') as elem
+      where elem <> p_pointer::text
+    )
+  )
+  where organization_id = p_org
+    and status = 'draft'
+    and (
+      followup->'flow_pointer_ids' @> to_jsonb(p_pointer::text)
+      or followup->>'flow_pointer_id' = p_pointer::text
+    );
+
+  update public.appointment_recovery_receipts
+  set pointer_id = null,
+      enrollment_id = null
+  where organization_id = p_org
+    and (
+      pointer_id = p_pointer
+      or enrollment_id in (
+        select id from public.followup_enrollments where pointer_id = p_pointer and organization_id = p_org
+      )
+    );
+
+  update public.followup_flow_pointers
+  set active_version_id = null
+  where id = p_pointer and organization_id = p_org;
+
+  delete from public.followup_enrollments
+  where pointer_id = p_pointer and organization_id = p_org;
+
+  delete from public.followup_flow_versions
+  where pointer_id = p_pointer and organization_id = p_org;
+
+  delete from public.followup_flow_shares
+  where pointer_id = p_pointer;
+
+  delete from public.followup_flow_pointers
+  where id = p_pointer and organization_id = p_org;
+
+  return true;
+end;
+$$;
+
+revoke all on function public.fn_delete_followup_flow(uuid, uuid, boolean) from public, anon, authenticated;
+grant execute on function public.fn_delete_followup_flow(uuid, uuid, boolean) to service_role;
+
+
+-- ---- painel da operação (migration 0389) ----
+
+-- ─── a venda registrada ──────────────────────────────────────────────────────
+create table if not exists public.operation_sales (
+  id uuid primary key default gen_random_uuid(),
+  organization_id uuid not null references public.organizations(id) on delete cascade,
+
+  -- O DIA da venda, já no fuso da organização. Data e não instante: "fiz 3
+  -- vendas hoje" não tem hora, e guardar meia-noite UTC jogaria a venda no
+  -- dia anterior para quem está em São Paulo.
+  sold_on date not null,
+
+  -- "3 vendas, R$ 300" é UMA linha com quantity = 3. Ticket médio é soma dos
+  -- valores ÷ soma das quantidades.
+  quantity integer not null default 1 check (quantity > 0),
+  amount_cents bigint not null check (amount_cents > 0),
+  currency text not null default 'BRL' check (currency ~ '^[A-Z]{3}$'),
+
+  description text check (description is null or char_length(description) <= 300),
+  contact_id uuid references public.contacts(id) on delete set null,
+  -- A venda do lead ganho. `set null`: apagar o lead não desfaz a venda.
+  lead_id uuid references public.crm_leads(id) on delete set null,
+  payment_method_id uuid references public.payment_methods(id) on delete set null,
+
+  -- Quem gerou. `lead_won` só nasce do gatilho abaixo — a rota grava `manual`
+  -- fixo, nunca o que vem do corpo.
+  origin text not null default 'manual' check (origin in ('manual', 'lead_won')),
+
+  -- Venda não se apaga: estorna.
+  status text not null default 'active'
+    check (status in ('active', 'reversed')),
+  reversed_at timestamptz,
+
+  created_by_user_id uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create unique index if not exists operation_sales_um_por_lead
+  on public.operation_sales (organization_id, lead_id)
+  where lead_id is not null;
+create index if not exists operation_sales_org_dia_idx
+  on public.operation_sales (organization_id, sold_on desc);
+create index if not exists operation_sales_org_contato_idx
+  on public.operation_sales (organization_id, contact_id)
+  where contact_id is not null;
+
+-- ─── o gasto em anúncio, por dia ─────────────────────────────────────────────
+create table if not exists public.ad_spend_daily (
+  id uuid primary key default gen_random_uuid(),
+  organization_id uuid not null references public.organizations(id) on delete cascade,
+  spend_date date not null,
+  -- Só Meta na v1. `text` + CHECK, não enum: Google entra estendendo o CHECK.
+  platform text not null default 'meta'
+    check (platform in ('meta')),
+  amount_cents bigint not null check (amount_cents >= 0),
+  currency text not null default 'BRL' check (currency ~ '^[A-Z]{3}$'),
+  -- `meta_sync` fica reservado para a sincronização automática. No dia em que
+  -- houver os dois, o painel usa o sincronizado.
+  source text not null default 'manual' check (source in ('manual', 'meta_sync')),
+  created_by_user_id uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (organization_id, spend_date, platform, source)
+);
+
+-- ─── RLS: membro lê; venda escreve `agent`, gasto escreve `manager` ──────────
+alter table public.operation_sales enable row level security;
+drop policy if exists tenant_isolation_operation_sales_all on public.operation_sales;
+create policy tenant_isolation_operation_sales_all on public.operation_sales
+  for all
+  using (organization_id in (select public.fn_user_org_ids()) or public.fn_is_platform_admin())
+  with check (
+    public.fn_is_platform_admin()
+    or (organization_id in (select public.fn_user_org_ids())
+        and public.fn_role_at_least(organization_id, 'agent'))
+  );
+revoke all on public.operation_sales from anon;
+
+alter table public.ad_spend_daily enable row level security;
+drop policy if exists tenant_isolation_ad_spend_daily_all on public.ad_spend_daily;
+create policy tenant_isolation_ad_spend_daily_all on public.ad_spend_daily
+  for all
+  using (organization_id in (select public.fn_user_org_ids()) or public.fn_is_platform_admin())
+  with check (
+    public.fn_is_platform_admin()
+    or (organization_id in (select public.fn_user_org_ids())
+        and public.fn_role_at_least(organization_id, 'manager'))
+  );
+revoke all on public.ad_spend_daily from anon;
+
+-- ─── a venda do lead ganho ───────────────────────────────────────────────────
+-- Gatilho que só escreve no banco (nunca HTTP). Uma linha por lead, garantida
+-- pelo índice único parcial: ganhar de novo REATIVA a mesma linha; sair de
+-- Ganho (ou zerar o valor) a estorna. Sem valor, não há venda.
+create or replace function public.fn_sincronizar_venda_do_lead()
+returns trigger
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_tz text;
+begin
+  if new.status = 'won' and coalesce(new.value_cents, 0) > 0 then
+    select o.timezone into v_tz from public.organizations o where o.id = new.organization_id;
+    -- Fuso inválido não pode travar o arrasto do lead: cai no padrão.
+    if v_tz is null or not exists (select 1 from pg_timezone_names z where z.name = v_tz) then
+      v_tz := 'America/Sao_Paulo';
+    end if;
+
+    insert into public.operation_sales
+      (organization_id, sold_on, quantity, amount_cents, currency, contact_id, lead_id, origin, status)
+    values
+      (new.organization_id,
+       (coalesce(new.closed_at, now()) at time zone v_tz)::date,
+       1, new.value_cents, coalesce(new.currency, 'BRL'), new.contact_id, new.id, 'lead_won', 'active')
+    on conflict (organization_id, lead_id) where lead_id is not null
+    do update set
+      sold_on      = excluded.sold_on,
+      amount_cents = excluded.amount_cents,
+      currency     = excluded.currency,
+      contact_id   = excluded.contact_id,
+      status       = 'active',
+      reversed_at  = null,
+      updated_at   = now();
+  elsif tg_op = 'UPDATE' then
+    update public.operation_sales
+       set status = 'reversed', reversed_at = now(), updated_at = now()
+     where organization_id = new.organization_id
+       and lead_id = new.id
+       and status = 'active';
+  end if;
+  return new;
+end $$;
+
+-- Função de GATILHO: ninguém a chama direto. `authenticated` também sai — o
+-- default ACL do baseline lhe daria EXECUTE, e o gatilho dispara sem precisar dele.
+revoke execute on function public.fn_sincronizar_venda_do_lead() from public, anon, authenticated;
+
+drop trigger if exists trg_venda_do_lead_ganho on public.crm_leads;
+create trigger trg_venda_do_lead_ganho
+  after insert or update of status, value_cents, currency, closed_at, contact_id on public.crm_leads
+  for each row execute function public.fn_sincronizar_venda_do_lead();
+
+-- ─── o agregado do painel ────────────────────────────────────────────────────
+-- Agrega NO BANCO pelo mesmo motivo de `fn_relatorio_financeiro`: o PostgREST
+-- corta em 1000 linhas sem avisar. Invoker: a RLS de cada tabela vale.
+create or replace function public.fn_painel_operacao(
+  p_org uuid,
+  p_de date,
+  p_ate date
+)
+returns jsonb
+language sql
+stable
+set search_path = public
+as $$
+  with fuso as (
+    select coalesce((
+      select o.timezone from public.organizations o
+       where o.id = p_org
+         and exists (select 1 from pg_timezone_names z where z.name = o.timezone)
+    ), 'America/Sao_Paulo') as tz
+  ),
+  dias as (
+    select d::date as dia from generate_series(p_de, p_ate, interval '1 day') d
+  ),
+  vendas as (
+    select v.sold_on as dia,
+           v.quantity::bigint as vendas,
+           v.amount_cents,
+           case when v.origin = 'lead_won' then 'funil' else 'registradas' end as origem
+      from public.operation_sales v
+     where v.organization_id = p_org
+       and v.status = 'active'
+       and v.sold_on between p_de and p_ate
+    union all
+    select (s.finalized_at at time zone f.tz)::date,
+           1::bigint,
+           s.total_cents,
+           'comandas'
+      from public.sales s
+     cross join fuso f
+     where s.organization_id = p_org
+       and s.status = 'finalized'
+       and s.finalized_at is not null
+       and s.reversed_at is null
+       and (s.finalized_at at time zone f.tz)::date between p_de and p_ate
+  ),
+  gastos as (
+    select g.spend_date as dia,
+           case when bool_or(g.source = 'meta_sync')
+                then sum(g.amount_cents) filter (where g.source = 'meta_sync')
+                else sum(g.amount_cents) filter (where g.source = 'manual')
+           end as gasto_cents
+      from public.ad_spend_daily g
+     where g.organization_id = p_org
+       and g.spend_date between p_de and p_ate
+     group by g.spend_date
+  ),
+  serie as (
+    select d.dia,
+           coalesce(v.vendas, 0)::bigint            as vendas,
+           coalesce(v.faturamento_cents, 0)::bigint as faturamento_cents,
+           coalesce(g.gasto_cents, 0)::bigint       as gasto_cents
+      from dias d
+      left join (
+        select dia, sum(vendas) as vendas, sum(amount_cents) as faturamento_cents
+          from vendas group by dia
+      ) v on v.dia = d.dia
+      left join gastos g on g.dia = d.dia
+  ),
+  tot as (
+    select coalesce(sum(vendas), 0)::bigint            as vendas,
+           coalesce(sum(faturamento_cents), 0)::bigint as fat,
+           coalesce(sum(gasto_cents), 0)::bigint       as gasto
+      from serie
+  )
+  select jsonb_build_object(
+    'de', p_de,
+    'ate', p_ate,
+    'fuso', (select tz from fuso),
+    'faturamento_cents', t.fat,
+    'vendas', t.vendas,
+    'gasto_cents', t.gasto,
+    'ticket_medio_cents', case when t.vendas > 0 then t.fat / t.vendas else 0 end,
+    'roas', case when t.gasto > 0 then round(t.fat::numeric / t.gasto, 2) end,
+    'custo_por_venda_cents', case when t.vendas > 0 then t.gasto / t.vendas end,
+    'por_origem', (
+      select jsonb_object_agg(o.origem, jsonb_build_object(
+               'vendas', coalesce((select sum(x.vendas) from vendas x where x.origem = o.origem), 0),
+               'faturamento_cents', coalesce((select sum(x.amount_cents) from vendas x where x.origem = o.origem), 0)))
+        from (values ('registradas'), ('funil'), ('comandas')) o(origem)
+    ),
+    'por_dia', (
+      select coalesce(jsonb_agg(jsonb_build_object(
+               'dia', s.dia,
+               'vendas', s.vendas,
+               'faturamento_cents', s.faturamento_cents,
+               'gasto_cents', s.gasto_cents) order by s.dia), '[]'::jsonb)
+        from serie s
+    )
+  )
+  from tot t;
+$$;
+
+revoke execute on function public.fn_painel_operacao(uuid, date, date) from public, anon;
+grant  execute on function public.fn_painel_operacao(uuid, date, date) to authenticated, service_role;
+
+comment on table public.operation_sales is
+  'Venda registrada (manual ou do lead ganho). Estorna por status, nunca apaga. Uma por lead.';
+comment on table public.ad_spend_daily is
+  'Gasto em anúncio por dia. Um valor por (dia, plataforma, origem); sincronizado vence manual.';
+
+
 -- ---- VARREDURA anon: função nova nasce exposta em quem ATUALIZA (migration 0116) ----
 --
 -- ⚠️ DE PROPÓSITO, NENHUMA FUNÇÃO É CRIADA DEPOIS DESTE BLOCO. Apêndice que cria
@@ -36311,303 +36866,6 @@ begin
   end if;
 end $$;
 
--- ---- compartilhamento de fluxos, versionamento e backups (migration 0383) ----
-alter table public.followup_flow_versions
-  add column if not exists label text,
-  add column if not exists kind text not null default 'publish';
-
-alter table public.followup_flow_versions
-  drop constraint if exists followup_flow_versions_kind_check;
-
-alter table public.followup_flow_versions
-  add constraint followup_flow_versions_kind_check
-  check (kind in ('publish', 'manual_backup', 'pre_restore'));
-
-create index if not exists idx_followup_versions_pointer_created
-  on public.followup_flow_versions (pointer_id, created_at desc);
-
-create table if not exists public.followup_flow_shares (
-  id uuid primary key default gen_random_uuid(),
-  organization_id uuid not null references public.organizations(id) on delete cascade,
-  pointer_id uuid not null references public.followup_flow_pointers(id) on delete cascade,
-  token text not null unique,
-  status text not null default 'active',
-  snapshot jsonb not null,
-  created_by uuid references auth.users(id) on delete set null,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now(),
-  revoked_at timestamptz,
-  constraint followup_flow_shares_status_check check (status in ('active', 'revoked'))
-);
-
-alter table public.followup_flow_shares enable row level security;
-
-drop policy if exists tenant_isolation_followup_flow_shares_all on public.followup_flow_shares;
-create policy tenant_isolation_followup_flow_shares_all on public.followup_flow_shares
-  for all using (
-    organization_id in (select fn_user_org_ids())
-    and public.fn_role_at_least(organization_id, 'agent')
-  )
-  with check (
-    organization_id in (select fn_user_org_ids())
-    and public.fn_role_at_least(organization_id, 'agent')
-  );
-
-create index if not exists idx_followup_flow_shares_token
-  on public.followup_flow_shares (token) where status = 'active';
-
-create index if not exists idx_followup_flow_shares_pointer
-  on public.followup_flow_shares (pointer_id);
-
--- 0384: Ajusta o default de ai_routers.config para remover 'claude-haiku-4-5' hardcoded
-alter table public.ai_routers
-  alter column config set default jsonb_build_object(
-    'sticky', true,
-    'min_confidence', 0.6
-  );
-
-update public.ai_routers
-   set config = (config - 'classifier_model')
- where config->>'classifier_model' = 'claude-haiku-4-5'
-   and (config->>'classifier_provider' is null or config->>'classifier_provider' = '');
-
--- 0385: Suporte a estado de sessão do Node IA no enrollment
-alter table public.followup_enrollments
-  add column if not exists ai_node_session jsonb;
-
-comment on column public.followup_enrollments.ai_node_session is
-  'Estado transiente de execução do nó IA (turn_count, last_inbound_at, agent_id, etc.). Fonte da verdade canônica do nó no enrollment.';
--- 0387/0388: Follow-up flows: suporte a arquivamento e exclusão permanente transacional
-alter table public.followup_flow_pointers
-  add column if not exists archived_at timestamptz;
-
-create index if not exists idx_followup_flow_pointers_archived
-  on public.followup_flow_pointers (organization_id, archived_at);
-
-create or replace function public.fn_followup_flow_deletion_summary(
-  p_org uuid,
-  p_pointer uuid
-)
-returns jsonb
-language plpgsql
-security definer
-set search_path = public, pg_temp
-as $$
-declare
-  v_name text;
-  v_versions int := 0;
-  v_active int := 0;
-  v_completed int := 0;
-  v_cancelled int := 0;
-  v_other int := 0;
-  v_events int := 0;
-  v_agents int := 0;
-  v_running_jobs int := 0;
-  v_pending_jobs int := 0;
-begin
-  select name into v_name
-  from public.followup_flow_pointers
-  where id = p_pointer and organization_id = p_org;
-
-  if not found then
-    return null;
-  end if;
-
-  select count(*) into v_versions
-  from public.followup_flow_versions
-  where organization_id = p_org and pointer_id = p_pointer;
-
-  select
-    count(*) filter (where status in ('active', 'waiting_reply', 'dormente', 'paused_handoff', 'paused_manual')),
-    count(*) filter (where status = 'completed'),
-    count(*) filter (where status = 'cancelled'),
-    count(*) filter (where status not in ('active', 'waiting_reply', 'dormente', 'paused_handoff', 'paused_manual', 'completed', 'cancelled'))
-  into v_active, v_completed, v_cancelled, v_other
-  from public.followup_enrollments
-  where organization_id = p_org and pointer_id = p_pointer;
-
-  select count(*) into v_events
-  from public.followup_enrollment_events fee
-  join public.followup_enrollments fe on fe.id = fee.enrollment_id
-  where fe.organization_id = p_org and fe.pointer_id = p_pointer;
-
-  select count(*) into v_agents
-  from public.ai_agents a
-  join public.ai_agent_versions v on v.id = a.published_version_id
-  where a.organization_id = p_org
-    and a.archived_at is null
-    and (
-      v.followup->'flow_pointer_ids' @> to_jsonb(p_pointer::text)
-      or v.followup->>'flow_pointer_id' = p_pointer::text
-    );
-
-  select
-    count(*) filter (where status = 'running' or (locked_at is not null and locked_at > now() - interval '5 minutes')),
-    count(*) filter (where status = 'pending')
-  into v_running_jobs, v_pending_jobs
-  from public.job_queue
-  where organization_id = p_org
-    and (
-      payload->>'pointer_id' = p_pointer::text
-      or payload->>'enrollment_id' in (
-        select id::text from public.followup_enrollments where pointer_id = p_pointer and organization_id = p_org
-      )
-    );
-
-  return jsonb_build_object(
-    'flow_name', v_name,
-    'versions_count', v_versions,
-    'active_enrollments', v_active,
-    'completed_enrollments', v_completed,
-    'cancelled_enrollments', v_cancelled,
-    'other_historical_enrollments', v_other,
-    'total_events_count', v_events,
-    'agent_references', v_agents,
-    'running_jobs', v_running_jobs,
-    'pending_jobs', v_pending_jobs,
-    'can_delete', (v_active = 0 and v_agents = 0 and v_running_jobs = 0)
-  );
-end;
-$$;
-
-revoke all on function public.fn_followup_flow_deletion_summary(uuid, uuid) from public, anon, authenticated;
-grant execute on function public.fn_followup_flow_deletion_summary(uuid, uuid) to service_role;
-
-drop function if exists public.fn_delete_followup_flow(uuid, uuid);
-
-create or replace function public.fn_delete_followup_flow(
-  p_org uuid,
-  p_pointer uuid,
-  p_purge_history boolean default false
-)
-returns boolean
-language plpgsql
-security definer
-set search_path = public, pg_temp
-as $$
-declare
-  v_active_count int;
-  v_running_jobs int;
-begin
-  if not exists (
-    select 1
-    from public.followup_flow_pointers
-    where id = p_pointer and organization_id = p_org
-  ) then
-    raise exception 'pointer_not_found' using errcode = 'P0002';
-  end if;
-
-  select count(*) into v_active_count
-  from public.followup_enrollments
-  where organization_id = p_org
-    and pointer_id = p_pointer
-    and status in ('active', 'waiting_reply', 'dormente', 'paused_handoff', 'paused_manual');
-
-  if v_active_count > 0 then
-    raise exception 'flow_has_active_enrollments' using errcode = 'P0001';
-  end if;
-
-  if exists (
-    select 1
-    from public.ai_agents a
-    join public.ai_agent_versions v on v.id = a.published_version_id
-    where a.organization_id = p_org
-      and a.archived_at is null
-      and (
-        v.followup->'flow_pointer_ids' @> to_jsonb(p_pointer::text)
-        or v.followup->>'flow_pointer_id' = p_pointer::text
-      )
-  ) then
-    raise exception 'flow_in_use_by_agent' using errcode = 'P0003';
-  end if;
-
-  if not p_purge_history then
-    if exists (
-      select 1
-      from public.followup_enrollments
-      where organization_id = p_org and pointer_id = p_pointer
-    ) then
-      raise exception 'flow_has_history' using errcode = 'P0004';
-    end if;
-  else
-    select count(*) into v_running_jobs
-    from public.job_queue
-    where organization_id = p_org
-      and (status = 'running' or (locked_at is not null and locked_at > now() - interval '5 minutes'))
-      and (
-        payload->>'pointer_id' = p_pointer::text
-        or payload->>'enrollment_id' in (
-          select id::text from public.followup_enrollments where pointer_id = p_pointer and organization_id = p_org
-        )
-      );
-
-    if v_running_jobs > 0 then
-      raise exception 'flow_jobs_in_progress' using errcode = 'P0005';
-    end if;
-
-    update public.job_queue
-    set status = 'dead',
-        last_error = 'flow_permanently_deleted'
-    where organization_id = p_org
-      and status = 'pending'
-      and (
-        payload->>'pointer_id' = p_pointer::text
-        or payload->>'enrollment_id' in (
-          select id::text from public.followup_enrollments where pointer_id = p_pointer and organization_id = p_org
-        )
-      );
-  end if;
-
-  update public.ai_agent_versions
-  set followup = jsonb_set(
-    followup,
-    '{flow_pointer_ids}',
-    (
-      select coalesce(jsonb_agg(elem), '[]'::jsonb)
-      from jsonb_array_elements_text(followup->'flow_pointer_ids') as elem
-      where elem <> p_pointer::text
-    )
-  )
-  where organization_id = p_org
-    and status = 'draft'
-    and (
-      followup->'flow_pointer_ids' @> to_jsonb(p_pointer::text)
-      or followup->>'flow_pointer_id' = p_pointer::text
-    );
-
-  update public.appointment_recovery_receipts
-  set pointer_id = null,
-      enrollment_id = null
-  where organization_id = p_org
-    and (
-      pointer_id = p_pointer
-      or enrollment_id in (
-        select id from public.followup_enrollments where pointer_id = p_pointer and organization_id = p_org
-      )
-    );
-
-  update public.followup_flow_pointers
-  set active_version_id = null
-  where id = p_pointer and organization_id = p_org;
-
-  delete from public.followup_enrollments
-  where pointer_id = p_pointer and organization_id = p_org;
-
-  delete from public.followup_flow_versions
-  where pointer_id = p_pointer and organization_id = p_org;
-
-  delete from public.followup_flow_shares
-  where pointer_id = p_pointer;
-
-  delete from public.followup_flow_pointers
-  where id = p_pointer and organization_id = p_org;
-
-  return true;
-end;
-$$;
-
-revoke all on function public.fn_delete_followup_flow(uuid, uuid, boolean) from public, anon, authenticated;
-grant execute on function public.fn_delete_followup_flow(uuid, uuid, boolean) to service_role;
 
 
 

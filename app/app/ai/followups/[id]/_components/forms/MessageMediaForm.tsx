@@ -482,7 +482,8 @@ export function MessageMediaForm({ type, config, onChange, fieldErrors }: Props)
           </div>
         )}
 
-        {error && <p className="text-xs text-error-fg mt-1.5">{error}</p>}
+        {/* Sem mídia, o erro já aparece logo abaixo da área de upload. */}
+        {hasMedia && error && <p className="text-xs text-error-fg mt-1.5">{error}</p>}
       </div>
 
       {type !== "message_audio" && (

@@ -27,6 +27,7 @@ import { rotuloDoContato } from "@/lib/contacts/rotulo-do-contato";
 import { origemDoContato } from "@/lib/leads/origem-do-contato";
 import { phoneForDisplay } from "@/lib/channels/phone-variants";
 import { DialButton } from "@/components/voice/DialButton";
+import { RegistrarVendaDialog } from "@/components/operacao/RegistrarVendaDialog";
 
 interface Props {
   contactId: string;
@@ -61,6 +62,7 @@ export function ContactDetailClient({ contactId }: Props) {
   const pipelineQuery = useDefaultPipeline(Boolean(activeOrg));
   const [editOpen, setEditOpen] = useState(false);
   const [anonOpen, setAnonOpen] = useState(false);
+  const [vendaOpen, setVendaOpen] = useState(false);
 
   /*
     Pede o nome da campanha SÓ quando há um anúncio e ainda não há nome.
@@ -158,6 +160,11 @@ export function ContactDetailClient({ contactId }: Props) {
         {!contact.is_anonymized && user.support?.access_mode !== "support_readonly" && (
           <div className="flex shrink-0 items-center gap-2">
             <DialButton contactId={contactId} hasPhone={!!contact.phone_number} />
+            {activeOrg && ROLE_RANK[activeOrg.role] >= ROLE_RANK.agent ? (
+              <Button variant="outline" onClick={() => setVendaOpen(true)} className="shrink-0">
+                <span>{t("Registrar venda")}</span>
+              </Button>
+            ) : null}
             <Button variant="outline" onClick={() => setEditOpen(true)} className="shrink-0">
               <PencilSimple size={16} weight="bold" aria-hidden />
               <span>{t("Editar")}</span>
@@ -313,6 +320,7 @@ export function ContactDetailClient({ contactId }: Props) {
         )}
       </Tabs>
 
+      <RegistrarVendaDialog open={vendaOpen} onOpenChange={setVendaOpen} contactId={contactId} />
       <EditContactDialog
         contact={contact}
         open={editOpen}

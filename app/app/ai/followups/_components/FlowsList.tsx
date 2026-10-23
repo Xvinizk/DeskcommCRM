@@ -207,14 +207,14 @@ export function FlowsList({ initialData, canWrite }: Props) {
                           {flow.name}
                         </h3>
                         <div className="flex items-center gap-1.5">
-                          <span className="rounded bg-surface-muted px-1.5 py-0.5 text-xs text-text-muted">
+                          <span className="rounded-sm bg-surface-muted px-1.5 py-0.5 text-xs text-text-muted">
                             {t("Arquivado")}
                           </span>
                           <FlowStatusBadge status={flow.status} />
                         </div>
                       </div>
 
-                      <div className="rounded border border-dashed border-border p-2 text-xs text-text-muted">
+                      <div className="rounded-md border border-dashed border-border p-2 text-xs text-text-muted">
                         <p suppressHydrationWarning>
                           {t("Arquivado em")}{" "}
                           <strong suppressHydrationWarning>{formatDate(flow.archived_at, tagDoIdioma)}</strong>
@@ -295,7 +295,7 @@ export function FlowsList({ initialData, canWrite }: Props) {
                             <DropdownMenuTrigger asChild>
                               <Button variant="ghost" size="sm" className="h-8 w-8 p-0">
                                 <DotsThree size={16} weight="bold" />
-                                <span className="sr-only">Opções</span>
+                                <span className="sr-only">{t("Opções")}</span>
                               </Button>
                             </DropdownMenuTrigger>
                             <DropdownMenuContent align="end" className="w-48">

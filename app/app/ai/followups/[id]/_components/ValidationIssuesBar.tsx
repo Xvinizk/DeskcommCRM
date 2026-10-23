@@ -93,7 +93,7 @@ export function ValidationIssuesBar({
                 onClick={() => onSelectIssue(issue)}
                 className={cn(
                   "group flex items-center gap-2 rounded-lg border border-error/30 bg-surface/90 px-3 py-1.5 text-left text-xs shadow-xs",
-                  "transition-all hover:border-error hover:bg-surface hover:shadow-md focus:outline-none focus:ring-2 focus:ring-error",
+                  "transition-all hover:border-error hover:bg-surface hover:shadow-md focus:outline-hidden focus:ring-2 focus:ring-error",
                 )}
                 data-testid={`validation-issue-item-${issue.node_id ?? "global"}`}
               >

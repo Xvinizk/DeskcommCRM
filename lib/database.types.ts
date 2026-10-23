@@ -509,6 +509,102 @@ export type Database = {
           },
         ]
       }
+      ad_spend_daily: {
+        Row: {
+          amount_cents: number
+          created_at: string
+          created_by_user_id: string | null
+          currency: string
+          id: string
+          organization_id: string
+          platform: string
+          source: string
+          spend_date: string
+          updated_at: string
+        }
+        Insert: {
+          amount_cents: number
+          created_at?: string
+          created_by_user_id?: string | null
+          currency?: string
+          id?: string
+          organization_id: string
+          platform?: string
+          source?: string
+          spend_date: string
+          updated_at?: string
+        }
+        Update: {
+          amount_cents?: number
+          created_at?: string
+          created_by_user_id?: string | null
+          currency?: string
+          id?: string
+          organization_id?: string
+          platform?: string
+          source?: string
+          spend_date?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      operation_sales: {
+        Row: {
+          amount_cents: number
+          contact_id: string | null
+          created_at: string
+          created_by_user_id: string | null
+          currency: string
+          description: string | null
+          id: string
+          lead_id: string | null
+          organization_id: string
+          origin: string
+          payment_method_id: string | null
+          quantity: number
+          reversed_at: string | null
+          sold_on: string
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          amount_cents: number
+          contact_id?: string | null
+          created_at?: string
+          created_by_user_id?: string | null
+          currency?: string
+          description?: string | null
+          id?: string
+          lead_id?: string | null
+          organization_id: string
+          origin?: string
+          payment_method_id?: string | null
+          quantity?: number
+          reversed_at?: string | null
+          sold_on: string
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          amount_cents?: number
+          contact_id?: string | null
+          created_at?: string
+          created_by_user_id?: string | null
+          currency?: string
+          description?: string | null
+          id?: string
+          lead_id?: string | null
+          organization_id?: string
+          origin?: string
+          payment_method_id?: string | null
+          quantity?: number
+          reversed_at?: string | null
+          sold_on?: string
+          status?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       financial_entries: {
         Row: {
           account_id: string
