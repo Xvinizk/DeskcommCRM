@@ -125,7 +125,11 @@ class Trilha {
   ): this {
     this.relogio += depoisDe;
     const quando = this.relogio;
-    const idempotency_key = `${node_id}:${this.dados}`;
+    // O envio concluído é gravado por `completeTurnForEnrollment`, que sufixa o
+    // tipo do evento (`${nó}:${passos}:${evento}`, turn-bridge.ts) para não
+    // colidir com o `turn_enqueued` do mesmo passo. O tick do motor não sufixa.
+    const idempotency_key =
+      origem === "envio" ? `${node_id}:${this.dados}:${event_type}` : `${node_id}:${this.dados}`;
     this.dados += 1;
     this.montadores.push(() => ({
       origem,
