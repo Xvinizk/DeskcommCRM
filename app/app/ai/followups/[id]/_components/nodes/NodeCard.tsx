@@ -90,7 +90,7 @@ export function NodeCard({
       title={
         hasError
           ? errors!
-              .map((e) => (typeof e === "string" ? e : (e as any)?.message ?? ""))
+              .map((e) => (typeof e === "string" ? e : (e as { message?: string } | undefined)?.message ?? ""))
               .filter(Boolean)
               .join("; ")
           : undefined
@@ -113,7 +113,7 @@ export function NodeCard({
             </p>
             {hasError && (
               <span
-                className="inline-flex shrink-0 items-center gap-0.5 rounded bg-error/15 px-1.5 py-0.5 text-[10px] font-semibold text-error"
+                className="inline-flex shrink-0 items-center gap-0.5 rounded-sm bg-error/15 px-1.5 py-0.5 text-[10px] font-semibold text-error"
                 data-testid={`node-badge-error-${id}`}
               >
                 <Warning size={10} weight="fill" />
@@ -133,7 +133,7 @@ export function NodeCard({
         >
           <Warning size={12} weight="fill" className="mt-0.5 shrink-0 text-error" />
           <span className="line-clamp-3">
-            {typeof errors![0] === "string" ? errors![0] : (errors![0] as any)?.message}
+            {typeof errors![0] === "string" ? errors![0] : (errors![0] as { message?: string } | undefined)?.message}
           </span>
         </div>
       )}

@@ -35,6 +35,21 @@ const CONTACT_Y = '33333333-3333-4000-8000-000000000003';
 
 describe('Queue Lane Serialization (contact_id lane exclusion)', () => {
   beforeAll(async () => {
+    // A organização e os contatos precisam EXISTIR: `job_queue` tem FK para os
+    // dois, e sem esta semente todo enqueue reprova por chave estrangeira antes
+    // de a lane ser medida.
+    await pool.query(
+      `insert into public.organizations (id, slug, legal_name, display_name)
+         values ($1, 'queue-lane-inv', 'Queue Lane Invariant', 'Queue Lane')
+         on conflict (id) do nothing`,
+      [ORG_ID],
+    );
+    await pool.query(
+      `insert into public.contacts (id, organization_id, name)
+         values ($2, $1, 'Lane X'), ($3, $1, 'Lane Y')
+         on conflict (id) do nothing`,
+      [ORG_ID, CONTACT_X, CONTACT_Y],
+    );
     // Garante tabela limpa para os contatos de teste
     await pool.query(
       `DELETE FROM job_queue WHERE organization_id = $1 OR contact_id IN ($2, $3)`,

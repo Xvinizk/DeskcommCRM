@@ -1,6 +1,9 @@
 import type { z } from "zod";
 import type { PublishValidationError } from "./validate-publish";
 
+/** Nó ou aresta como veio do rascunho — só os campos que a mensagem de erro lê. */
+type ItemCru = { id?: string; type?: string; source?: string };
+
 export interface FlowValidationIssue {
   node_id: string | null;
   edge_id?: string | null;
@@ -21,8 +24,8 @@ export function zodErrorToFlowIssues(
 ): FlowValidationIssue[] {
   const rawGraph =
     rawDraft && typeof rawDraft === "object" && "draft_graph" in rawDraft
-      ? (rawDraft as { draft_graph?: { nodes?: any[]; edges?: any[] } }).draft_graph
-      : (rawDraft as { nodes?: any[]; edges?: any[] } | undefined);
+      ? (rawDraft as { draft_graph?: { nodes?: ItemCru[]; edges?: ItemCru[] } }).draft_graph
+      : (rawDraft as { nodes?: ItemCru[]; edges?: ItemCru[] } | undefined);
 
   const rawNodes = Array.isArray(rawGraph?.nodes) ? rawGraph.nodes : [];
   const rawEdges = Array.isArray(rawGraph?.edges) ? rawGraph.edges : [];

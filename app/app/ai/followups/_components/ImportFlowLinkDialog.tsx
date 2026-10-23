@@ -49,6 +49,14 @@ interface Props {
   onImportSuccess?: (flowId: string) => void;
 }
 
+/** O que esta tela lê da resposta e do erro — e nada além disso. */
+type ErroDaApi = { status?: number; code?: string; message?: string };
+type RespostaDaApi<T> = {
+  data?: T;
+  error?: { code?: string; message?: string };
+  response?: { status?: number };
+};
+
 export function ImportFlowLinkDialog({ open, onOpenChange, onImportSuccess }: Props) {
   const t = useT();
   const router = useRouter();
@@ -112,7 +120,7 @@ export function ImportFlowLinkDialog({ open, onOpenChange, onImportSuccess }: Pr
     debounceTimerRef.current = setTimeout(async () => {
       setIsFetchingPreview(true);
       try {
-        const res = await apiClient.get<any>(
+        const res = await apiClient.get<RespostaDaApi<SharedFlowMetadata>>(
           `/api/v1/ai/followup-flows/shared/${tokenExtracted}`,
         );
 
@@ -129,7 +137,8 @@ export function ImportFlowLinkDialog({ open, onOpenChange, onImportSuccess }: Pr
         const data = (res?.data ?? res) as SharedFlowMetadata;
         setPreview(data);
         setPreviewError(null);
-      } catch (err: any) {
+      } catch (caught: unknown) {
+        const err = caught as ErroDaApi | undefined;
         if (err?.status === 404 || err?.code === "not_found") {
           setPreviewError(t("Esse fluxo compartilhado não está mais disponível ou expirou."));
         } else {
@@ -155,7 +164,7 @@ export function ImportFlowLinkDialog({ open, onOpenChange, onImportSuccess }: Pr
     setImportError(null);
 
     try {
-      const res = await apiClient.post<any>(
+      const res = await apiClient.post<RespostaDaApi<{ flow_id?: string }> & { flow_id?: string }>(
         `/api/v1/ai/followup-flows/shared/${token}/import`,
         {},
       );
@@ -179,7 +188,8 @@ export function ImportFlowLinkDialog({ open, onOpenChange, onImportSuccess }: Pr
       } else {
         router.push(`/app/ai/followups/${flowId}`);
       }
-    } catch (err: any) {
+    } catch (caught: unknown) {
+      const err = caught as ErroDaApi | undefined;
       setImportError(err?.message || t("Falha de conexão ao importar o fluxo compartilhado."));
     } finally {
       setIsImporting(false);
@@ -218,7 +228,7 @@ export function ImportFlowLinkDialog({ open, onOpenChange, onImportSuccess }: Pr
               <Input
                 id="shared-flow-input"
                 data-testid="input-shared-flow-link"
-                placeholder="https://.../fluxos/compartilhado/... ou TOKEN"
+                placeholder={t("https://.../fluxos/compartilhado/... ou TOKEN")}
                 value={inputUrl}
                 onChange={(e) => setInputUrl(e.target.value)}
                 disabled={isImporting}
