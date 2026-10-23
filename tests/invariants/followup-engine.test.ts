@@ -519,7 +519,7 @@ describe("runFollowupTick — backoff progride e esgota em 'dead' + inbox item",
       versionId,
       contactId,
       currentNodeId: "t1",
-      stepsTaken: 81,
+      stepsTaken: FLOW_MAX_RUNTIME_STEPS + 1, // o teto subiu de 80 para 200 (b734323ed); número fixo envelhece
     });
 
     const jobs: FollowupJobRequest[] = [];

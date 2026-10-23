@@ -540,9 +540,13 @@ describe("FLOW_MAX_RUNTIME_STEPS — Correção de Inconsistência e Execução 
     expect(row.next_eval_at).toBeNull();
   });
 
-  it("9. OFERTA R$24,90 — Execução do caminho mais longo no engine real", async () => {
+  // O grafo é um DUMP do fluxo real de produção e nunca foi versionado — é
+  // conteúdo do cliente, e o fork é público. Sem o arquivo local, o caso não tem
+  // o que medir: pula em vez de reprovar a suíte inteira por falta de dado.
+  const ofertaGraphPath = path.join(process.cwd(), "oferta-graph.json");
+  it.skipIf(!fs.existsSync(ofertaGraphPath))("9. OFERTA R$24,90 — Execução do caminho mais longo no engine real", async () => {
     // Carrega o grafo real salvo do banco
-    const raw = fs.readFileSync(path.join(process.cwd(), "oferta-graph.json"), "utf8");
+    const raw = fs.readFileSync(ofertaGraphPath, "utf8");
     const graph: FlowGraph = JSON.parse(raw);
 
     const nodeCount = graph.nodes.length;
